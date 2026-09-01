@@ -81,16 +81,41 @@
 
 ## Traceability
 
-Roadmap traceability is populated during roadmap creation.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| MAIL-01 | Phase 1 | Pending |
+| MAIL-02 | Phase 1 | Pending |
+| MAIL-03 | Phase 1 | Pending |
+| MAIL-04 | Phase 1 | Pending |
+| MAIL-05 | Phase 1 | Pending |
+| GEO-01 | Phase 2 | Pending |
+| GEO-02 | Phase 2 | Pending |
+| GEO-03 | Phase 2 | Pending |
+| GEO-04 | Phase 2 | Pending |
+| GEO-05 | Phase 2 | Pending |
+| DB-01 | Phase 3 | Pending |
+| DB-02 | Phase 3 | Pending |
+| DB-03 | Phase 3 | Pending |
+| DB-04 | Phase 3 | Pending |
+| DB-05 | Phase 3 | Pending |
+| PUB-01 | Phase 4 | Pending |
+| PUB-02 | Phase 4 | Pending |
+| PUB-03 | Phase 4 | Pending |
+| PUB-04 | Phase 4 | Pending |
+| PUB-05 | Phase 4 | Pending |
+| EVID-01 | Phase 4 | Pending |
+| EVID-02 | Phase 4 | Pending |
+| CLN-01 | Phase 5 | Pending |
+| CLN-02 | Phase 5 | Pending |
+| CLN-03 | Phase 5 | Pending |
+| CLN-04 | Phase 5 | Pending |
+| CLN-05 | Phase 5 | Pending |
 
 **Coverage:**
 - v0.1 requirements: 27 total
-- Mapped to phases: 0
-- Unmapped: 27
+- Mapped to phases: 27
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-09-01*
-*Last updated: 2026-09-01 after initial v0.1 definition*
+*Last updated: 2026-09-01 after v0.1 roadmap creation*
