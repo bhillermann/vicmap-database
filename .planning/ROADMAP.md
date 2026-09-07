@@ -30,10 +30,18 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 **Plans:** 5 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 01-01-PLAN.md — Prove one safe end-to-end Graph-to-artifact tracer and configuration boundary.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 01-02-PLAN.md — Harden memory-only Graph authentication, mailbox access, and complete metadata pagination.
 - [ ] 01-03-PLAN.md — Enforce exact ready-order recognition and deterministic newest-message selection.
 - [ ] 01-04-PLAN.md — Enforce approved HTTPS redirects, timeouts, byte ceilings, hashing, and atomic finalization.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 01-05-PLAN.md — Compose closed redacted evidence and record one controlled live acquisition.
 
 ### Phase 2: Safe Geospatial Discovery
