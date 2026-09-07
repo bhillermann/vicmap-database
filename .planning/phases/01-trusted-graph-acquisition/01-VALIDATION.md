@@ -1,8 +1,8 @@
 ---
 phase: "01"
 slug: "trusted-graph-acquisition"
-status: draft
-nyquist_compliant: false
+status: ready
+nyquist_compliant: true
 wave_0_complete: false
 created: "2026-09-07"
 ---
@@ -38,10 +38,16 @@ created: "2026-09-07"
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 01-01-01 | 01 | 1 | MAIL-01 | T-01-01 | Memory-only token handling and disclosure-safe failures | unit + adapter | `nix develop path:. -c python -m unittest tests.test_graph tests.test_evidence -v` | ❌ W0 | ⬜ pending |
-| 01-01-02 | 01 | 1 | MAIL-02, MAIL-03 | T-01-02 | Bounded metadata scan and deterministic redacted selection | unit + adapter | `nix develop path:. -c python -m unittest tests.test_graph tests.test_candidates tests.test_evidence -v` | ❌ W0 | ⬜ pending |
-| 01-02-01 | 02 | 2 | MAIL-04 | T-01-03 | Redirect and size checks occur before data is trusted | unit + mocked integration | `nix develop path:. -c python -m unittest tests.test_download -v` | ❌ W0 | ⬜ pending |
-| 01-02-02 | 02 | 2 | MAIL-05 | T-01-04 | Final artifact reports verified byte count and SHA-256 | unit + mocked integration | `nix develop path:. -c python -m unittest tests.test_download tests.test_evidence -v` | ❌ W0 | ⬜ pending |
+| 01-01-01 | 01 | 1 | MAIL-01–MAIL-05 | T-01-01–T-01-05 | Production tracer proves the complete redacted mail-to-artifact path | end-to-end with fakes | `nix develop path:. -c python -m unittest tests.test_graph.PipelineTracerTest -v` | ❌ W0 | ⬜ pending |
+| 01-01-02 | 01 | 1 | MAIL-01–MAIL-05 | T-01-01, T-01-04 | Whole-policy validation and import/runtime-state safety | unit | `nix develop path:. -c python -m unittest tests.test_graph -v` | ❌ W0 | ⬜ pending |
+| 01-02-01 | 02 | 2 | MAIL-01 | T-01-02-01, T-01-02-02 | Memory-only authentication and exact configured mailbox | unit + adapter | `nix develop path:. -c python -m unittest tests.test_graph -v` | ❌ W0 | ⬜ pending |
+| 01-02-02 | 02 | 2 | MAIL-02 | T-01-02-03–T-01-02-05 | Inclusive metadata-only query and complete read-only pagination | unit + adapter | `nix develop path:. -c python -m unittest tests.test_graph -v` | ❌ W0 | ⬜ pending |
+| 01-03-01 | 03 | 2 | MAIL-02 | T-01-03-01, T-01-03-02 | Exact sender/subject/MIME/link/order recognition | unit | `nix develop path:. -c python -m unittest tests.test_candidates -v` | ❌ W0 | ⬜ pending |
+| 01-03-02 | 03 | 2 | MAIL-03 | T-01-03-03, T-01-03-05 | Full-stream newest/tie selection and safe empty failure | unit | `nix develop path:. -c python -m unittest tests.test_candidates -v` | ❌ W0 | ⬜ pending |
+| 01-04-01 | 04 | 2 | MAIL-04 | T-01-04-01–T-01-04-03 | Validate-before-send clean HTTPS redirect boundary | unit + mocked integration | `nix develop path:. -c python -m unittest tests.test_download -v` | ❌ W0 | ⬜ pending |
+| 01-04-02 | 04 | 2 | MAIL-04, MAIL-05 | T-01-04-03–T-01-04-05 | Exact byte ceiling, checksum, cleanup, and atomic publication | unit + mocked integration | `nix develop path:. -c python -m unittest tests.test_download -v` | ❌ W0 | ⬜ pending |
+| 01-05-01 | 05 | 3 | MAIL-01, MAIL-03, MAIL-05 | T-01-05-01 | Closed evidence vocabulary and adversarial disclosure regression | unit | `nix develop path:. -c python -m unittest tests.test_evidence -v` | ❌ W0 | ⬜ pending |
+| 01-05-02 | 05 | 3 | MAIL-01–MAIL-05 | T-01-05-02–T-01-05-06 | Complete orchestration and controlled live provenance proof | full suite + live | `nix develop path:. -c python -m unittest discover -s tests -p 'test_*.py' -v` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -68,11 +74,11 @@ created: "2026-09-07"
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 60s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify and Wave 0 test ownership
+- [x] Sampling continuity: every task has automated verification
+- [x] Wave 0 plans cover all MISSING test references
+- [x] No watch-mode flags
+- [x] Feedback latency target is < 60s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** ready for execution; `wave_0_complete` remains false until the planned tests exist and pass.
