@@ -476,22 +476,18 @@ for chunk in response.iter_content(chunk_size=chunk_size):
 | A14 | Treat tenant-role confirmation and legacy token rotation/removal as explicit operational checkpoints around the code refactor. [ASSUMED] | Runtime State Inventory | These systems live outside source control and could retain broader access or old bearer material after code is corrected. |
 | A15 | Have the operator check OS service registries and reload the direnv/Nix environment after relevant changes. [ASSUMED] | Runtime State Inventory | D-Bus was unavailable during research and local caches may otherwise preserve old runtime state. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Is the Entra/Exchange application permission resource-scoped to the automation mailbox?**
    - What we know: app-only `Mail.Read` permits reading all mailboxes unless the tenant adds a resource scope; Microsoft now recommends Exchange Online RBAC for Applications. [CITED: https://learn.microsoft.com/en-us/graph/permissions-reference] [CITED: https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac]
-   - What's unclear: repository state cannot show the tenant-side role assignment.
-   - Recommendation: make this a live security/UAT checkpoint. It need not block code planning, but the operator should record a safe pass/fail result before declaring MAIL-01 complete. [ASSUMED]
+   - **Disposition — RESOLVED:** treat the tenant-side role assignment as a fail-closed execution-time precondition because repository evidence cannot establish it. Plan 05's controlled live task may run only after the operator confirms read-only application access resource-scoped to `automations@vegetationlink.com.au`; the live record must say `Tenant scope: PASS`. If that confirmation is unavailable or fails, do not start the live acquisition and do not declare MAIL-01 or the phase complete. [ASSUMED]
 
 2. **Does the real S3 response redirect outside the exact locked hostname?**
    - What we know: the locked policy allows only `s3.ap-southeast-2.amazonaws.com`; every other hostname must fail, including bucket-style or accelerator names. [VERIFIED: .planning/phases/01-trusted-graph-acquisition/01-CONTEXT.md:32-36]
-   - What's unclear: the current unexpired Vicmap URL and redirect chain were not accessed during research.
-   - Recommendation: retain fail-closed behavior and use the one real proof run to discover whether the allowlist needs a future explicit user decision. Do not broaden it automatically. [ASSUMED]
+   - **Disposition — RESOLVED:** retain the exact D-13/D-14 fail-closed allowlist and validate the current redirect chain during Plan 05's controlled live proof. Any off-host hop aborts before that request with a closed safe failure, does not try an older candidate, and does not broaden policy. A different host would require a later explicit user decision rather than an execution-time exception. [ASSUMED]
 
 3. **Should explicit `:443` be accepted as equivalent to an omitted port?**
-   - What we know: the decision locks HTTPS plus an exact hostname, but says nothing about an explicit port. [VERIFIED: .planning/phases/01-trusted-graph-acquisition/01-CONTEXT.md:32-36]
-   - What's unclear: whether the real link includes a port (normally it does not). [ASSUMED]
-   - Recommendation: accept only no explicit port or 443, and test both; reject all other ports. [ASSUMED]
+   - **Disposition — RESOLVED:** accept HTTPS URLs on the exact allowlisted hostname when the port is omitted or explicitly `443`; reject every other explicit port before transport. Plan 04 tests both accepted forms and non-443 rejection, and Plan 05 retains the same policy for the controlled live proof. [ASSUMED]
 
 ## Environment Availability
 
