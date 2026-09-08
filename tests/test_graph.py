@@ -281,5 +281,182 @@ class PipelineTracerTest(unittest.TestCase):
         self.assertNotIn(ARTIFACT_URL, repr(events))
 
 
+VALID_TOML = """\
+[mailbox]
+address = "automations@vegetationlink.com.au"
+folder = "Inbox"
+allowed_senders = ["noreply@datashare.maps.vic.gov.au"]
+allowed_order_ids = ["OK0VUZ"]
+lookback_days = 15
+allow_order_id_mismatch = false
+
+[download]
+allowed_hosts = ["s3.ap-southeast-2.amazonaws.com"]
+max_bytes = 10737418240
+connect_timeout_seconds = 10
+read_timeout_seconds = 60
+progress_interval_seconds = 5
+max_redirects = 5
+fingerprint_hex_chars = 16
+output_dir = "artifacts"
+"""
+
+
+class ConfigurationTest(unittest.TestCase):
+    def _write_policy(self, directory: str, text: str = VALID_TOML) -> Path:
+        path = Path(directory) / "policy.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_valid_policy_loads_locked_allowlists_and_defaults(self):
+        import read_mailbox
+
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                config = read_mailbox.load_config(self._write_policy(directory))
+            except read_mailbox.AcquisitionFailure:
+                config = None
+
+            self.assertIsNotNone(
+                config,
+                "the exact reviewable Phase 1 policy must load successfully",
+            )
+            self.assertEqual("automations@vegetationlink.com.au", config.mailbox)
+            self.assertEqual("Inbox", config.folder)
+            self.assertEqual(
+                ("noreply@datashare.maps.vic.gov.au",), config.allowed_senders
+            )
+            self.assertEqual(("OK0VUZ",), config.allowed_order_ids)
+            self.assertEqual(
+                ("s3.ap-southeast-2.amazonaws.com",), config.allowed_hosts
+            )
+            self.assertEqual(15, config.lookback_days)
+            self.assertEqual(10 * 1024**3, config.max_bytes)
+            self.assertEqual(10, config.connect_timeout_seconds)
+            self.assertEqual(60, config.read_timeout_seconds)
+            self.assertEqual(5, config.progress_interval_seconds)
+            self.assertEqual(5, config.max_redirects)
+            self.assertEqual(16, config.fingerprint_hex_chars)
+            self.assertFalse(config.allow_order_id_mismatch)
+            self.assertEqual(Path(directory) / "artifacts", config.output_dir)
+
+    def test_invalid_policy_cases_fail_closed_without_constructing_adapters(self):
+        import read_mailbox
+
+        cases = {
+            "unknown top-level": VALID_TOML + "\nextra = true\n",
+            "unknown nested": VALID_TOML.replace(
+                "folder = \"Inbox\"", 'folder = "Inbox"\nextra = true'
+            ),
+            "missing value": VALID_TOML.replace("lookback_days = 15\n", ""),
+            "blank mailbox": VALID_TOML.replace(
+                'address = "automations@vegetationlink.com.au"', 'address = "   "'
+            ),
+            "empty allowlist": VALID_TOML.replace(
+                'allowed_senders = ["noreply@datashare.maps.vic.gov.au"]',
+                "allowed_senders = []",
+            ),
+            "boolean integer": VALID_TOML.replace(
+                "lookback_days = 15", "lookback_days = true"
+            ),
+            "non-positive integer": VALID_TOML.replace(
+                "max_bytes = 10737418240", "max_bytes = 0"
+            ),
+            "malformed host": VALID_TOML.replace(
+                'allowed_hosts = ["s3.ap-southeast-2.amazonaws.com"]',
+                'allowed_hosts = ["https://s3.ap-southeast-2.amazonaws.com"]',
+            ),
+            "unsafe output": VALID_TOML.replace(
+                'output_dir = "artifacts"', 'output_dir = "../outside"'
+            ),
+        }
+        for label, policy_text in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                    read_mailbox.load_config(self._write_policy(directory, policy_text))
+                self.assertEqual("config_invalid", caught.exception.code)
+
+    def test_invalid_policy_stops_main_before_credentials_or_network(self):
+        import read_mailbox
+
+        marker = "raw-invalid-policy-marker"
+        invalid = VALID_TOML.replace(
+            'address = "automations@vegetationlink.com.au"', f'address = "{marker}"'
+        ).replace("lookback_days = 15", "lookback_days = false")
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            policy = self._write_policy(directory, invalid)
+            with (
+                patch.object(read_mailbox, "run_acquisition") as run,
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(output),
+            ):
+                result = read_mailbox.main(["--config", str(policy)])
+        self.assertEqual(1, result)
+        run.assert_not_called()
+        self.assertIn("config_invalid", output.getvalue())
+        self.assertNotIn(marker, output.getvalue())
+
+    def test_blank_credentials_fail_before_graph_or_http_construction(self):
+        import read_mailbox
+
+        graph_factory = unittest.mock.Mock()
+        session_factory = unittest.mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            config = read_mailbox.AcquisitionConfig(
+                mailbox="automations@vegetationlink.com.au",
+                folder="Inbox",
+                allowed_senders=("noreply@datashare.maps.vic.gov.au",),
+                allowed_order_ids=("OK0VUZ",),
+                allowed_hosts=("s3.ap-southeast-2.amazonaws.com",),
+                lookback_days=15,
+                max_bytes=1024,
+                connect_timeout_seconds=10,
+                read_timeout_seconds=60,
+                progress_interval_seconds=5,
+                max_redirects=5,
+                fingerprint_hex_chars=16,
+                allow_order_id_mismatch=False,
+                output_dir=Path(directory) / "artifacts",
+            )
+            for name in ("O365_AUTH_ID", "O365_AUTH_SECRET", "TENANT_ID"):
+                credentials = {
+                    "O365_AUTH_ID": "opaque-id",
+                    "O365_AUTH_SECRET": "opaque-secret",
+                    "TENANT_ID": "opaque-tenant",
+                }
+                credentials[name] = "   "
+                with self.subTest(name=name):
+                    with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                        read_mailbox.run_acquisition(
+                            config,
+                            credentials,
+                            graph_factory=graph_factory,
+                            session_factory=session_factory,
+                        )
+                    self.assertEqual("config_invalid", caught.exception.code)
+        graph_factory.assert_not_called()
+        session_factory.assert_not_called()
+
+    def test_import_constructs_no_clients_and_creates_no_output(self):
+        import O365
+        import requests
+
+        sys.modules.pop("read_mailbox", None)
+        with tempfile.TemporaryDirectory() as directory:
+            sentinel = Path(directory) / "must-not-exist"
+            with (
+                patch.object(O365, "Account") as account,
+                patch.object(requests, "Session") as session,
+                patch("pathlib.Path.mkdir") as mkdir,
+            ):
+                imported = importlib.import_module("read_mailbox")
+            self.assertTrue(callable(imported.main))
+            account.assert_not_called()
+            session.assert_not_called()
+            mkdir.assert_not_called()
+            self.assertFalse(sentinel.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

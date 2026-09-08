@@ -1,0 +1,9 @@
+{
+  "command": "OPNIX_ENV_DISABLE=1 nix develop path:. -c python -m unittest tests.test_graph -v",
+  "exitCode": 1,
+  "targetTest": "test_valid_policy_loads_locked_allowlists_and_defaults",
+  "targetFile": "tests/test_graph.py",
+  "expected": "the exact reviewable Phase 1 policy loads into AcquisitionConfig",
+  "actual": "load_config raised config_invalid and the resulting config was None",
+  "output": "TAP version 13\nok 1 - test_blank_credentials_fail_before_graph_or_http_construction\nok 2 - test_import_constructs_no_clients_and_creates_no_output\nok 3 - test_invalid_policy_cases_fail_closed_without_constructing_adapters\nok 4 - test_invalid_policy_stops_main_before_credentials_or_network\nnot ok 5 - test_valid_policy_loads_locked_allowlists_and_defaults\nok 6 - test_pipeline_streams_one_candidate_and_emits_only_redacted_evidence\nok 7 - test_rejected_newest_target_is_closed_and_never_falls_back\n1..7\n# tests 7\n# pass 6\n# fail 1\n# cancelled 0\n"
+}
