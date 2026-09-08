@@ -1,0 +1,21 @@
+# OAuth credential and token-backend material
+/my_token.txt
+/token/
+
+# Local opnix, direnv, and GSD runtime state
+/.config/
+/.direnv/
+/.envrc
+/.gsd/
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/.coverage
+
+# Private partial downloads and finalized acquisition output
+**/.vicmap-download-*.part
+/artifacts/

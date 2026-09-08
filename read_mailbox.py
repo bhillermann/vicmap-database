@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import logging
 import os
+import re
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +27,30 @@ from vicmap_acquire.graph import GraphError, GraphMailbox
 
 
 EventSink = Callable[[dict[str, object]], None]
+
+_MAILBOX_KEYS = {
+    "address",
+    "folder",
+    "allowed_senders",
+    "allowed_order_ids",
+    "lookback_days",
+    "allow_order_id_mismatch",
+}
+_DOWNLOAD_KEYS = {
+    "allowed_hosts",
+    "max_bytes",
+    "connect_timeout_seconds",
+    "read_timeout_seconds",
+    "progress_interval_seconds",
+    "max_redirects",
+    "fingerprint_hex_chars",
+    "output_dir",
+}
+_ORDER_ID = re.compile(r"[A-Za-z0-9]+")
+_HOSTNAME = re.compile(
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +112,50 @@ def _require_credentials(credentials: Mapping[str, str]) -> None:
             raise AcquisitionFailure("config_invalid")
 
 
+def _suppress_dependency_logs() -> None:
+    for logger_name in ("O365", "msal", "requests", "urllib3"):
+        logging.getLogger(logger_name).setLevel(logging.CRITICAL + 1)
+
+
+def _strict_string(value: object) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise AcquisitionFailure("config_invalid")
+    return value
+
+
+def _string_list(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise AcquisitionFailure("config_invalid")
+    items = tuple(_strict_string(item) for item in value)
+    if len(set(items)) != len(items):
+        raise AcquisitionFailure("config_invalid")
+    return items
+
+
+def _bounded_integer(value: object, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AcquisitionFailure("config_invalid")
+    if value < minimum or value > maximum:
+        raise AcquisitionFailure("config_invalid")
+    return value
+
+
+def _validate_config_object(config: AcquisitionConfig) -> None:
+    _strict_string(config.mailbox)
+    _strict_string(config.folder)
+    if not config.allowed_senders or not config.allowed_order_ids or not config.allowed_hosts:
+        raise AcquisitionFailure("config_invalid")
+    _bounded_integer(config.lookback_days, 1, 3660)
+    _bounded_integer(config.max_bytes, 1, 10 * 1024**4)
+    _bounded_integer(config.connect_timeout_seconds, 1, 3600)
+    _bounded_integer(config.read_timeout_seconds, 1, 3600)
+    _bounded_integer(config.progress_interval_seconds, 1, 3600)
+    _bounded_integer(config.max_redirects, 1, 20)
+    _bounded_integer(config.fingerprint_hex_chars, 8, 64)
+    if not isinstance(config.allow_order_id_mismatch, bool):
+        raise AcquisitionFailure("config_invalid")
+
+
 def run_acquisition(
     config: AcquisitionConfig,
     credentials: Mapping[str, str],
@@ -95,7 +166,9 @@ def run_acquisition(
     """Run the ordered Graph-to-artifact path through injectable I/O seams."""
 
     try:
+        _validate_config_object(config)
         _require_credentials(credentials)
+        _suppress_dependency_logs()
         graph = graph_factory(config=config, credentials=credentials)
         cutoff_utc = datetime.now(timezone.utc) - timedelta(days=config.lookback_days)
         candidates = []
@@ -167,9 +240,80 @@ def run_acquisition(
 
 
 def load_config(path: Path) -> AcquisitionConfig:
-    """Load policy from TOML. Full fail-closed validation is added in Task 2."""
+    """Load and fully validate non-secret policy without creating runtime state."""
 
-    raise AcquisitionFailure("config_invalid")
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        if set(raw) != {"mailbox", "download"}:
+            raise AcquisitionFailure("config_invalid")
+        mailbox = raw["mailbox"]
+        download = raw["download"]
+        if not isinstance(mailbox, dict) or set(mailbox) != _MAILBOX_KEYS:
+            raise AcquisitionFailure("config_invalid")
+        if not isinstance(download, dict) or set(download) != _DOWNLOAD_KEYS:
+            raise AcquisitionFailure("config_invalid")
+
+        address = _strict_string(mailbox["address"])
+        folder = _strict_string(mailbox["folder"])
+        senders = _string_list(mailbox["allowed_senders"])
+        for sender in senders:
+            if sender.count("@") != 1 or any(character.isspace() for character in sender):
+                raise AcquisitionFailure("config_invalid")
+        order_ids = _string_list(mailbox["allowed_order_ids"])
+        if any(_ORDER_ID.fullmatch(order_id) is None for order_id in order_ids):
+            raise AcquisitionFailure("config_invalid")
+        hosts = _string_list(download["allowed_hosts"])
+        if any(
+            host != host.casefold()
+            or host.endswith(".")
+            or _HOSTNAME.fullmatch(host) is None
+            for host in hosts
+        ):
+            raise AcquisitionFailure("config_invalid")
+
+        output_value = _strict_string(download["output_dir"])
+        configured_output = Path(output_value)
+        if configured_output.is_absolute() or any(
+            part in {"", ".", ".."} for part in configured_output.parts
+        ):
+            raise AcquisitionFailure("config_invalid")
+        config_root = path.parent.resolve()
+        output_dir = (config_root / configured_output).resolve()
+        if output_dir != config_root and config_root not in output_dir.parents:
+            raise AcquisitionFailure("config_invalid")
+        if output_dir.exists() and not output_dir.is_dir():
+            raise AcquisitionFailure("config_invalid")
+
+        config = AcquisitionConfig(
+            mailbox=address,
+            folder=folder,
+            allowed_senders=senders,
+            allowed_order_ids=order_ids,
+            allowed_hosts=hosts,
+            lookback_days=_bounded_integer(mailbox["lookback_days"], 1, 3660),
+            max_bytes=_bounded_integer(download["max_bytes"], 1, 10 * 1024**4),
+            connect_timeout_seconds=_bounded_integer(
+                download["connect_timeout_seconds"], 1, 3600
+            ),
+            read_timeout_seconds=_bounded_integer(
+                download["read_timeout_seconds"], 1, 3600
+            ),
+            progress_interval_seconds=_bounded_integer(
+                download["progress_interval_seconds"], 1, 3600
+            ),
+            max_redirects=_bounded_integer(download["max_redirects"], 1, 20),
+            fingerprint_hex_chars=_bounded_integer(
+                download["fingerprint_hex_chars"], 8, 64
+            ),
+            allow_order_id_mismatch=mailbox["allow_order_id_mismatch"],
+            output_dir=output_dir,
+        )
+        _validate_config_object(config)
+        return config
+    except AcquisitionFailure:
+        raise
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+        raise AcquisitionFailure("config_invalid") from None
 
 
 def main(argv: list[str] | None = None) -> int:

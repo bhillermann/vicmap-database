@@ -1,0 +1,17 @@
+[mailbox]
+address = "automations@vegetationlink.com.au"
+folder = "Inbox"
+allowed_senders = ["noreply@datashare.maps.vic.gov.au"]
+allowed_order_ids = ["OK0VUZ"]
+lookback_days = 15
+allow_order_id_mismatch = false
+
+[download]
+allowed_hosts = ["s3.ap-southeast-2.amazonaws.com"]
+max_bytes = 10737418240
+connect_timeout_seconds = 10
+read_timeout_seconds = 60
+progress_interval_seconds = 5
+max_redirects = 5
+fingerprint_hex_chars = 16
+output_dir = "artifacts"
