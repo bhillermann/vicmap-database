@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -121,6 +122,27 @@ class DownloadResult:
     path_fingerprint: str = ""
 
 
+def _nonnegative_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def format_progress(byte_count: int, total_bytes: int | None) -> dict[str, object]:
+    """Build safe progress using integer tenths before presentation conversion."""
+
+    count = _nonnegative_integer(byte_count, "byte_count")
+    event: dict[str, object] = {"byte_count": count}
+    if total_bytes is None:
+        return event
+    total = _nonnegative_integer(total_bytes, "total_bytes")
+    if total == 0:
+        return event
+    percent_tenths = min(1000, (count * 1000) // total)
+    event["percent"] = percent_tenths / 10
+    return event
+
+
 def validate_https_target(
     url: str, allowed_hosts: tuple[str, ...]
 ) -> SplitResult:
@@ -173,7 +195,11 @@ def _clean_session(session: object) -> None:
 def _close(value: object | None) -> None:
     close = getattr(value, "close", None)
     if callable(close):
-        close()
+        try:
+            close()
+        except Exception:
+            # Cleanup must never replace a closed project failure with provider text.
+            pass
 
 
 def _target_identity(target: SplitResult) -> tuple[str, int, str, str]:
@@ -277,10 +303,13 @@ def _legacy_arguments(
             raise TypeError("final_path is required")
         if not isinstance(policy, DownloadPolicy):
             raise TypeError("policy must be DownloadPolicy")
+        sink = _NO_PROGRESS if progress_sink is None else progress_sink
+        if not callable(sink):
+            raise TypeError("progress_sink must be callable")
         return (
             Path(final_path),
             policy,
-            progress_sink or _NO_PROGRESS,
+            sink,
             session_factory,
             None,
         )
@@ -307,7 +336,10 @@ def _legacy_arguments(
         max_redirects=legacy["max_redirects"],
         fingerprint_hex_length=16,
     )
-    return None, translated, progress_sink or _NO_PROGRESS, lambda: session, output_dir
+    sink = _NO_PROGRESS if progress_sink is None else progress_sink
+    if not callable(sink):
+        raise TypeError("progress_sink must be callable")
+    return None, translated, sink, lambda: session, output_dir
 
 
 def download_artifact(
@@ -327,22 +359,35 @@ def download_artifact(
     response = None
     temp_path: Path | None = None
     try:
-        session = session_factory()
-        _clean_session(session)
+        try:
+            session = session_factory()
+            _clean_session(session)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise DownloadHttpFailed() from None
         response, target = _request_final_response(session, url, policy)
 
-        encoding = response.headers.get("Content-Encoding", "identity").casefold()
+        try:
+            encoding_value = response.headers.get("Content-Encoding", "identity")
+        except Exception:
+            raise DownloadHttpFailed() from None
+        if not isinstance(encoding_value, str):
+            raise DownloadHttpFailed()
+        encoding = encoding_value.casefold()
         if encoding not in ("", "identity"):
             raise DownloadHttpFailed()
         declared = response.headers.get("Content-Length")
         declared_bytes = None
         if declared is not None:
-            try:
-                declared_bytes = int(declared)
-            except (TypeError, ValueError):
-                raise DownloadHttpFailed() from None
-            if declared_bytes < 0:
+            if (
+                not isinstance(declared, str)
+                or not declared
+                or not declared.isascii()
+                or not declared.isdecimal()
+            ):
                 raise DownloadHttpFailed()
+            declared_bytes = int(declared)
             if declared_bytes > policy.max_bytes:
                 raise DownloadTooLarge()
 
@@ -358,16 +403,36 @@ def download_artifact(
         temp_path = Path(raw_temp_path)
         digest = hashlib.sha256()
         received = 0
+        last_progress_at = time.monotonic()
         with os.fdopen(descriptor, "wb") as output:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                next_count = received + len(chunk)
-                if next_count > policy.max_bytes:
-                    raise DownloadTooLarge()
-                output.write(chunk)
-                digest.update(chunk)
-                received = next_count
+            try:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    if not isinstance(chunk, bytes):
+                        raise DownloadHttpFailed()
+                    next_count = received + len(chunk)
+                    if next_count > policy.max_bytes:
+                        raise DownloadTooLarge()
+                    written = output.write(chunk)
+                    if written != len(chunk):
+                        raise ArtifactWriteFailed()
+                    digest.update(chunk)
+                    received = next_count
+
+                    now = time.monotonic()
+                    if now - last_progress_at >= policy.progress_interval_seconds:
+                        try:
+                            progress_sink(format_progress(received, declared_bytes))
+                        except (KeyboardInterrupt, SystemExit):
+                            raise
+                        except Exception:
+                            raise ArtifactWriteFailed() from None
+                        last_progress_at = now
+            except requests.Timeout:
+                raise DownloadTimeout() from None
+            except requests.RequestException:
+                raise DownloadHttpFailed() from None
             output.flush()
             os.fsync(output.fileno())
 
@@ -397,6 +462,6 @@ def download_artifact(
         if temp_path is not None:
             try:
                 temp_path.unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass
         _close(session)
