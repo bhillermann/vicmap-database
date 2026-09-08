@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import logging
 import os
 import re
@@ -24,9 +23,18 @@ from vicmap_acquire.download import (
     validate_https_target,
 )
 from vicmap_acquire.graph import GraphError, GraphMailbox
+from vicmap_acquire.evidence import (
+    ProgressEvent,
+    ReasonCode,
+    SafeFailure,
+    SuccessEvent,
+    render_failure,
+    render_progress,
+    render_success,
+)
 
 
-EventSink = Callable[[dict[str, object]], None]
+EventSink = Callable[[object], None]
 
 _MAILBOX_KEYS = {
     "address",
@@ -74,35 +82,35 @@ class AcquisitionConfig:
 class AcquisitionFailure(RuntimeError):
     """A closed acquisition failure carrying no untrusted detail."""
 
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
+    def __init__(self, reason: ReasonCode | str, *, reported: bool = False):
+        self.failure = SafeFailure(_reason_code(reason))
+        self.code = self.failure.reason.value
+        self.reported = reported
+        super().__init__(self.code)
 
 
-def _fingerprint(value: str, length: int) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
+_REASON_ALIASES = {
+    "authentication_failed": ReasonCode.GRAPH_AUTH_FAILED,
+}
 
 
-def _mask_sender(sender: str) -> str:
-    local, separator, domain = sender.partition("@")
-    if not separator:
-        return "***"
-    if len(local) <= 2:
-        masked_local = local[:1] + "*" * max(1, len(local) - 1)
-    else:
-        masked_local = local[0] + "*" * (len(local) - 2) + local[-1]
-    return f"{masked_local}@{domain}"
+def _reason_code(reason: ReasonCode | str) -> ReasonCode:
+    if isinstance(reason, ReasonCode):
+        return reason
+    if isinstance(reason, str):
+        if reason in _REASON_ALIASES:
+            return _REASON_ALIASES[reason]
+        try:
+            return ReasonCode(reason)
+        except ValueError:
+            pass
+    return ReasonCode.INTERNAL_FAILURE
 
 
-def _emit_failure(event_sink: EventSink, reason: str) -> None:
-    event_sink(
-        {
-            "event": "failure",
-            "stage": reason.split("_", 1)[0],
-            "reason": reason,
-            "hint": "review_configuration_or_request_a_fresh_delivery",
-        }
-    )
+def _emit_failure(event_sink: EventSink, reason: ReasonCode | str) -> SafeFailure:
+    failure = SafeFailure(_reason_code(reason))
+    event_sink(failure)
+    return failure
 
 
 def _require_credentials(credentials: Mapping[str, str]) -> None:
@@ -159,8 +167,8 @@ def _validate_config_object(config: AcquisitionConfig) -> None:
 def run_acquisition(
     config: AcquisitionConfig,
     credentials: Mapping[str, str],
-    graph_factory=GraphMailbox,
-    session_factory=requests.Session,
+    graph_factory=None,
+    session_factory=None,
     event_sink: EventSink = lambda event: None,
 ) -> DownloadResult:
     """Run the ordered Graph-to-artifact path through injectable I/O seams."""
@@ -169,6 +177,8 @@ def run_acquisition(
         _validate_config_object(config)
         _require_credentials(credentials)
         _suppress_dependency_logs()
+        graph_factory = GraphMailbox if graph_factory is None else graph_factory
+        session_factory = requests.Session if session_factory is None else session_factory
         graph = graph_factory(config=config, credentials=credentials)
         cutoff_utc = datetime.now(timezone.utc) - timedelta(days=config.lookback_days)
         candidates = []
@@ -185,31 +195,16 @@ def run_acquisition(
             if candidate is not None:
                 candidates.append(candidate)
         selected = select_candidate(candidates)
-        if selected is None:
-            raise AcquisitionFailure("candidate_none")
-
         event_sink(
-            {
-                "event": "candidate_selected",
-                "order_id": selected.order_id,
-                "received_at": selected.received_datetime_utc.isoformat(),
-                "sender": _mask_sender(selected.sender),
-                "message_fingerprint": _fingerprint(
-                    selected.graph_message_id, config.fingerprint_hex_chars
-                ),
-            }
+            SuccessEvent.candidate_selected(
+                order_id=selected.order_id,
+                received_at=selected.received_datetime_utc,
+                sender=selected.sender,
+                graph_message_id=selected.graph_message_id,
+            )
         )
 
-        target = validate_https_target(selected.artifact_url, config.allowed_hosts)
-        event_sink(
-            {
-                "event": "download_target",
-                "host": target.hostname or "",
-                "path_fingerprint": _fingerprint(
-                    target.path, config.fingerprint_hex_chars
-                ),
-            }
-        )
+        validate_https_target(selected.artifact_url, config.allowed_hosts)
         result = download_artifact(
             selected.artifact_url,
             output_dir=config.output_dir,
@@ -219,24 +214,34 @@ def run_acquisition(
             read_timeout_seconds=config.read_timeout_seconds,
             max_redirects=config.max_redirects,
             session=session_factory(),
+            progress_sink=lambda progress: event_sink(
+                ProgressEvent.from_download_event(progress)
+            ),
         )
         event_sink(
-            {
-                "event": "artifact_finalized",
-                "byte_count": result.byte_count,
-                "sha256": result.sha256,
-            }
+            SuccessEvent.download_target(
+                approved_hostname=result.approved_hostname,
+                path_fingerprint=result.path_fingerprint,
+            )
+        )
+        event_sink(
+            SuccessEvent.artifact_finalized(
+                byte_count=result.byte_count,
+                sha256=result.sha256,
+            )
         )
         return result
     except AcquisitionFailure as error:
-        _emit_failure(event_sink, error.code)
-        raise
+        if error.reported:
+            raise
+        failure = _emit_failure(event_sink, error.failure.reason)
+        raise AcquisitionFailure(failure.reason, reported=True) from None
     except (GraphError, CandidateError, DownloadError) as error:
-        _emit_failure(event_sink, error.code)
-        raise AcquisitionFailure(error.code) from None
+        failure = _emit_failure(event_sink, error.code)
+        raise AcquisitionFailure(failure.reason, reported=True) from None
     except Exception:
-        _emit_failure(event_sink, "graph_scan_failed")
-        raise AcquisitionFailure("graph_scan_failed") from None
+        failure = _emit_failure(event_sink, ReasonCode.INTERNAL_FAILURE)
+        raise AcquisitionFailure(failure.reason, reported=True) from None
 
 
 def load_config(path: Path) -> AcquisitionConfig:
@@ -320,19 +325,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Acquire one trusted Vicmap artifact")
     parser.add_argument("--config", type=Path, default=Path("vicmap.toml"))
     args = parser.parse_args(argv)
+
+    def render_event(event: object) -> None:
+        if isinstance(event, SuccessEvent):
+            render_success(event)
+        elif isinstance(event, ProgressEvent):
+            render_progress(event)
+        elif isinstance(event, SafeFailure):
+            render_failure(event)
+        else:
+            render_failure(SafeFailure(ReasonCode.INTERNAL_FAILURE))
+
     try:
         config = load_config(args.config)
-        result = run_acquisition(config, os.environ, event_sink=lambda event: print(event))
+        run_acquisition(config, os.environ, event_sink=render_event)
     except AcquisitionFailure as error:
-        print({"event": "failure", "reason": error.code}, file=sys.stderr)
+        if not error.reported:
+            render_failure(error.failure)
         return 1
-    print(
-        {
-            "event": "complete",
-            "byte_count": result.byte_count,
-            "sha256": result.sha256,
-        }
-    )
     return 0
 
 
