@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-09-08T02:23:46.896Z"
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-09-08T02:47:18.937Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 01 execution started
-state_head: 771bd1d181505b2971c0862beee43db35ab3c54c
+state_head: c2451dc0786ba29cb95fdfeeab7898b71dc2f06a
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 5
-  completed_plans: 2
+  completed_plans: 3
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 01 (Trusted Graph Acquisition) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-08T02:23:46.856Z
-**Stopped at:** Completed 01-02-PLAN.md
+**Last session:** 2026-09-08T02:47:18.914Z
+**Stopped at:** Completed 01-03-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -52,6 +52,7 @@ Last activity: 2026-09-07 — Phase 01 execution started
 |------|----------|-------|-------|
 | Phase 01 P01 | 25min | 2 tasks | 11 files |
 | Phase 01 P02 | 14min | 2 tasks | 4 files |
+| Phase 01 P03 | 17min | 2 tasks | 4 files |
 
 ## Decisions
 
@@ -61,3 +62,6 @@ Last activity: 2026-09-07 — Phase 01 execution started
 - [Phase 01]: Expose precise Graph failure subclasses while retaining Plan 01 compatibility aliases.
 - [Phase 01]: Fetch MIME explicitly by complete Graph ID instead of retaining provider message objects from metadata scans.
 - [Phase 01]: Reject non-UTC cutoffs and malformed provider metadata before yielding project-owned values.
+- [Phase 01]: Preserve the lazy MIME-loader compatibility API while exposing direct MIME bytes plus CandidatePolicy for pure policy callers.
+- [Phase 01]: Reserve None for ordinary header non-matches and use typed closed failures for malformed, ambiguous, mismatched, or empty candidate states.
+- [Phase 01]: Normalize timestamps to UTC for selection and use the complete case-sensitive Unicode Graph ID as the stable internal tie-breaker.
