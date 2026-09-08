@@ -59,7 +59,21 @@ class Candidate:
 
     @property
     def selection_key(self) -> tuple[datetime, str]:
-        return (self.received_datetime_utc, self.graph_message_id)
+        try:
+            received = self.received_datetime_utc
+            if (
+                not isinstance(received, datetime)
+                or received.tzinfo is None
+                or received.utcoffset() is None
+                or not isinstance(self.graph_message_id, str)
+                or not self.graph_message_id
+            ):
+                raise CandidateAmbiguous()
+            return (received.astimezone(timezone.utc), self.graph_message_id)
+        except CandidateFailure:
+            raise
+        except Exception:
+            raise CandidateAmbiguous() from None
 
 
 class _AnchorCollector(HTMLParser):
@@ -191,18 +205,27 @@ def recognize_candidate(
     )
 
 
-def select_candidate(candidates: Iterable[Candidate]) -> Candidate | None:
-    """Select by the complete `(UTC received instant, Graph ID)` ordering key."""
+def select_candidate(candidates: Iterable[Candidate] | None) -> Candidate:
+    """Consume all candidates and select one by the complete stable total key."""
+
+    if candidates is None:
+        raise CandidateNone()
 
     by_key: dict[tuple[datetime, str], Candidate] = {}
-    for candidate in candidates:
-        key = (candidate.received_datetime_utc, candidate.graph_message_id)
-        previous = by_key.get(key)
-        if previous is not None and previous != candidate:
-            raise CandidateError("candidate_ambiguous")
-        by_key[key] = candidate
-    return max(
-        by_key.values(),
-        key=lambda item: (item.received_datetime_utc, item.graph_message_id),
-        default=None,
-    )
+    try:
+        for candidate in candidates:
+            if not isinstance(candidate, Candidate):
+                raise CandidateAmbiguous()
+            key = candidate.selection_key
+            previous = by_key.get(key)
+            if previous is not None and previous != candidate:
+                raise CandidateAmbiguous()
+            by_key[key] = candidate
+    except CandidateFailure:
+        raise
+    except Exception:
+        raise CandidateAmbiguous() from None
+
+    if not by_key:
+        raise CandidateNone()
+    return max(by_key.items(), key=lambda item: item[0])[1]
