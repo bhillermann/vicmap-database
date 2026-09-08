@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-09-08T02:47:18.937Z"
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-09-08T03:16:45.643Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 01 execution started
-state_head: c2451dc0786ba29cb95fdfeeab7898b71dc2f06a
+state_head: 5c8d865700e796ec510a968230977bd71974efef
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 5
-  completed_plans: 3
+  completed_plans: 4
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 01 (Trusted Graph Acquisition) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-08T02:47:18.914Z
-**Stopped at:** Completed 01-03-PLAN.md
+**Last session:** 2026-09-08T03:16:45.621Z
+**Stopped at:** Completed 01-04-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -53,6 +53,7 @@ Last activity: 2026-09-07 — Phase 01 execution started
 | Phase 01 P01 | 25min | 2 tasks | 11 files |
 | Phase 01 P02 | 14min | 2 tasks | 4 files |
 | Phase 01 P03 | 17min | 2 tasks | 4 files |
+| Phase 01 P04 | 22min | 2 tasks | 4 files |
 
 ## Decisions
 
@@ -65,3 +66,7 @@ Last activity: 2026-09-07 — Phase 01 execution started
 - [Phase 01]: Preserve the lazy MIME-loader compatibility API while exposing direct MIME bytes plus CandidatePolicy for pure policy callers.
 - [Phase 01]: Reserve None for ordinary header non-matches and use typed closed failures for malformed, ambiguous, mismatched, or empty candidate states.
 - [Phase 01]: Normalize timestamps to UTC for selection and use the complete case-sensitive Unicode Graph ID as the stable internal tie-breaker.
+- [Phase 01]: Translate the Plan 01 tracer call into explicit DownloadPolicy internally while exposing the final-path policy-first Plan 04 API.
+- [Phase 01]: Reject redirect loops by normalized host, effective port, path, and query before recontact.
+- [Phase 01]: Derive progress with integer tenths and fingerprint only the approved final URL path.
+- [Phase 01]: Publish artifacts with same-directory hard links so existing and concurrent destinations cannot be overwritten.
