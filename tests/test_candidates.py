@@ -4,6 +4,7 @@ import itertools
 import unittest
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from urllib.parse import quote
 
 from vicmap_acquire.candidates import (
     Candidate,
@@ -157,6 +158,31 @@ class CandidateRecognitionTest(unittest.TestCase):
         )
 
         self.assertEqual(html_url, candidate.artifact_url)
+
+    def test_html_visible_direct_archive_url_is_selected_without_accepting_wrapper(self):
+        direct_url = f"{_url()}?signature=synthetic-private-query"
+        wrapper_url = (
+            "https://tracking.invalid/click?url="
+            f"{quote(direct_url, safe='')}"
+        )
+        candidate = _recognize(
+            _metadata(),
+            _mime(
+                html=(
+                    f'<a href="{wrapper_url}">delivery link</a>'
+                    f"<p>{direct_url}</p>"
+                )
+            ),
+        )
+
+        self.assertEqual(direct_url, candidate.artifact_url)
+
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(
+                _metadata(),
+                _mime(html=f'<a href="{wrapper_url}">delivery link</a>'),
+            )
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
 
     def test_plain_ambiguity_does_not_fall_back_to_one_html_link(self):
         plain_url = _url()
