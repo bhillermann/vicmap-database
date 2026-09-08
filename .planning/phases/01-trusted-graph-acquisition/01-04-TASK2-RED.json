@@ -1,0 +1,9 @@
+{
+  "command": "nix develop path:. -c python -m unittest tests.test_download.DownloadStreamingBoundaryTest.test_format_progress_uses_exact_integer_tenths -v",
+  "exitCode": 1,
+  "targetTest": "test_format_progress_uses_exact_integer_tenths",
+  "targetFile": "tests/test_download.py",
+  "expected": "The downloader exposes exact integer-tenths progress formatting for known and unknown totals, including values above 2^63",
+  "actual": "format_progress was absent from the tracer implementation",
+  "output": "TAP version 13\nnot ok 1 - test_format_progress_uses_exact_integer_tenths\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n"
+}

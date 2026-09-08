@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import os
+import stat
 import tempfile
+import threading
 import unittest
 from collections import deque
 from pathlib import Path
+from unittest.mock import patch
 
 import requests
 
@@ -112,6 +117,40 @@ def _legacy_download(session: _FakeSession, directory: Path, **overrides):
     }
     arguments.update(overrides)
     return download.download_artifact(BASE_URL, **arguments)
+
+
+def _policy(**overrides) -> download.DownloadPolicy:
+    arguments = {
+        "allowed_hosts": (ALLOWED_HOST,),
+        "max_bytes": 1024,
+        "connect_timeout_seconds": 10,
+        "stalled_read_timeout_seconds": 60,
+        "progress_interval_seconds": 5,
+        "max_redirects": 5,
+        "fingerprint_hex_length": 16,
+    }
+    arguments.update(overrides)
+    return download.DownloadPolicy(**arguments)
+
+
+def _download_new(
+    response: _FakeResponse,
+    directory: Path,
+    *,
+    filename: str = "artifact.zip",
+    policy: download.DownloadPolicy | None = None,
+    progress_sink=None,
+    session: _FakeSession | None = None,
+):
+    session = session or _FakeSession((response,))
+    result = download.download_artifact(
+        BASE_URL,
+        directory / filename,
+        policy or _policy(),
+        progress_sink,
+        lambda: session,
+    )
+    return result, session
 
 
 class DownloadTargetPolicyTest(unittest.TestCase):
@@ -284,6 +323,333 @@ class DownloadTransportBoundaryTest(unittest.TestCase):
                 self.assertEqual("download_timeout", str(caught.exception))
                 self.assertNotIn(secret, str(caught.exception))
                 self.assertTrue(session.closed)
+
+
+class DownloadPolicyValidationTest(unittest.TestCase):
+    def test_policy_normalizes_hosts_and_rejects_unsafe_values(self):
+        normalized = _policy(allowed_hosts=(ALLOWED_HOST.upper(),))
+        self.assertEqual((ALLOWED_HOST,), normalized.allowed_hosts)
+
+        fields = (
+            "max_bytes",
+            "connect_timeout_seconds",
+            "stalled_read_timeout_seconds",
+            "progress_interval_seconds",
+            "max_redirects",
+            "fingerprint_hex_length",
+        )
+        for field in fields:
+            for value in (True, False, 0, -1, 1.5, "1"):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValueError):
+                        _policy(**{field: value})
+
+        for hosts in (
+            (),
+            [ALLOWED_HOST],
+            ("",),
+            (f"{ALLOWED_HOST}.",),
+            (f"{ALLOWED_HOST}:443",),
+            (ALLOWED_HOST, ALLOWED_HOST.upper()),
+        ):
+            with self.subTest(hosts=hosts):
+                with self.assertRaises(ValueError):
+                    _policy(allowed_hosts=hosts)
+
+    def test_fingerprint_length_cannot_exceed_sha256(self):
+        with self.assertRaises(ValueError):
+            _policy(fingerprint_hex_length=65)
+
+
+class DownloadStreamingBoundaryTest(unittest.TestCase):
+    def test_format_progress_uses_exact_integer_tenths(self):
+        formatter = getattr(download, "format_progress", None)
+        self.assertIsNotNone(
+            formatter,
+            "format_progress must make exact integer progress reusable by evidence",
+        )
+        enormous = 2**70 + 19
+        self.assertEqual(
+            {"byte_count": enormous, "percent": 33.3},
+            formatter(enormous, enormous * 3),
+        )
+        self.assertEqual(
+            {"byte_count": enormous * 4, "percent": 100.0},
+            formatter(enormous * 4, enormous * 3),
+        )
+        self.assertEqual({"byte_count": enormous}, formatter(enormous, None))
+        self.assertEqual({"byte_count": 0}, formatter(0, 0))
+
+    def test_missing_content_length_streams_and_returns_safe_provenance(self):
+        payload = b"known checksum bytes"
+        response = _FakeResponse(
+            headers={"Content-Encoding": "identity"},
+            chunks=(payload[:5], b"", payload[5:]),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result, session = _download_new(response, Path(directory))
+            self.assertEqual(payload, result.path.read_bytes())
+            self.assertEqual(len(payload), result.byte_count)
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), result.sha256)
+            self.assertEqual(ALLOWED_HOST, result.approved_hostname)
+            expected_fingerprint = hashlib.sha256(
+                "/orders/Order_OK0VUZ.zip".encode()
+            ).hexdigest()[:16]
+            self.assertEqual(expected_fingerprint, result.path_fingerprint)
+            self.assertNotIn("private", repr(result))
+            self.assertNotIn(BASE_URL, repr(result))
+        self.assertTrue(response.closed)
+        self.assertTrue(session.closed)
+
+    def test_content_length_rejections_happen_before_body_consumption(self):
+        for declared, expected_type in (
+            ("invalid", download.DownloadHttpFailed),
+            ("+1", download.DownloadHttpFailed),
+            ("-1", download.DownloadHttpFailed),
+            ("1025", download.DownloadTooLarge),
+        ):
+            with self.subTest(declared=declared):
+                response = _FakeResponse(
+                    headers={
+                        "Content-Length": declared,
+                        "Content-Encoding": "identity",
+                    },
+                    chunks=(b"must not be consumed",),
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(expected_type):
+                        _download_new(response, Path(directory))
+                    self.assertEqual([], list(Path(directory).iterdir()))
+                self.assertFalse(response.iterated)
+                self.assertTrue(response.closed)
+
+    def test_declared_length_must_equal_completed_observed_count(self):
+        for declared in ("2", "4"):
+            with self.subTest(declared=declared):
+                response = _FakeResponse(
+                    headers={
+                        "Content-Length": declared,
+                        "Content-Encoding": "identity",
+                    },
+                    chunks=(b"abc",),
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(download.DownloadHttpFailed):
+                        _download_new(response, Path(directory))
+                    self.assertEqual([], list(Path(directory).iterdir()))
+
+    def test_zero_exact_limit_and_limit_plus_one_are_inclusive(self):
+        cases = (
+            (b"", 0, True),
+            (b"abcd", 4, True),
+            (b"abcde", 4, False),
+        )
+        for payload, ceiling, succeeds in cases:
+            with self.subTest(length=len(payload), ceiling=ceiling):
+                response = _FakeResponse(
+                    headers={"Content-Encoding": "identity"},
+                    chunks=(payload[:ceiling], payload[ceiling:]),
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    destination = Path(directory) / "artifact.zip"
+                    if succeeds:
+                        result, _ = _download_new(
+                            response,
+                            Path(directory),
+                            policy=_policy(max_bytes=max(1, ceiling)),
+                        )
+                        self.assertEqual(payload, destination.read_bytes())
+                        self.assertEqual(len(payload), result.byte_count)
+                    else:
+                        with self.assertRaises(download.DownloadTooLarge):
+                            _download_new(
+                                response,
+                                Path(directory),
+                                policy=_policy(max_bytes=ceiling),
+                            )
+                        self.assertFalse(destination.exists())
+                        self.assertEqual([], list(Path(directory).iterdir()))
+
+    def test_non_identity_encoding_is_rejected_before_body_consumption(self):
+        for encoding in ("gzip", "br", 123):
+            with self.subTest(encoding=encoding):
+                response = _FakeResponse(
+                    headers={"Content-Encoding": encoding},
+                    chunks=(b"compressed",),
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(download.DownloadHttpFailed):
+                        _download_new(response, Path(directory))
+                    self.assertEqual([], list(Path(directory).iterdir()))
+                self.assertFalse(response.iterated)
+
+    def test_known_progress_is_periodic_floored_and_capped(self):
+        response = _FakeResponse(
+            headers={"Content-Length": "10", "Content-Encoding": "identity"},
+            chunks=(b"ab", b"cde", b"fghij"),
+        )
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(download.time, "monotonic", side_effect=(0, 1, 5, 10)):
+                _download_new(response, Path(directory), progress_sink=events.append)
+        self.assertEqual(
+            [
+                {"byte_count": 5, "percent": 50.0},
+                {"byte_count": 10, "percent": 100.0},
+            ],
+            events,
+        )
+
+    def test_unknown_total_progress_contains_bytes_only(self):
+        response = _FakeResponse(
+            headers={"Content-Encoding": "identity"},
+            chunks=(b"abc", b"def"),
+        )
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(download.time, "monotonic", side_effect=(0, 5, 10)):
+                _download_new(response, Path(directory), progress_sink=events.append)
+        self.assertEqual([{"byte_count": 3}, {"byte_count": 6}], events)
+
+    def test_declared_zero_emits_no_percentage_event(self):
+        response = _FakeResponse(
+            headers={"Content-Length": "0", "Content-Encoding": "identity"},
+            chunks=(b"",),
+        )
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            result, _ = _download_new(
+                response, Path(directory), progress_sink=events.append
+            )
+            self.assertEqual(hashlib.sha256(b"").hexdigest(), result.sha256)
+            self.assertEqual(0, result.byte_count)
+        self.assertEqual([], events)
+
+    def test_stream_timeout_is_closed_and_private_temp_is_removed(self):
+        secret = "read failed for /private/path?signature=secret"
+        response = _FakeResponse(
+            headers={"Content-Encoding": "identity"},
+            chunks=(b"partial",),
+            stream_error=requests.ReadTimeout(secret),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(download.DownloadTimeout) as caught:
+                _download_new(response, Path(directory))
+            self.assertEqual("download_timeout", str(caught.exception))
+            self.assertNotIn(secret, str(caught.exception))
+            self.assertEqual([], list(Path(directory).iterdir()))
+        self.assertTrue(response.closed)
+
+    def test_write_failure_is_closed_and_private_temp_is_removed(self):
+        response = _response(b"payload")
+
+        class FailingWriter:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def write(self, chunk):
+                raise OSError("private local path must not leak")
+
+        def failing_fdopen(descriptor, mode):
+            os.close(descriptor)
+            return FailingWriter()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(download.os, "fdopen", side_effect=failing_fdopen),
+                self.assertRaises(download.ArtifactWriteFailed) as caught,
+            ):
+                _download_new(response, Path(directory))
+            self.assertEqual("artifact_write_failed", str(caught.exception))
+            self.assertEqual([], list(Path(directory).iterdir()))
+
+    def test_keyboard_interrupt_cleans_private_state_and_reraises(self):
+        response = _FakeResponse(
+            headers={"Content-Encoding": "identity"},
+            chunks=(b"partial",),
+            stream_error=KeyboardInterrupt(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(KeyboardInterrupt):
+                _download_new(response, Path(directory))
+            self.assertEqual([], list(Path(directory).iterdir()))
+        self.assertTrue(response.closed)
+
+    def test_in_progress_state_is_private_mode_and_never_final(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            final_path = output_dir / "artifact.zip"
+
+            class InspectingResponse(_FakeResponse):
+                def iter_content(self, chunk_size: int):
+                    entries = list(output_dir.iterdir())
+                    self_test.assertEqual(1, len(entries))
+                    self_test.assertTrue(entries[0].name.startswith(".vicmap-download-"))
+                    self_test.assertTrue(entries[0].name.endswith(".part"))
+                    self_test.assertFalse(final_path.exists())
+                    mode = stat.S_IMODE(entries[0].stat().st_mode)
+                    self_test.assertEqual(0o600, mode)
+                    raise KeyboardInterrupt()
+                    yield b"unreachable"
+
+            self_test = self
+            response = InspectingResponse(headers={"Content-Encoding": "identity"})
+            with self.assertRaises(KeyboardInterrupt):
+                _download_new(response, output_dir)
+            self.assertEqual([], list(output_dir.iterdir()))
+
+    def test_existing_final_path_is_never_overwritten(self):
+        response = _response(b"new")
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "artifact.zip"
+            final_path.write_bytes(b"existing")
+            with self.assertRaises(download.ArtifactWriteFailed):
+                _download_new(response, Path(directory))
+            self.assertEqual(b"existing", final_path.read_bytes())
+            self.assertEqual([final_path], list(Path(directory).iterdir()))
+
+    def test_two_concurrent_finalizers_have_exactly_one_complete_winner(self):
+        barrier = threading.Barrier(2)
+        payloads = (b"first complete payload", b"second complete payload")
+        results: list[download.DownloadResult] = []
+        failures: list[BaseException] = []
+
+        class RacingResponse(_FakeResponse):
+            def iter_content(self, chunk_size: int):
+                yield self.chunks[0]
+                barrier.wait(timeout=5)
+
+        def run_one(directory: Path, payload: bytes) -> None:
+            response = RacingResponse(
+                headers={"Content-Encoding": "identity"}, chunks=(payload,)
+            )
+            try:
+                result, _ = _download_new(response, directory)
+                results.append(result)
+            except BaseException as error:
+                failures.append(error)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            threads = [
+                threading.Thread(target=run_one, args=(output_dir, payload))
+                for payload in payloads
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(1, len(results))
+            self.assertEqual(1, len(failures))
+            self.assertIsInstance(failures[0], download.ArtifactWriteFailed)
+            self.assertIn((output_dir / "artifact.zip").read_bytes(), payloads)
+            self.assertEqual(
+                [output_dir / "artifact.zip"], list(output_dir.iterdir())
+            )
 
 
 if __name__ == "__main__":
