@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.1
-current_phase: Phase 1 — Trusted Graph Acquisition
+current_phase: 01
 current_phase_name: Trusted Graph Acquisition
-status: roadmap_created
-stopped_at: Phase 1 context gathered
-last_updated: "2026-09-07T05:42:31.582Z"
-last_activity: 2026-09-01
-last_activity_desc: v0.1 roadmap created with 27/27 requirements mapped
-state_head: 10363fb0f22d0ae9f2b24b24cd23029744649c65
+status: executing
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-09-08T01:59:06.388Z"
+last_activity: 2026-09-07
+last_activity_desc: Phase 01 execution started
+state_head: 14a6260defd8c1eb81a2091c837ec9c5bb2bd9f1
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 5
-  completed_plans: 0
+  completed_plans: 1
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md
 ## Position
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
-**Current phase:** Phase 1 — Trusted Graph Acquisition
-**Status:** Roadmap created; awaiting phase planning
+**Current phase:** 01
+**Status:** Ready to execute
 
 ## Session Log
 
@@ -35,13 +35,25 @@ See: .planning/PROJECT.md
 
 ## Current Position
 
-Phase: 1 (Trusted Graph Acquisition) — READY TO EXECUTE
-Plan: —
+Phase: 01 (Trusted Graph Acquisition) — EXECUTING
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-09-01 — v0.1 roadmap created with 27/27 requirements mapped
+Last activity: 2026-09-07 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-02T07:21:46.184Z
-**Stopped at:** Phase 1 context gathered
-**Resume file:** .planning/phases/01-trusted-graph-acquisition/01-CONTEXT.md
+**Last session:** 2026-09-08T01:59:06.370Z
+**Stopped at:** Completed 01-01-PLAN.md
+**Resume file:** None
+
+## Performance Metrics
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 25min | 2 tasks | 11 files |
+
+## Decisions
+
+- [Phase 01]: Keep Graph and artifact HTTP authority in separate adapters; artifact sessions clear auth, cookies, and ambient netrc behavior.
+- [Phase 01]: Represent operator-visible failures with closed reason codes and expose message and URL identities only through bounded fingerprints.
+- [Phase 01]: Reject TOML keys or policy values outside the complete Phase 1 schema before credentials or network adapters are used.
