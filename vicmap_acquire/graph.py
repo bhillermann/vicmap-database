@@ -166,7 +166,8 @@ class GraphMailbox:
 
             folder = self._confirmed_folder()
             query = folder.new_query("receivedDateTime").greater_equal(cutoff_utc)
-            query = query.select("id", "receivedDateTime", "sender", "subject")
+            # O365 2.1.0 hydrates Message.sender from Graph's ``from`` field.
+            query = query.select("id", "receivedDateTime", "from", "subject")
             messages = folder.get_messages(
                 limit=None,
                 batch=999,
