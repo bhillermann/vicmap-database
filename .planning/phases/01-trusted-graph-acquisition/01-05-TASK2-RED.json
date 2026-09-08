@@ -1,0 +1,9 @@
+{
+  "command": "nix develop path:. -c python -m unittest tests.test_evidence.ControllerCompositionTest.test_controller_passes_complete_policy_to_one_newest_download -v",
+  "exitCode": 1,
+  "targetTest": "test_controller_passes_complete_policy_to_one_newest_download",
+  "targetFile": "tests/test_evidence.py",
+  "expected": "The controller passes the complete configured DownloadPolicy and canonical final path to exactly one newest-candidate download",
+  "actual": "The controller used the legacy downloader compatibility call, so the configured progress interval and fingerprint length were not propagated",
+  "output": "TAP version 13\nnot ok 1 - test_controller_passes_complete_policy_to_one_newest_download\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n"
+}

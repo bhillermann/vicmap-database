@@ -251,5 +251,211 @@ class ControllerDisclosureTest(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
 
+class ControllerCompositionTest(unittest.TestCase):
+    @staticmethod
+    def _config(output_dir: Path):
+        import read_mailbox
+
+        return read_mailbox.AcquisitionConfig(
+            mailbox="automations@vegetationlink.com.au",
+            folder="Inbox",
+            allowed_senders=("noreply@datashare.maps.vic.gov.au",),
+            allowed_order_ids=("OK0VUZ",),
+            allowed_hosts=("s3.ap-southeast-2.amazonaws.com",),
+            lookback_days=15,
+            max_bytes=987654,
+            connect_timeout_seconds=17,
+            read_timeout_seconds=23,
+            progress_interval_seconds=29,
+            max_redirects=3,
+            fingerprint_hex_chars=16,
+            allow_order_id_mismatch=False,
+            output_dir=output_dir,
+        )
+
+    @staticmethod
+    def _credentials():
+        return {
+            "O365_AUTH_ID": "private-client-id",
+            "O365_AUTH_SECRET": "private-client-secret",
+            "TENANT_ID": "private-tenant-id",
+        }
+
+    @staticmethod
+    def _candidate(message_id: str, received_at: datetime, artifact_url: str):
+        from vicmap_acquire.candidates import Candidate
+
+        return Candidate(
+            order_id="OK0VUZ",
+            received_datetime_utc=received_at,
+            graph_message_id=message_id,
+            sender="noreply@datashare.maps.vic.gov.au",
+            artifact_url=artifact_url,
+        )
+
+    def test_controller_passes_complete_policy_to_one_newest_download(self):
+        import read_mailbox
+        from vicmap_acquire.download import DownloadPolicy, DownloadResult
+        from vicmap_acquire.graph import MessageMetadata
+
+        older_id = "older-complete-graph-id"
+        newest_id = "newest-complete-graph-id"
+        older_url = (
+            "https://s3.ap-southeast-2.amazonaws.com/private/older/"
+            "Order_OK0VUZ.zip?signature=older-private-query"
+        )
+        newest_url = (
+            "https://s3.ap-southeast-2.amazonaws.com/private/newest/"
+            "Order_OK0VUZ.zip?signature=newest-private-query"
+        )
+        older_at = datetime(2026, 9, 7, 1, tzinfo=timezone.utc)
+        newest_at = datetime(2026, 9, 7, 2, tzinfo=timezone.utc)
+        metadata = [
+            MessageMetadata(older_id, older_at, "ignored@example.test", "ignored"),
+            MessageMetadata(newest_id, newest_at, "ignored@example.test", "ignored"),
+        ]
+
+        class Graph:
+            def __init__(self, **kwargs):
+                pass
+
+            def iter_metadata(self, cutoff_utc):
+                return iter(metadata)
+
+            def get_mime_content(self, graph_message_id):
+                raise AssertionError("recognition is isolated by this controller test")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "artifacts"
+            config = self._config(output_dir)
+            final_path = output_dir / "Order_OK0VUZ.zip"
+            result = DownloadResult(
+                path=final_path,
+                byte_count=13,
+                sha256=hashlib.sha256(b"archive bytes").hexdigest(),
+                approved_hostname="s3.ap-southeast-2.amazonaws.com",
+                path_fingerprint="0123456789abcdef",
+            )
+            with (
+                patch.object(
+                    read_mailbox,
+                    "recognize_candidate",
+                    side_effect=(
+                        self._candidate(older_id, older_at, older_url),
+                        self._candidate(newest_id, newest_at, newest_url),
+                    ),
+                ),
+                patch.object(
+                    read_mailbox, "download_artifact", return_value=result
+                ) as downloader,
+            ):
+                actual = read_mailbox.run_acquisition(
+                    config,
+                    self._credentials(),
+                    graph_factory=Graph,
+                    session_factory=lambda: object(),
+                    event_sink=lambda event: None,
+                )
+
+        self.assertEqual(result, actual)
+        downloader.assert_called_once()
+        args, kwargs = downloader.call_args
+        self.assertEqual((newest_url,), args)
+        self.assertIsInstance(
+            kwargs.get("policy"),
+            DownloadPolicy,
+            "the final controller must pass the complete configured DownloadPolicy",
+        )
+        policy = kwargs["policy"]
+        self.assertEqual(987654, policy.max_bytes)
+        self.assertEqual(17, policy.connect_timeout_seconds)
+        self.assertEqual(23, policy.stalled_read_timeout_seconds)
+        self.assertEqual(29, policy.progress_interval_seconds)
+        self.assertEqual(3, policy.max_redirects)
+        self.assertEqual(16, policy.fingerprint_hex_length)
+        self.assertEqual(final_path, kwargs["final_path"])
+        self.assertNotIn("session", kwargs)
+
+    def test_empty_complete_scan_fails_candidate_stage_without_download(self):
+        import read_mailbox
+
+        class EmptyGraph:
+            def __init__(self, **kwargs):
+                pass
+
+            def iter_metadata(self, cutoff_utc):
+                return iter(())
+
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(read_mailbox, "download_artifact") as downloader:
+                with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                    read_mailbox.run_acquisition(
+                        self._config(Path(directory)),
+                        self._credentials(),
+                        graph_factory=EmptyGraph,
+                        event_sink=events.append,
+                    )
+
+        self.assertEqual("candidate_none", caught.exception.code)
+        downloader.assert_not_called()
+        self.assertEqual("candidate", events[-1]["stage"])
+        self.assertEqual("candidate_none", events[-1]["reason"])
+
+    def test_expired_newest_download_stops_after_one_attempt_without_fallback(self):
+        import read_mailbox
+        from vicmap_acquire.download import DownloadExpiredOrMissing
+        from vicmap_acquire.graph import MessageMetadata
+
+        older_id = "older-complete-graph-id"
+        newest_id = "newest-complete-graph-id"
+        older_url = "https://s3.ap-southeast-2.amazonaws.com/a/Order_OK0VUZ.zip"
+        newest_url = "https://s3.ap-southeast-2.amazonaws.com/b/Order_OK0VUZ.zip"
+        older_at = datetime(2026, 9, 7, 1, tzinfo=timezone.utc)
+        newest_at = datetime(2026, 9, 7, 2, tzinfo=timezone.utc)
+        metadata = [
+            MessageMetadata(older_id, older_at, "ignored@example.test", "ignored"),
+            MessageMetadata(newest_id, newest_at, "ignored@example.test", "ignored"),
+        ]
+
+        class Graph:
+            def __init__(self, **kwargs):
+                pass
+
+            def iter_metadata(self, cutoff_utc):
+                return iter(metadata)
+
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(
+                    read_mailbox,
+                    "recognize_candidate",
+                    side_effect=(
+                        self._candidate(older_id, older_at, older_url),
+                        self._candidate(newest_id, newest_at, newest_url),
+                    ),
+                ),
+                patch.object(
+                    read_mailbox,
+                    "download_artifact",
+                    side_effect=DownloadExpiredOrMissing(),
+                ) as downloader,
+            ):
+                with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                    read_mailbox.run_acquisition(
+                        self._config(Path(directory)),
+                        self._credentials(),
+                        graph_factory=Graph,
+                        event_sink=events.append,
+                    )
+
+        self.assertEqual("download_expired_or_missing", caught.exception.code)
+        downloader.assert_called_once()
+        self.assertEqual(newest_url, downloader.call_args.args[0])
+        self.assertEqual("download", events[-1]["stage"])
+        self.assertEqual("download_expired_or_missing", events[-1]["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
