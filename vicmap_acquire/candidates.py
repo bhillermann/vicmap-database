@@ -80,6 +80,7 @@ class _AnchorCollector(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.urls: list[str] = []
+        self.visible_urls: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         if tag.casefold() != "a":
@@ -87,6 +88,9 @@ class _AnchorCollector(HTMLParser):
         for key, value in attrs:
             if key.casefold() == "href" and isinstance(value, str):
                 self.urls.append(value)
+
+    def handle_data(self, data):
+        self.visible_urls.extend(extract_text_urls(data))
 
 
 def _subject_order_id(subject: str, allowed_order_ids: tuple[str, ...]) -> str | None:
@@ -123,6 +127,12 @@ def extract_html_hrefs(html: str) -> list[str]:
     return parser.urls
 
 
+def _extract_html_urls(html: str) -> list[str]:
+    parser = _AnchorCollector()
+    parser.feed(html)
+    return parser.urls + parser.visible_urls
+
+
 def _archive_links(urls: Iterable[str]) -> list[tuple[str, str]]:
     links = []
     for url in urls:
@@ -145,7 +155,7 @@ def _mime_archive_links(mime_content: bytes) -> list[tuple[str, str]]:
         html = message.get_body(preferencelist=("html",))
         if html is None:
             return []
-        return _archive_links(extract_html_hrefs(html.get_content()))
+        return _archive_links(_extract_html_urls(html.get_content()))
     except Exception:
         raise CandidateAmbiguous() from None
 
