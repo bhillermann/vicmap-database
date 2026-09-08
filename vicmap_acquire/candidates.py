@@ -14,13 +14,39 @@ from urllib.parse import unquote, urlsplit
 from vicmap_acquire.graph import MessageMetadata
 
 
-_TEXT_URL = re.compile(r"https://[^\s<>\"']+")
+_TEXT_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"']+")
 
 
-class CandidateError(RuntimeError):
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
+class CandidateFailure(RuntimeError):
+    """Closed candidate-policy failure containing no source-controlled values."""
+
+    code = "candidate_ambiguous"
+
+    def __init__(self):
+        super().__init__(self.code)
+
+
+class CandidateNone(CandidateFailure):
+    code = "candidate_none"
+
+
+class CandidateAmbiguous(CandidateFailure):
+    code = "candidate_ambiguous"
+
+
+class OrderIdMismatch(CandidateFailure):
+    code = "order_id_mismatch"
+
+
+# Compatibility name consumed by the Plan 01 acquisition controller.
+CandidateError = CandidateFailure
+
+
+@dataclass(frozen=True)
+class CandidatePolicy:
+    allowed_senders: tuple[str, ...]
+    allowed_order_ids: tuple[str, ...]
+    allow_order_id_mismatch: bool = False
 
 
 @dataclass(frozen=True)
@@ -30,6 +56,10 @@ class Candidate:
     graph_message_id: str
     sender: str
     artifact_url: str
+
+    @property
+    def selection_key(self) -> tuple[datetime, str]:
+        return (self.received_datetime_utc, self.graph_message_id)
 
 
 class _AnchorCollector(HTMLParser):
@@ -55,59 +85,103 @@ def _subject_order_id(subject: str, allowed_order_ids: tuple[str, ...]) -> str |
 
 def _archive_order_id(url: str) -> str | None:
     try:
-        filename = unquote(urlsplit(url).path.rsplit("/", 1)[-1], errors="strict")
+        parsed = urlsplit(url)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        filename = unquote(parsed.path.rsplit("/", 1)[-1], errors="strict")
     except (UnicodeDecodeError, ValueError):
         return None
     match = re.fullmatch(r"Order_([^/]+)\.zip", filename)
     return match.group(1) if match else None
 
 
-def _mime_urls(mime_content: bytes) -> list[str]:
+def extract_text_urls(text: str) -> list[str]:
+    """Return URL occurrences from plain text without deduplication."""
+
+    return _TEXT_URL.findall(text)
+
+
+def extract_html_hrefs(html: str) -> list[str]:
+    """Return anchor href occurrences without rendering or executing HTML."""
+
+    parser = _AnchorCollector()
+    parser.feed(html)
+    return parser.urls
+
+
+def _archive_links(urls: Iterable[str]) -> list[tuple[str, str]]:
+    links = []
+    for url in urls:
+        order_id = _archive_order_id(url)
+        if order_id is not None:
+            links.append((url, order_id))
+    return links
+
+
+def _mime_archive_links(mime_content: bytes) -> list[tuple[str, str]]:
     try:
+        if not isinstance(mime_content, bytes):
+            raise TypeError
         message = BytesParser(policy=policy.default).parsebytes(mime_content)
         plain = message.get_body(preferencelist=("plain",))
-        urls = _TEXT_URL.findall(plain.get_content()) if plain is not None else []
-        if urls:
-            return urls
+        if plain is not None:
+            plain_links = _archive_links(extract_text_urls(plain.get_content()))
+            if plain_links:
+                return plain_links
         html = message.get_body(preferencelist=("html",))
         if html is None:
             return []
-        parser = _AnchorCollector()
-        parser.feed(html.get_content())
-        return parser.urls
+        return _archive_links(extract_html_hrefs(html.get_content()))
     except Exception:
-        return []
+        raise CandidateAmbiguous() from None
 
 
 def recognize_candidate(
     metadata: MessageMetadata,
-    mime_loader: Callable[[], bytes],
+    mime_content: bytes | Callable[[], bytes],
+    policy_config: CandidatePolicy | None = None,
     *,
-    allowed_senders: tuple[str, ...],
-    allowed_order_ids: tuple[str, ...],
+    allowed_senders: tuple[str, ...] = (),
+    allowed_order_ids: tuple[str, ...] = (),
     allow_order_id_mismatch: bool = False,
 ) -> Candidate | None:
     """Return a candidate only after independent header, MIME, and order checks."""
 
-    if metadata.received_datetime_utc.tzinfo is None:
-        return None
+    candidate_policy = policy_config or CandidatePolicy(
+        allowed_senders=allowed_senders,
+        allowed_order_ids=allowed_order_ids,
+        allow_order_id_mismatch=allow_order_id_mismatch,
+    )
     sender = metadata.sender.strip()
-    if sender.casefold() not in {item.strip().casefold() for item in allowed_senders}:
+    if sender.casefold() not in {
+        item.strip().casefold() for item in candidate_policy.allowed_senders
+    }:
         return None
-    subject_order_id = _subject_order_id(metadata.subject, allowed_order_ids)
+    subject_order_id = _subject_order_id(
+        metadata.subject, candidate_policy.allowed_order_ids
+    )
     if subject_order_id is None:
         return None
+    if (
+        not isinstance(metadata.received_datetime_utc, datetime)
+        or metadata.received_datetime_utc.tzinfo is None
+        or metadata.received_datetime_utc.utcoffset() is None
+    ):
+        raise CandidateAmbiguous()
 
-    links = []
-    for url in _mime_urls(mime_loader()):
-        filename_order_id = _archive_order_id(url)
-        if filename_order_id in allowed_order_ids:
-            links.append((url, filename_order_id))
+    try:
+        loaded_mime = mime_content() if callable(mime_content) else mime_content
+    except Exception:
+        raise CandidateAmbiguous() from None
+    links = _mime_archive_links(loaded_mime)
     if len(links) != 1:
-        return None
+        raise CandidateAmbiguous()
     artifact_url, filename_order_id = links[0]
-    if filename_order_id != subject_order_id and not allow_order_id_mismatch:
-        return None
+    if (
+        filename_order_id != subject_order_id
+        and not candidate_policy.allow_order_id_mismatch
+    ):
+        raise OrderIdMismatch()
     return Candidate(
         order_id=subject_order_id,
         received_datetime_utc=metadata.received_datetime_utc.astimezone(timezone.utc),
