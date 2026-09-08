@@ -18,9 +18,9 @@ import requests
 from vicmap_acquire.candidates import CandidateError, recognize_candidate, select_candidate
 from vicmap_acquire.download import (
     DownloadError,
+    DownloadPolicy,
     DownloadResult,
     download_artifact,
-    validate_https_target,
 )
 from vicmap_acquire.graph import GraphError, GraphMailbox
 from vicmap_acquire.evidence import (
@@ -204,16 +204,20 @@ def run_acquisition(
             )
         )
 
-        validate_https_target(selected.artifact_url, config.allowed_hosts)
-        result = download_artifact(
-            selected.artifact_url,
-            output_dir=config.output_dir,
+        download_policy = DownloadPolicy(
             allowed_hosts=config.allowed_hosts,
             max_bytes=config.max_bytes,
             connect_timeout_seconds=config.connect_timeout_seconds,
-            read_timeout_seconds=config.read_timeout_seconds,
+            stalled_read_timeout_seconds=config.read_timeout_seconds,
+            progress_interval_seconds=config.progress_interval_seconds,
             max_redirects=config.max_redirects,
-            session=session_factory(),
+            fingerprint_hex_length=config.fingerprint_hex_chars,
+        )
+        result = download_artifact(
+            selected.artifact_url,
+            final_path=config.output_dir / f"Order_{selected.order_id}.zip",
+            policy=download_policy,
+            session_factory=session_factory,
             progress_sink=lambda progress: event_sink(
                 ProgressEvent.from_download_event(progress)
             ),
