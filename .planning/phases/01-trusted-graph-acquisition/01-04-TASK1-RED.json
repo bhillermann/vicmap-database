@@ -1,0 +1,9 @@
+{
+  "command": "nix develop path:. -c python -m unittest tests.test_download.DownloadTargetPolicyTest.test_public_policy_contract_is_explicit -v",
+  "exitCode": 1,
+  "targetTest": "test_public_policy_contract_is_explicit",
+  "targetFile": "tests/test_download.py",
+  "expected": "The downloader exposes an explicit validated DownloadPolicy and the policy-first download_artifact interface",
+  "actual": "DownloadPolicy was absent from the tracer implementation",
+  "output": "TAP version 13\nnot ok 1 - test_public_policy_contract_is_explicit\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n"
+}
