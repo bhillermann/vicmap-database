@@ -115,7 +115,6 @@ class GraphMailbox:
         self._mailbox_address = mailbox_address
         self._folder_name = folder_name
         self._folder = None
-        self._messages: dict[str, object] = {}
 
     def authenticate_and_confirm(self) -> str:
         """Authenticate if necessary and confirm the configured Inbox resource."""
@@ -151,8 +150,20 @@ class GraphMailbox:
         self.authenticate_and_confirm()
         return self._folder
 
-    def iter_metadata(self, cutoff_utc: datetime) -> Iterator[MessageMetadata]:
+    def iter_message_metadata(
+        self, cutoff_utc: datetime
+    ) -> Iterator[MessageMetadata]:
+        """Stream minimal project-owned metadata through every Graph page."""
+
         try:
+            if (
+                not isinstance(cutoff_utc, datetime)
+                or cutoff_utc.tzinfo is None
+                or cutoff_utc.utcoffset() is None
+                or cutoff_utc.utcoffset() != timezone.utc.utcoffset(cutoff_utc)
+            ):
+                raise GraphScanFailed()
+
             folder = self._confirmed_folder()
             query = folder.new_query("receivedDateTime").greater_equal(cutoff_utc)
             query = query.select("id", "receivedDateTime", "sender", "subject")
@@ -160,29 +171,48 @@ class GraphMailbox:
                 limit=None,
                 batch=999,
                 query=query,
-                download_attachments=False,
             )
             for message in messages:
-                message_id = str(message.object_id)
+                message_id = message.object_id
                 received = message.received
-                if received.tzinfo is None:
+                sender_object = message.sender
+                sender = getattr(sender_object, "address", sender_object)
+                subject = message.subject
+                if (
+                    not _is_nonblank(message_id)
+                    or not isinstance(received, datetime)
+                    or received.tzinfo is None
+                    or received.utcoffset() is None
+                    or not _is_nonblank(sender)
+                    or not isinstance(subject, str)
+                ):
                     raise GraphScanFailed()
-                sender = getattr(message.sender, "address", message.sender)
-                self._messages[message_id] = message
                 yield MessageMetadata(
                     graph_message_id=message_id,
                     received_datetime_utc=received.astimezone(timezone.utc),
-                    sender=str(sender),
-                    subject=str(message.subject),
+                    sender=sender,
+                    subject=subject,
                 )
         except GraphFailure:
             raise
         except Exception:
             raise GraphScanFailed() from None
 
-    def get_mime_content(self, graph_message_id: str) -> bytes:
+    def iter_metadata(self, cutoff_utc: datetime) -> Iterator[MessageMetadata]:
+        """Compatibility name consumed by the Plan 01 controller."""
+
+        yield from self.iter_message_metadata(cutoff_utc)
+
+    def get_message_mime(self, graph_message_id: str) -> bytes:
+        """Retrieve MIME for one explicitly qualified complete Graph ID."""
+
         try:
-            content = self._messages[graph_message_id].get_mime_content()
+            if not _is_nonblank(graph_message_id):
+                raise GraphScanFailed()
+            message = self._confirmed_folder().get_message(object_id=graph_message_id)
+            if message is None:
+                raise GraphScanFailed()
+            content = message.get_mime_content()
             if not isinstance(content, bytes):
                 raise GraphScanFailed()
             return content
@@ -190,3 +220,8 @@ class GraphMailbox:
             raise
         except Exception:
             raise GraphScanFailed() from None
+
+    def get_mime_content(self, graph_message_id: str) -> bytes:
+        """Compatibility name consumed by the Plan 01 controller."""
+
+        return self.get_message_mime(graph_message_id)
