@@ -1,0 +1,9 @@
+{
+  "command": "nix develop path:. -c python -m unittest tests.test_graph.GraphMetadataBoundaryTest.test_inclusive_cutoff_selects_minimal_fields_and_exhausts_pages -v",
+  "exitCode": 1,
+  "targetTest": "test_inclusive_cutoff_selects_minimal_fields_and_exhausts_pages",
+  "targetFile": "tests/test_graph.py",
+  "expected": "The minimal O365 query requests Graph from so O365 2.1.0 can populate the project sender field",
+  "actual": "The adapter requested Graph sender, leaving O365 Message.sender empty during the controlled live scan",
+  "output": "TAP version 13\nnot ok 1 - test_inclusive_cutoff_selects_minimal_fields_and_exhausts_pages\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n"
+}

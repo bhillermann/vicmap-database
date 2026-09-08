@@ -767,7 +767,7 @@ class GraphMetadataBoundaryTest(unittest.TestCase):
         self.assertEqual("receivedDateTime", folder.query.attribute)
         self.assertIs(cutoff, folder.query.cutoff)
         self.assertEqual(
-            ("id", "receivedDateTime", "sender", "subject"),
+            ("id", "receivedDateTime", "from", "subject"),
             folder.query.selected,
         )
         self.assertEqual(
