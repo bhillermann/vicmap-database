@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import itertools
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
-from vicmap_acquire.candidates import CandidateError, recognize_candidate
+from vicmap_acquire.candidates import (
+    Candidate,
+    CandidateAmbiguous,
+    CandidateError,
+    CandidateNone,
+    recognize_candidate,
+    select_candidate,
+)
 from vicmap_acquire.graph import MessageMetadata
 
 
@@ -232,6 +240,151 @@ class CandidateRecognitionTest(unittest.TestCase):
 
         self.assertEqual("candidate_ambiguous", caught.exception.code)
         self.assertEqual("candidate_ambiguous", str(caught.exception))
+
+
+def _candidate(
+    graph_message_id: str,
+    received_datetime_utc: object,
+    *,
+    order_id: str = "OK0VUZ",
+    sender: str = SENDER,
+    artifact_url: str | None = None,
+) -> Candidate:
+    return Candidate(
+        order_id=order_id,
+        received_datetime_utc=received_datetime_utc,
+        graph_message_id=graph_message_id,
+        sender=sender,
+        artifact_url=artifact_url or _url(f"Order_{order_id}.zip"),
+    )
+
+
+class CandidateSelectionTest(unittest.TestCase):
+    def setUp(self):
+        self.oldest = _candidate(
+            "id-oldest",
+            datetime(2026, 9, 5, tzinfo=timezone.utc),
+            order_id="OK0VUZ",
+        )
+        self.newest = _candidate(
+            "id-newest",
+            datetime(2026, 9, 7, tzinfo=timezone.utc),
+            order_id="SECOND2",
+        )
+        self.middle = _candidate(
+            "id-middle",
+            datetime(2026, 9, 6, tzinfo=timezone.utc),
+            order_id="OK0VUZ",
+        )
+
+    def assertClosedFailure(self, expected_type, callable_object):
+        try:
+            callable_object()
+        except Exception as error:
+            self.assertIsInstance(error, expected_type)
+            self.assertEqual(expected_type.code, error.code)
+            self.assertEqual(expected_type.code, str(error))
+        else:
+            self.fail(f"{expected_type.__name__} was not raised")
+
+    def test_newest_candidate_wins_across_orders_after_complete_consumption(self):
+        consumed = []
+
+        def stream():
+            for candidate in (self.oldest, self.newest, self.middle):
+                consumed.append(candidate.graph_message_id)
+                yield candidate
+
+        selected = select_candidate(stream())
+
+        self.assertIs(self.newest, selected)
+        self.assertEqual(
+            ["id-oldest", "id-newest", "id-middle"],
+            consumed,
+        )
+
+    def test_selection_is_independent_of_iterator_and_page_order(self):
+        candidates = (self.oldest, self.middle, self.newest)
+        for ordering in itertools.permutations(candidates):
+            with self.subTest(ordering=[item.graph_message_id for item in ordering]):
+                self.assertIs(self.newest, select_candidate(iter(ordering)))
+
+    def test_equal_timestamp_uses_complete_unicode_graph_id(self):
+        received = datetime(2026, 9, 7, tzinfo=timezone.utc)
+        lower_id = "opaque-" + ("x" * 4096) + "Ω"
+        higher_id = "opaque-" + ("x" * 4096) + "🚀"
+        lower = _candidate(lower_id, received)
+        higher = _candidate(higher_id, received)
+
+        self.assertIs(higher, select_candidate([lower, higher]))
+        self.assertIs(higher, select_candidate([higher, lower]))
+        self.assertEqual((received, higher_id), higher.selection_key)
+
+    def test_aware_offset_datetimes_are_compared_as_utc_instants(self):
+        same_instant_a = _candidate(
+            "id-a",
+            datetime(2026, 9, 7, 10, tzinfo=timezone(timedelta(hours=10))),
+        )
+        same_instant_b = _candidate(
+            "id-b",
+            datetime(2026, 9, 7, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertIs(same_instant_b, select_candidate([same_instant_a, same_instant_b]))
+
+    def test_identical_duplicate_records_are_coalesced(self):
+        duplicate = _candidate(
+            self.newest.graph_message_id,
+            self.newest.received_datetime_utc,
+            order_id=self.newest.order_id,
+            sender=self.newest.sender,
+            artifact_url=self.newest.artifact_url,
+        )
+
+        selected = select_candidate([self.newest, duplicate, self.oldest])
+
+        self.assertEqual(self.newest, selected)
+
+    def test_conflicting_records_with_the_same_total_key_fail_ambiguous(self):
+        conflict = _candidate(
+            self.newest.graph_message_id,
+            self.newest.received_datetime_utc,
+            order_id=self.newest.order_id,
+            artifact_url=_url("Order_CONFLICT.zip"),
+        )
+
+        self.assertClosedFailure(
+            CandidateAmbiguous,
+            lambda: select_candidate([self.newest, conflict]),
+        )
+
+    def test_empty_iterable_and_null_input_fail_candidate_none(self):
+        for values in ([], iter(()), None):
+            with self.subTest(values=values):
+                self.assertClosedFailure(
+                    CandidateNone,
+                    lambda values=values: select_candidate(values),
+                )
+
+    def test_explicit_null_item_fails_candidate_ambiguous(self):
+        self.assertClosedFailure(
+            CandidateAmbiguous,
+            lambda: select_candidate([self.oldest, None]),
+        )
+
+    def test_naive_and_malformed_candidate_times_fail_ambiguous(self):
+        invalid_times = (
+            datetime(2026, 9, 7),
+            "2026-09-07T00:00:00Z",
+            None,
+        )
+        for invalid_time in invalid_times:
+            with self.subTest(invalid_time=invalid_time):
+                invalid = _candidate("invalid-time", invalid_time)
+                self.assertClosedFailure(
+                    CandidateAmbiguous,
+                    lambda invalid=invalid: select_candidate([invalid]),
+                )
 
 
 if __name__ == "__main__":

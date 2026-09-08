@@ -1,0 +1,9 @@
+{
+  "command": "nix develop path:. -c python -m unittest tests.test_candidates.CandidateSelectionTest -v",
+  "exitCode": 1,
+  "targetTest": "test_empty_iterable_and_null_input_fail_candidate_none",
+  "targetFile": "tests/test_candidates.py",
+  "expected": "Empty and null candidate collections raise the closed candidate_none failure",
+  "actual": "Empty collections returned None and null input exposed a TypeError",
+  "output": "TAP version 13\nnot ok 1 - test_empty_iterable_and_null_input_fail_candidate_none\n1..9\n# tests 9\n# pass 4\n# fail 5\n# cancelled 0\n"
+}
