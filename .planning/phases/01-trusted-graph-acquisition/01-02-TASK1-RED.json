@@ -1,0 +1,9 @@
+{
+  "command": "nix develop path:. -c python -m unittest tests.test_graph.GraphAuthenticationBoundaryTest -v",
+  "exitCode": 1,
+  "targetTest": "test_fresh_authentication_uses_default_scope_and_exact_mailbox",
+  "targetFile": "tests/test_graph.py",
+  "expected": "GraphMailbox exposes explicit memory-only authentication and exact mailbox confirmation",
+  "actual": "hasattr(GraphMailbox, 'authenticate_and_confirm') was False",
+  "output": "TAP version 13\nnot ok 1 - test_blank_runtime_inputs_stop_before_account_construction\nnot ok 2 - test_existing_authentication_skips_fresh_authentication\nnot ok 3 - test_false_authentication_fails_before_mailbox_access\nnot ok 4 - test_fresh_authentication_uses_default_scope_and_exact_mailbox\nnot ok 5 - test_provider_failures_are_typed_and_disclosure_safe\n1..5\n# tests 5\n# pass 0\n# fail 5\n# cancelled 0\n"
+}

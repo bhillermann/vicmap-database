@@ -458,5 +458,197 @@ class ConfigurationTest(unittest.TestCase):
             self.assertFalse(sentinel.exists())
 
 
+class _AuthenticationFolder:
+    def __init__(self):
+        self.message_calls = []
+
+    def get_messages(self, *args, **kwargs):
+        self.message_calls.append((args, kwargs))
+        return ()
+
+
+class _AuthenticationMailbox:
+    def __init__(self, folder=None, failure=None):
+        self.folder = folder or _AuthenticationFolder()
+        self.failure = failure
+        self.folder_calls = []
+
+    def get_folder(self, *args, **kwargs):
+        self.folder_calls.append((args, kwargs))
+        if self.failure is not None:
+            raise self.failure
+        return self.folder
+
+
+class _AuthenticationAccount:
+    def __init__(
+        self,
+        *,
+        authenticated=False,
+        authentication_result=True,
+        authentication_failure=None,
+        mailbox=None,
+    ):
+        self.is_authenticated = authenticated
+        self.authentication_result = authentication_result
+        self.authentication_failure = authentication_failure
+        self.mailbox_object = mailbox or _AuthenticationMailbox()
+        self.authenticate_calls = []
+        self.mailbox_calls = []
+
+    def authenticate(self, *args, **kwargs):
+        self.authenticate_calls.append((args, kwargs))
+        if self.authentication_failure is not None:
+            raise self.authentication_failure
+        return self.authentication_result
+
+    def mailbox(self, *args, **kwargs):
+        self.mailbox_calls.append((args, kwargs))
+        return self.mailbox_object
+
+
+class GraphAuthenticationBoundaryTest(unittest.TestCase):
+    def _require_task_api(self):
+        from vicmap_acquire import graph
+
+        self.assertTrue(
+            hasattr(graph.GraphMailbox, "authenticate_and_confirm"),
+            "Task 1 must expose an explicit authentication confirmation boundary",
+        )
+        self.assertTrue(hasattr(graph, "GraphAuthenticationFailed"))
+        self.assertTrue(hasattr(graph, "MailboxAccessFailed"))
+
+    def _construct(self, account):
+        from O365.utils.token import MemoryTokenBackend
+        from vicmap_acquire.graph import GraphMailbox
+
+        construction = []
+
+        def account_factory(*args, **kwargs):
+            construction.append((args, kwargs))
+            return account
+
+        adapter = GraphMailbox(
+            credentials=("seed-client-id", "seed-client-secret"),
+            tenant_id="seed-tenant-id",
+            mailbox_address="automations@vegetationlink.com.au",
+            account_factory=account_factory,
+        )
+        self.assertEqual(1, len(construction))
+        args, kwargs = construction[0]
+        self.assertEqual((("seed-client-id", "seed-client-secret"),), args)
+        self.assertEqual("credentials", kwargs["auth_flow_type"])
+        self.assertEqual("seed-tenant-id", kwargs["tenant_id"])
+        self.assertIsInstance(kwargs["token_backend"], MemoryTokenBackend)
+        return adapter
+
+    def test_fresh_authentication_uses_default_scope_and_exact_mailbox(self):
+        self._require_task_api()
+        account = _AuthenticationAccount()
+        adapter = self._construct(account)
+
+        self.assertEqual(
+            "automations@vegetationlink.com.au",
+            adapter.authenticate_and_confirm(),
+        )
+        self.assertEqual(
+            [
+                (
+                    (),
+                    {
+                        "requested_scopes": [
+                            "https://graph.microsoft.com/.default"
+                        ]
+                    },
+                )
+            ],
+            account.authenticate_calls,
+        )
+        self.assertEqual(
+            [((), {"resource": "automations@vegetationlink.com.au"})],
+            account.mailbox_calls,
+        )
+        self.assertEqual(
+            [((), {"folder_name": "Inbox"})],
+            account.mailbox_object.folder_calls,
+        )
+        self.assertEqual([], account.mailbox_object.folder.message_calls)
+
+    def test_existing_authentication_skips_fresh_authentication(self):
+        self._require_task_api()
+        account = _AuthenticationAccount(authenticated=True)
+        adapter = self._construct(account)
+
+        self.assertEqual(
+            "automations@vegetationlink.com.au",
+            adapter.authenticate_and_confirm(),
+        )
+        self.assertEqual([], account.authenticate_calls)
+
+    def test_false_authentication_fails_before_mailbox_access(self):
+        self._require_task_api()
+        from vicmap_acquire.graph import GraphAuthenticationFailed
+
+        account = _AuthenticationAccount(authentication_result=False)
+        adapter = self._construct(account)
+        with self.assertRaises(GraphAuthenticationFailed) as caught:
+            adapter.authenticate_and_confirm()
+
+        self.assertEqual("authentication", caught.exception.stage)
+        self.assertEqual("authentication_failed", caught.exception.reason)
+        self.assertEqual([], account.mailbox_calls)
+
+    def test_provider_failures_are_typed_and_disclosure_safe(self):
+        self._require_task_api()
+        from vicmap_acquire.graph import (
+            GraphAuthenticationFailed,
+            MailboxAccessFailed,
+        )
+
+        raw_marker = "raw-provider-secret-marker"
+        output = io.StringIO()
+        auth_account = _AuthenticationAccount(
+            authentication_failure=RuntimeError(raw_marker)
+        )
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(GraphAuthenticationFailed) as auth_caught:
+                self._construct(auth_account).authenticate_and_confirm()
+
+        mailbox = _AuthenticationMailbox(failure=RuntimeError(raw_marker))
+        mailbox_account = _AuthenticationAccount(
+            authenticated=True,
+            mailbox=mailbox,
+        )
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(MailboxAccessFailed) as mailbox_caught:
+                self._construct(mailbox_account).authenticate_and_confirm()
+
+        rendered = output.getvalue() + repr(auth_caught.exception) + repr(
+            mailbox_caught.exception
+        )
+        self.assertNotIn(raw_marker, rendered)
+        self.assertNotIn("seed-client-id", rendered)
+        self.assertNotIn("seed-client-secret", rendered)
+        self.assertEqual("mailbox_access_failed", mailbox_caught.exception.reason)
+
+    def test_blank_runtime_inputs_stop_before_account_construction(self):
+        self._require_task_api()
+        from vicmap_acquire.graph import GraphAuthenticationFailed, GraphMailbox
+
+        valid = {
+            "credentials": ("seed-client-id", "seed-client-secret"),
+            "tenant_id": "seed-tenant-id",
+            "mailbox_address": "automations@vegetationlink.com.au",
+        }
+        for field in ("credentials", "tenant_id", "mailbox_address"):
+            values = dict(valid)
+            values[field] = ("seed-client-id", " ") if field == "credentials" else " "
+            factory = unittest.mock.Mock()
+            with self.subTest(field=field):
+                with self.assertRaises(GraphAuthenticationFailed):
+                    GraphMailbox(account_factory=factory, **values)
+                factory.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
