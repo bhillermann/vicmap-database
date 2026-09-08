@@ -3,11 +3,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import importlib
+import inspect
 import io
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -648,6 +649,232 @@ class GraphAuthenticationBoundaryTest(unittest.TestCase):
                 with self.assertRaises(GraphAuthenticationFailed):
                     GraphMailbox(account_factory=factory, **values)
                 factory.assert_not_called()
+
+
+class _MetadataQuery:
+    def __init__(self, attribute):
+        self.attribute = attribute
+        self.cutoff = None
+        self.selected = None
+
+    def greater_equal(self, cutoff):
+        self.cutoff = cutoff
+        return self
+
+    def select(self, *fields):
+        self.selected = fields
+        return self
+
+
+class _MetadataMessage:
+    def __init__(self, message_id, received, sender, subject, mime=b"mime-bytes"):
+        self.object_id = message_id
+        self.received = received
+        self.sender = SimpleNamespace(address=sender) if sender is not None else None
+        self.subject = subject
+        self.mime = mime
+        self.mime_calls = 0
+
+    def get_mime_content(self):
+        self.mime_calls += 1
+        if isinstance(self.mime, Exception):
+            raise self.mime
+        return self.mime
+
+
+class _MetadataFolder:
+    def __init__(self, messages=(), paging_failure=None):
+        self.messages = list(messages)
+        self.paging_failure = paging_failure
+        self.query = None
+        self.get_messages_calls = []
+        self.get_message_calls = []
+        self.yielded_ids = []
+
+    def new_query(self, attribute):
+        self.query = _MetadataQuery(attribute)
+        return self.query
+
+    def get_messages(self, *args, **kwargs):
+        self.get_messages_calls.append((args, kwargs))
+
+        def pages():
+            for message in self.messages:
+                if message.received >= self.query.cutoff:
+                    self.yielded_ids.append(message.object_id)
+                    yield message
+            if self.paging_failure is not None:
+                raise self.paging_failure
+
+        return pages()
+
+    def get_message(self, *args, **kwargs):
+        self.get_message_calls.append((args, kwargs))
+        object_id = kwargs["object_id"]
+        return next(message for message in self.messages if message.object_id == object_id)
+
+
+class GraphMetadataBoundaryTest(unittest.TestCase):
+    def _require_task_api(self):
+        from vicmap_acquire import graph
+
+        self.assertTrue(
+            hasattr(graph.GraphMailbox, "iter_message_metadata"),
+            "Task 2 must expose the metadata-only pagination boundary",
+        )
+        self.assertTrue(hasattr(graph.GraphMailbox, "get_message_mime"))
+
+    def _adapter(self, folder):
+        from vicmap_acquire.graph import GraphMailbox
+
+        mailbox = _AuthenticationMailbox(folder=folder)
+        account = _AuthenticationAccount(authenticated=True, mailbox=mailbox)
+        adapter = GraphMailbox(
+            credentials=("seed-client-id", "seed-client-secret"),
+            tenant_id="seed-tenant-id",
+            mailbox_address="automations@vegetationlink.com.au",
+            account_factory=lambda *args, **kwargs: account,
+        )
+        return adapter
+
+    def test_inclusive_cutoff_selects_minimal_fields_and_exhausts_pages(self):
+        self._require_task_api()
+        cutoff = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        messages = [
+            _MetadataMessage(
+                "before-id",
+                cutoff - timedelta(microseconds=1),
+                "before@example.test",
+                "before",
+            ),
+            _MetadataMessage(
+                "equal-id",
+                cutoff,
+                "equal@example.test",
+                "equal",
+            ),
+            _MetadataMessage(
+                "later-page-id",
+                cutoff + timedelta(microseconds=1),
+                "later@example.test",
+                "later",
+            ),
+        ]
+        folder = _MetadataFolder(messages)
+        metadata = list(self._adapter(folder).iter_message_metadata(cutoff))
+
+        self.assertEqual(["equal-id", "later-page-id"], [m.graph_message_id for m in metadata])
+        self.assertEqual("receivedDateTime", folder.query.attribute)
+        self.assertIs(cutoff, folder.query.cutoff)
+        self.assertEqual(
+            ("id", "receivedDateTime", "sender", "subject"),
+            folder.query.selected,
+        )
+        self.assertEqual(
+            [((), {"limit": None, "batch": 999, "query": folder.query})],
+            folder.get_messages_calls,
+        )
+        self.assertEqual(["equal-id", "later-page-id"], folder.yielded_ids)
+        self.assertEqual([0, 0, 0], [message.mime_calls for message in messages])
+
+    def test_empty_metadata_iteration_yields_no_fabricated_values(self):
+        self._require_task_api()
+        folder = _MetadataFolder()
+        cutoff = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        self.assertEqual([], list(self._adapter(folder).iter_message_metadata(cutoff)))
+
+    def test_naive_cutoff_and_malformed_provider_metadata_fail_closed(self):
+        self._require_task_api()
+        from vicmap_acquire.graph import GraphScanFailed
+
+        with self.assertRaises(GraphScanFailed):
+            list(
+                self._adapter(_MetadataFolder()).iter_message_metadata(
+                    datetime(2026, 9, 1)
+                )
+            )
+
+        malformed = (
+            _MetadataMessage("", datetime(2026, 9, 1, tzinfo=timezone.utc), "a@b", "s"),
+            _MetadataMessage("id", None, "a@b", "s"),
+            _MetadataMessage("id", datetime(2026, 9, 1), "a@b", "s"),
+            _MetadataMessage("id", datetime(2026, 9, 1, tzinfo=timezone.utc), None, "s"),
+            _MetadataMessage("id", datetime(2026, 9, 1, tzinfo=timezone.utc), "a@b", None),
+        )
+        for message in malformed:
+            with self.subTest(message_id=message.object_id, received=message.received):
+                folder = _MetadataFolder([message])
+                with self.assertRaises(GraphScanFailed):
+                    list(
+                        self._adapter(folder).iter_message_metadata(
+                            datetime(2026, 8, 1, tzinfo=timezone.utc)
+                        )
+                    )
+
+    def test_selective_mime_fetches_by_complete_id_only_on_explicit_call(self):
+        self._require_task_api()
+        message = _MetadataMessage(
+            "complete-opaque-id",
+            datetime(2026, 9, 1, tzinfo=timezone.utc),
+            "sender@example.test",
+            "subject",
+            mime=b"selective-mime",
+        )
+        folder = _MetadataFolder([message])
+        adapter = self._adapter(folder)
+        adapter.authenticate_and_confirm()
+
+        self.assertEqual(0, message.mime_calls)
+        self.assertEqual(b"selective-mime", adapter.get_message_mime("complete-opaque-id"))
+        self.assertEqual([((), {"object_id": "complete-opaque-id"})], folder.get_message_calls)
+        self.assertEqual(1, message.mime_calls)
+
+    def test_paging_and_mime_provider_errors_do_not_escape(self):
+        self._require_task_api()
+        from vicmap_acquire.graph import GraphScanFailed
+
+        raw_marker = "raw-graph-page-or-mime-marker"
+        output = io.StringIO()
+        paging_folder = _MetadataFolder(paging_failure=RuntimeError(raw_marker))
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(GraphScanFailed) as page_caught:
+                list(
+                    self._adapter(paging_folder).iter_message_metadata(
+                        datetime(2026, 9, 1, tzinfo=timezone.utc)
+                    )
+                )
+
+        mime_message = _MetadataMessage(
+            "mime-id",
+            datetime(2026, 9, 1, tzinfo=timezone.utc),
+            "sender@example.test",
+            "subject",
+            mime=RuntimeError(raw_marker),
+        )
+        mime_adapter = self._adapter(_MetadataFolder([mime_message]))
+        mime_adapter.authenticate_and_confirm()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(GraphScanFailed) as mime_caught:
+                mime_adapter.get_message_mime("mime-id")
+
+        rendered = output.getvalue() + repr(page_caught.exception) + repr(
+            mime_caught.exception
+        )
+        self.assertNotIn(raw_marker, rendered)
+
+    def test_adapter_source_contains_no_mailbox_mutation_calls(self):
+        self._require_task_api()
+        from vicmap_acquire.graph import GraphMailbox
+
+        source = inspect.getsource(GraphMailbox)
+        for mutation in (
+            ".delete(",
+            ".move(",
+            ".mark_as_read(",
+            ".mark_as_unread(",
+            ".add_category(",
+        ):
+            self.assertNotIn(mutation, source)
 
 
 if __name__ == "__main__":

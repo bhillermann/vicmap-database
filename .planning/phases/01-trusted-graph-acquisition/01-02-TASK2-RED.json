@@ -1,0 +1,9 @@
+{
+  "command": "nix develop path:. -c python -m unittest tests.test_graph.GraphMetadataBoundaryTest -v",
+  "exitCode": 1,
+  "targetTest": "test_inclusive_cutoff_selects_minimal_fields_and_exhausts_pages",
+  "targetFile": "tests/test_graph.py",
+  "expected": "GraphMailbox exposes complete metadata-only pagination with inclusive UTC filtering",
+  "actual": "hasattr(GraphMailbox, 'iter_message_metadata') was False",
+  "output": "TAP version 13\nnot ok 1 - test_adapter_source_contains_no_mailbox_mutation_calls\nnot ok 2 - test_empty_metadata_iteration_yields_no_fabricated_values\nnot ok 3 - test_inclusive_cutoff_selects_minimal_fields_and_exhausts_pages\nnot ok 4 - test_naive_cutoff_and_malformed_provider_metadata_fail_closed\nnot ok 5 - test_paging_and_mime_provider_errors_do_not_escape\nnot ok 6 - test_selective_mime_fetches_by_complete_id_only_on_explicit_call\n1..6\n# tests 6\n# pass 0\n# fail 6\n# cancelled 0\n"
+}
