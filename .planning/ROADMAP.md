@@ -27,7 +27,7 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 3. The selected message yields one artifact through an approved HTTPS host while redirect, timeout, and size limits are enforced.
 4. The completed download reports its byte count and checksum for downstream provenance.
 
-**Plans:** 1/5 plans executed
+**Plans:** 2/5 plans executed
 
 Plans:
 **Wave 1**
@@ -36,7 +36,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02-PLAN.md — Harden memory-only Graph authentication, mailbox access, and complete metadata pagination.
+- [x] 01-02-PLAN.md — Harden memory-only Graph authentication, mailbox access, and complete metadata pagination.
 - [ ] 01-03-PLAN.md — Enforce exact ready-order recognition and deterministic newest-message selection.
 - [ ] 01-04-PLAN.md — Enforce approved HTTPS redirects, timeouts, byte ceilings, hashing, and atomic finalization.
 
@@ -118,7 +118,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Trusted Graph Acquisition | 1/5 | In Progress|  |
+| 1. Trusted Graph Acquisition | 2/5 | In Progress|  |
 | 2. Safe Geospatial Discovery | 0/TBD | Not started | — |
 | 3. Validated PostGIS Staging | 0/TBD | Not started | — |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |

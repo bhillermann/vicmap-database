@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-09-08T01:59:06.388Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-09-08T02:23:46.896Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 01 execution started
-state_head: 14a6260defd8c1eb81a2091c837ec9c5bb2bd9f1
+state_head: 771bd1d181505b2971c0862beee43db35ab3c54c
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 5
-  completed_plans: 1
+  completed_plans: 2
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 01 (Trusted Graph Acquisition) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-08T01:59:06.370Z
-**Stopped at:** Completed 01-01-PLAN.md
+**Last session:** 2026-09-08T02:23:46.856Z
+**Stopped at:** Completed 01-02-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -51,9 +51,13 @@ Last activity: 2026-09-07 — Phase 01 execution started
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 25min | 2 tasks | 11 files |
+| Phase 01 P02 | 14min | 2 tasks | 4 files |
 
 ## Decisions
 
 - [Phase 01]: Keep Graph and artifact HTTP authority in separate adapters; artifact sessions clear auth, cookies, and ambient netrc behavior.
 - [Phase 01]: Represent operator-visible failures with closed reason codes and expose message and URL identities only through bounded fingerprints.
 - [Phase 01]: Reject TOML keys or policy values outside the complete Phase 1 schema before credentials or network adapters are used.
+- [Phase 01]: Expose precise Graph failure subclasses while retaining Plan 01 compatibility aliases.
+- [Phase 01]: Fetch MIME explicitly by complete Graph ID instead of retaining provider message objects from metadata scans.
+- [Phase 01]: Reject non-UTC cutoffs and malformed provider metadata before yielding project-owned values.
