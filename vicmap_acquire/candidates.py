@@ -12,6 +12,7 @@ from typing import Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
 from vicmap_acquire.graph import MessageMetadata
+from vicmap_acquire.origin import OriginPolicy, verify_authenticated_origin
 
 
 _TEXT_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"']+")
@@ -47,6 +48,7 @@ class CandidatePolicy:
     allowed_senders: tuple[str, ...]
     allowed_order_ids: tuple[str, ...]
     allow_order_id_mismatch: bool = False
+    required_authentication_results: tuple[str, ...] = ("dkim", "dmarc", "compauth")
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,7 @@ def recognize_candidate(
     allowed_senders: tuple[str, ...] = (),
     allowed_order_ids: tuple[str, ...] = (),
     allow_order_id_mismatch: bool = False,
+    required_authentication_results: tuple[str, ...] = ("dkim", "dmarc", "compauth"),
 ) -> Candidate | None:
     """Return a candidate only after independent header, MIME, and order checks."""
 
@@ -175,6 +178,7 @@ def recognize_candidate(
         allowed_senders=allowed_senders,
         allowed_order_ids=allowed_order_ids,
         allow_order_id_mismatch=allow_order_id_mismatch,
+        required_authentication_results=required_authentication_results,
     )
     sender = metadata.sender.strip()
     if sender.casefold() not in {
@@ -197,6 +201,14 @@ def recognize_candidate(
         loaded_mime = mime_content() if callable(mime_content) else mime_content
     except Exception:
         raise CandidateAmbiguous() from None
+    authenticated_sender = verify_authenticated_origin(
+        loaded_mime,
+        sender,
+        OriginPolicy(
+            allowed_senders=candidate_policy.allowed_senders,
+            required_authentication_results=candidate_policy.required_authentication_results,
+        ),
+    )
     links = _mime_archive_links(loaded_mime)
     if len(links) != 1:
         raise CandidateAmbiguous()
@@ -210,7 +222,7 @@ def recognize_candidate(
         order_id=subject_order_id,
         received_datetime_utc=metadata.received_datetime_utc.astimezone(timezone.utc),
         graph_message_id=metadata.graph_message_id,
-        sender=sender,
+        sender=authenticated_sender,
         artifact_url=artifact_url,
     )
 

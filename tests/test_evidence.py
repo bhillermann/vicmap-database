@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -16,6 +17,88 @@ try:
     evidence = importlib.import_module("vicmap_acquire.evidence")
 except ModuleNotFoundError:
     evidence = None
+
+
+AUTH_RESULTS_PASS = (
+    "spf=pass smtp.mailfrom=maps.vic.gov.au;"
+    "dkim=pass (signature was verified) header.d=maps.vic.gov.au;"
+    "dmarc=pass action=none header.from=datashare.maps.vic.gov.au;"
+    "compauth=pass reason=100"
+)
+AUTH_RESULTS_DKIM_FAIL = (
+    "spf=pass smtp.mailfrom=maps.vic.gov.au;"
+    "dkim=fail (signature verification failed) header.d=maps.vic.gov.au;"
+    "dmarc=pass action=none header.from=datashare.maps.vic.gov.au;"
+    "compauth=pass reason=100"
+)
+
+
+def _e2e_mime(
+    *,
+    artifact_url: str,
+    from_header: str = "noreply@datashare.maps.vic.gov.au",
+    auth_results: tuple[str, ...] = (AUTH_RESULTS_PASS,),
+) -> bytes:
+    lines = [
+        f"From: {from_header}",
+        "To: automations@vegetationlink.com.au",
+        "Subject: Your DataShare Order OK0VUZ is ready to download",
+    ]
+    for value in auth_results:
+        lines.append(f"Authentication-Results: {value}")
+    lines.extend(
+        [
+            "MIME-Version: 1.0",
+            "Content-Type: text/plain; charset=utf-8",
+            "",
+            f"Download: {artifact_url}",
+        ]
+    )
+    return ("\r\n".join(lines) + "\r\n").encode()
+
+
+class _E2EResponse:
+    status_code = 200
+
+    def __init__(self, payload: bytes) -> None:
+        self.headers = {
+            "Content-Length": str(len(payload)),
+            "Content-Encoding": "identity",
+        }
+        self._payload = payload
+        self.closed = False
+
+    def iter_content(self, chunk_size: int):
+        yield self._payload
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _E2ESession:
+    def __init__(self, payload: bytes = b"authentic-artifact-bytes") -> None:
+        self.auth = ("ambient", "must-be-cleared")
+        self.cookies = SimpleNamespace(clear=lambda: None)
+        self.headers = {}
+        self.trust_env = True
+        self.calls: list[str] = []
+        self.response = _E2EResponse(payload)
+
+    def get(self, url: str, **kwargs):
+        self.calls.append(url)
+        return self.response
+
+
+class _E2EGraph:
+    def __init__(self, metadata, mime_by_id, **kwargs) -> None:
+        self._metadata = metadata
+        self._mime_by_id = mime_by_id
+
+    def iter_metadata(self, cutoff_utc):
+        return iter(self._metadata)
+
+    def get_mime_content(self, graph_message_id):
+        return self._mime_by_id[graph_message_id]
 
 
 class EvidenceContractTest(unittest.TestCase):
@@ -43,6 +126,7 @@ class EvidenceContractTest(unittest.TestCase):
             "candidate_none": "candidate",
             "candidate_ambiguous": "candidate",
             "order_id_mismatch": "candidate",
+            "origin_unauthenticated": "candidate",
             "download_url_rejected": "download",
             "download_redirect_rejected": "download",
             "download_expired_or_missing": "download",
@@ -214,6 +298,8 @@ class ControllerDisclosureTest(unittest.TestCase):
                 fingerprint_hex_chars=16,
                 allow_order_id_mismatch=False,
                 output_dir=Path(directory),
+                required_authentication_results=("dkim", "dmarc", "compauth"),
+                allowed_url_prefixes=("https://s3.ap-southeast-2.amazonaws.com/private/",),
             )
             stderr = io.StringIO()
             with (
@@ -271,6 +357,8 @@ class ControllerCompositionTest(unittest.TestCase):
             fingerprint_hex_chars=16,
             allow_order_id_mismatch=False,
             output_dir=output_dir,
+            required_authentication_results=("dkim", "dmarc", "compauth"),
+            allowed_url_prefixes=("https://s3.ap-southeast-2.amazonaws.com/private/",),
         )
 
     @staticmethod
@@ -292,6 +380,46 @@ class ControllerCompositionTest(unittest.TestCase):
             sender="noreply@datashare.maps.vic.gov.au",
             artifact_url=artifact_url,
         )
+
+    def test_authenticated_origin_completes_end_to_end_with_expected_events(self):
+        import read_mailbox
+        from vicmap_acquire.graph import MessageMetadata
+
+        message_id = "opaque-e2e-message-id"
+        artifact_url = (
+            "https://s3.ap-southeast-2.amazonaws.com/private/Order_OK0VUZ.zip"
+        )
+        payload = b"authentic-artifact-bytes"
+        metadata = [
+            MessageMetadata(
+                graph_message_id=message_id,
+                received_datetime_utc=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                sender="noreply@datashare.maps.vic.gov.au",
+                subject="Your DataShare Order OK0VUZ is ready to download",
+            )
+        ]
+        graph = _E2EGraph(metadata, {message_id: _e2e_mime(artifact_url=artifact_url)})
+        session = _E2ESession(payload)
+        events = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "artifacts"
+            config = self._config(output_dir)
+            result = read_mailbox.run_acquisition(
+                config,
+                self._credentials(),
+                graph_factory=lambda **kwargs: graph,
+                session_factory=lambda: session,
+                event_sink=events.append,
+            )
+
+        self.assertEqual(len(payload), result.byte_count)
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), result.sha256)
+        self.assertEqual(
+            ["candidate_selected", "download_target", "artifact_finalized"],
+            [event["event"] for event in events],
+        )
+        self.assertEqual(1, len(session.calls))
 
     def test_controller_passes_complete_policy_to_one_newest_download(self):
         import read_mailbox

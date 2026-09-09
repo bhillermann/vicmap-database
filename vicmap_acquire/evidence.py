@@ -38,6 +38,7 @@ class ReasonCode(str, Enum):
     CANDIDATE_NONE = "candidate_none"
     CANDIDATE_AMBIGUOUS = "candidate_ambiguous"
     ORDER_ID_MISMATCH = "order_id_mismatch"
+    ORIGIN_UNAUTHENTICATED = "origin_unauthenticated"
     DOWNLOAD_URL_REJECTED = "download_url_rejected"
     DOWNLOAD_REDIRECT_REJECTED = "download_redirect_rejected"
     DOWNLOAD_EXPIRED_OR_MISSING = "download_expired_or_missing"
@@ -77,6 +78,10 @@ _FAILURE_POLICY = MappingProxyType(
         ReasonCode.ORDER_ID_MISMATCH: (
             Stage.CANDIDATE,
             "review_order_identity_without_bypassing_policy",
+        ),
+        ReasonCode.ORIGIN_UNAUTHENTICATED: (
+            Stage.CANDIDATE,
+            "review_message_authentication_without_bypassing_policy",
         ),
         ReasonCode.DOWNLOAD_URL_REJECTED: (
             Stage.DOWNLOAD,

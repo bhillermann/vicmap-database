@@ -65,6 +65,36 @@ class VerifyAuthenticatedOriginTest(unittest.TestCase):
 
         self.assertEqual(SENDER, address)
 
+    def test_from_address_not_in_allowlist_is_rejected(self):
+        with self.assertRaises(OriginUnauthenticated) as caught:
+            verify_authenticated_origin(
+                _mime(from_header="noreply@attacker.example"),
+                "noreply@attacker.example",
+                _policy(),
+            )
+
+        self.assertEqual("origin_unauthenticated", caught.exception.code)
+
+    def test_metadata_sender_disagreement_is_rejected(self):
+        with self.assertRaises(OriginUnauthenticated):
+            verify_authenticated_origin(_mime(), "someone-else@example.test", _policy())
+
+    def test_missing_authentication_results_header_is_rejected(self):
+        with self.assertRaises(OriginUnauthenticated):
+            verify_authenticated_origin(
+                _mime(auth_results=None), SENDER, _policy()
+            )
+
+    def test_failing_required_verdict_is_rejected(self):
+        failing = (
+            "spf=pass smtp.mailfrom=maps.vic.gov.au;"
+            "dkim=fail (signature verification failed) header.d=maps.vic.gov.au;"
+            "dmarc=pass action=none header.from=datashare.maps.vic.gov.au;"
+            "compauth=pass reason=100"
+        )
+        with self.assertRaises(OriginUnauthenticated):
+            verify_authenticated_origin(_mime(auth_results=failing), SENDER, _policy())
+
 
 if __name__ == "__main__":
     unittest.main()

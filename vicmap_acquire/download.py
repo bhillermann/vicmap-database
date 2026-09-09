@@ -65,6 +65,57 @@ def _positive_integer(value: object) -> int:
     return value
 
 
+def _normalize_url_prefix(value: object) -> str:
+    """Validate and normalize one exact HTTPS URL prefix.
+
+    Requires an exact ``https://`` scheme, no userinfo, no query, no
+    fragment, no control characters, no whitespace, a hostname that is a
+    valid exact hostname by the ``_normalize_allowed_host`` rules, and a
+    path that starts with ``/``, contains at least one non-empty segment,
+    and ends with ``/``. Returns the value with scheme and authority
+    casefolded and the path left byte-exact.
+    """
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 for character in value)
+        or any(character.isspace() for character in value)
+    ):
+        raise ValueError("allowed_url_prefixes entries must be safe scalar strings")
+    if value[:8].casefold() != "https://":
+        raise ValueError("allowed_url_prefixes entries must use https")
+
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme.casefold() != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "allowed_url_prefixes entries must be a bare https authority and path"
+        )
+
+    hostname = parsed.hostname
+    if hostname is None or parsed.netloc.casefold() != hostname.casefold():
+        raise ValueError(
+            "allowed_url_prefixes entries must name an exact host with no port"
+        )
+    normalized_host = _normalize_allowed_host(hostname)
+
+    path = parsed.path
+    segments = [segment for segment in path.split("/") if segment]
+    if not path.startswith("/") or not path.endswith("/") or not segments:
+        raise ValueError(
+            "allowed_url_prefixes path must be a non-root directory prefix"
+        )
+
+    return f"https://{normalized_host}{path}"
+
+
 def _normalize_allowed_host(value: object) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ValueError("allowed hosts must be exact hostnames")
@@ -86,6 +137,7 @@ class DownloadPolicy:
     """Complete non-secret policy for one artifact transfer."""
 
     allowed_hosts: tuple[str, ...]
+    allowed_url_prefixes: tuple[str, ...]
     max_bytes: int
     connect_timeout_seconds: int
     stalled_read_timeout_seconds: int
@@ -100,6 +152,23 @@ class DownloadPolicy:
         if len(set(normalized)) != len(normalized):
             raise ValueError("allowed_hosts must not contain duplicates")
         object.__setattr__(self, "allowed_hosts", normalized)
+
+        if not isinstance(self.allowed_url_prefixes, tuple) or not self.allowed_url_prefixes:
+            raise ValueError("allowed_url_prefixes must be a non-empty tuple")
+        normalized_prefixes = tuple(
+            _normalize_url_prefix(prefix) for prefix in self.allowed_url_prefixes
+        )
+        if len(set(normalized_prefixes)) != len(normalized_prefixes):
+            raise ValueError("allowed_url_prefixes must not contain duplicates")
+        allowed_host_set = set(normalized)
+        for prefix in normalized_prefixes:
+            prefix_host = urlsplit(prefix).hostname
+            if prefix_host is None or prefix_host.casefold() not in allowed_host_set:
+                raise ValueError(
+                    "allowed_url_prefixes host must be one of allowed_hosts"
+                )
+        object.__setattr__(self, "allowed_url_prefixes", normalized_prefixes)
+
         for value in (
             self.max_bytes,
             self.connect_timeout_seconds,
@@ -144,7 +213,7 @@ def format_progress(byte_count: int, total_bytes: int | None) -> dict[str, objec
 
 
 def validate_https_target(
-    url: str, allowed_hosts: tuple[str, ...]
+    url: str, allowed_hosts: tuple[str, ...], allowed_url_prefixes: tuple[str, ...]
 ) -> SplitResult:
     """Validate a target completely before transport connects to it."""
 
@@ -178,6 +247,13 @@ def validate_https_target(
         or bool(target.fragment)
     ):
         raise DownloadUrlRejected()
+
+    normalized_target = f"{target.scheme.casefold()}://{normalized_hostname}{target.path}"
+    if not any(
+        normalized_target.startswith(prefix) for prefix in allowed_url_prefixes
+    ):
+        raise DownloadUrlRejected()
+
     return target
 
 
@@ -219,7 +295,9 @@ def _request_final_response(
 
     for hop in range(policy.max_redirects + 1):
         try:
-            target = validate_https_target(current_url, policy.allowed_hosts)
+            target = validate_https_target(
+                current_url, policy.allowed_hosts, policy.allowed_url_prefixes
+            )
         except DownloadUrlRejected:
             if hop == 0:
                 raise
@@ -255,7 +333,9 @@ def _request_final_response(
                 raise DownloadRedirectRejected()
             current_url = urljoin(current_url, location)
             try:
-                validate_https_target(current_url, policy.allowed_hosts)
+                validate_https_target(
+                    current_url, policy.allowed_hosts, policy.allowed_url_prefixes
+                )
             except DownloadUrlRejected:
                 raise DownloadRedirectRejected() from None
             continue
@@ -317,6 +397,7 @@ def _legacy_arguments(
     expected = {
         "output_dir",
         "allowed_hosts",
+        "allowed_url_prefixes",
         "max_bytes",
         "connect_timeout_seconds",
         "read_timeout_seconds",
@@ -329,6 +410,7 @@ def _legacy_arguments(
     session = legacy["session"]
     translated = DownloadPolicy(
         allowed_hosts=legacy["allowed_hosts"],
+        allowed_url_prefixes=legacy["allowed_url_prefixes"],
         max_bytes=legacy["max_bytes"],
         connect_timeout_seconds=legacy["connect_timeout_seconds"],
         stalled_read_timeout_seconds=legacy["read_timeout_seconds"],

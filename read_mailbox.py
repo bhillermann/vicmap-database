@@ -23,6 +23,7 @@ from vicmap_acquire.download import (
     download_artifact,
 )
 from vicmap_acquire.graph import GraphError, GraphMailbox
+from vicmap_acquire.origin import _AUTH_METHODS, OriginUnauthenticated
 from vicmap_acquire.evidence import (
     ProgressEvent,
     ReasonCode,
@@ -43,6 +44,7 @@ _MAILBOX_KEYS = {
     "allowed_order_ids",
     "lookback_days",
     "allow_order_id_mismatch",
+    "required_authentication_results",
 }
 _DOWNLOAD_KEYS = {
     "allowed_hosts",
@@ -53,6 +55,7 @@ _DOWNLOAD_KEYS = {
     "max_redirects",
     "fingerprint_hex_chars",
     "output_dir",
+    "allowed_url_prefixes",
 }
 _ORDER_ID = re.compile(r"[A-Za-z0-9]+")
 _HOSTNAME = re.compile(
@@ -77,6 +80,8 @@ class AcquisitionConfig:
     fingerprint_hex_chars: int
     allow_order_id_mismatch: bool
     output_dir: Path
+    required_authentication_results: tuple[str, ...]
+    allowed_url_prefixes: tuple[str, ...]
 
 
 class AcquisitionFailure(RuntimeError):
@@ -151,7 +156,14 @@ def _bounded_integer(value: object, minimum: int, maximum: int) -> int:
 def _validate_config_object(config: AcquisitionConfig) -> None:
     _strict_string(config.mailbox)
     _strict_string(config.folder)
-    if not config.allowed_senders or not config.allowed_order_ids or not config.allowed_hosts:
+    if (
+        not config.allowed_senders
+        or not config.allowed_order_ids
+        or not config.allowed_hosts
+        or not config.required_authentication_results
+        or not config.allowed_url_prefixes
+        or "dkim" not in config.required_authentication_results
+    ):
         raise AcquisitionFailure("config_invalid")
     _bounded_integer(config.lookback_days, 1, 3660)
     _bounded_integer(config.max_bytes, 1, 10 * 1024**4)
@@ -191,6 +203,7 @@ def run_acquisition(
                 allowed_senders=config.allowed_senders,
                 allowed_order_ids=config.allowed_order_ids,
                 allow_order_id_mismatch=config.allow_order_id_mismatch,
+                required_authentication_results=config.required_authentication_results,
             )
             if candidate is not None:
                 candidates.append(candidate)
@@ -206,6 +219,7 @@ def run_acquisition(
 
         download_policy = DownloadPolicy(
             allowed_hosts=config.allowed_hosts,
+            allowed_url_prefixes=config.allowed_url_prefixes,
             max_bytes=config.max_bytes,
             connect_timeout_seconds=config.connect_timeout_seconds,
             stalled_read_timeout_seconds=config.read_timeout_seconds,
@@ -240,7 +254,7 @@ def run_acquisition(
             raise
         failure = _emit_failure(event_sink, error.failure.reason)
         raise AcquisitionFailure(failure.reason, reported=True) from None
-    except (GraphError, CandidateError, DownloadError) as error:
+    except (GraphError, CandidateError, DownloadError, OriginUnauthenticated) as error:
         failure = _emit_failure(event_sink, error.code)
         raise AcquisitionFailure(failure.reason, reported=True) from None
     except Exception:
@@ -271,6 +285,16 @@ def load_config(path: Path) -> AcquisitionConfig:
         order_ids = _string_list(mailbox["allowed_order_ids"])
         if any(_ORDER_ID.fullmatch(order_id) is None for order_id in order_ids):
             raise AcquisitionFailure("config_invalid")
+        required_authentication_results = _string_list(
+            mailbox["required_authentication_results"]
+        )
+        if any(
+            method != method.casefold() or method not in _AUTH_METHODS
+            for method in required_authentication_results
+        ):
+            raise AcquisitionFailure("config_invalid")
+        if "dkim" not in required_authentication_results:
+            raise AcquisitionFailure("config_invalid")
         hosts = _string_list(download["allowed_hosts"])
         if any(
             host != host.casefold()
@@ -279,6 +303,7 @@ def load_config(path: Path) -> AcquisitionConfig:
             for host in hosts
         ):
             raise AcquisitionFailure("config_invalid")
+        allowed_url_prefixes = _string_list(download["allowed_url_prefixes"])
 
         output_value = _strict_string(download["output_dir"])
         configured_output = Path(output_value)
@@ -316,6 +341,8 @@ def load_config(path: Path) -> AcquisitionConfig:
             ),
             allow_order_id_mismatch=mailbox["allow_order_id_mismatch"],
             output_dir=output_dir,
+            required_authentication_results=required_authentication_results,
+            allowed_url_prefixes=allowed_url_prefixes,
         )
         _validate_config_object(config)
         return config

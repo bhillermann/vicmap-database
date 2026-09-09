@@ -23,6 +23,12 @@ ARTIFACT_URL = (
     "?signature=private-query-marker"
 )
 PAYLOAD = b"authentic-shaped-archive-bytes"
+AUTH_RESULTS_PASS = (
+    "spf=pass smtp.mailfrom=maps.vic.gov.au;"
+    "dkim=pass (signature was verified) header.d=maps.vic.gov.au;"
+    "dmarc=pass action=none header.from=datashare.maps.vic.gov.au;"
+    "compauth=pass reason=100"
+)
 
 
 class _LegacyFolder:
@@ -122,6 +128,7 @@ def _mime(url: str) -> bytes:
         "From: noreply@datashare.maps.vic.gov.au\r\n"
         "To: automations@vegetationlink.com.au\r\n"
         f"Subject: {READY_SUBJECT}\r\n"
+        f"Authentication-Results: {AUTH_RESULTS_PASS}\r\n"
         "MIME-Version: 1.0\r\n"
         "Content-Type: text/plain; charset=utf-8\r\n"
         "\r\n"
@@ -166,6 +173,8 @@ class PipelineTracerTest(unittest.TestCase):
                 fingerprint_hex_chars=16,
                 allow_order_id_mismatch=False,
                 output_dir=Path(output_dir),
+                required_authentication_results=("dkim", "dmarc", "compauth"),
+                allowed_url_prefixes=("https://s3.ap-southeast-2.amazonaws.com/private/",),
             )
             result = read_mailbox.run_acquisition(
                 config,
@@ -261,6 +270,8 @@ class PipelineTracerTest(unittest.TestCase):
                 fingerprint_hex_chars=16,
                 allow_order_id_mismatch=False,
                 output_dir=Path(output_dir),
+                required_authentication_results=("dkim", "dmarc", "compauth"),
+                allowed_url_prefixes=("https://s3.ap-southeast-2.amazonaws.com/private/",),
             )
             with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
                 read_mailbox.run_acquisition(
@@ -290,6 +301,7 @@ allowed_senders = ["noreply@datashare.maps.vic.gov.au"]
 allowed_order_ids = ["OK0VUZ"]
 lookback_days = 15
 allow_order_id_mismatch = false
+required_authentication_results = ["dkim", "dmarc", "compauth"]
 
 [download]
 allowed_hosts = ["s3.ap-southeast-2.amazonaws.com"]
@@ -300,6 +312,7 @@ progress_interval_seconds = 5
 max_redirects = 5
 fingerprint_hex_chars = 16
 output_dir = "artifacts"
+allowed_url_prefixes = ["https://s3.ap-southeast-2.amazonaws.com/private/"]
 """
 
 
@@ -340,6 +353,9 @@ class ConfigurationTest(unittest.TestCase):
             self.assertEqual(16, config.fingerprint_hex_chars)
             self.assertFalse(config.allow_order_id_mismatch)
             self.assertEqual(Path(directory) / "artifacts", config.output_dir)
+            self.assertTrue(config.required_authentication_results)
+            self.assertIn("dkim", config.required_authentication_results)
+            self.assertTrue(config.allowed_url_prefixes)
 
     def test_invalid_policy_cases_fail_closed_without_constructing_adapters(self):
         import read_mailbox
@@ -419,6 +435,8 @@ class ConfigurationTest(unittest.TestCase):
                 fingerprint_hex_chars=16,
                 allow_order_id_mismatch=False,
                 output_dir=Path(directory) / "artifacts",
+                required_authentication_results=("dkim", "dmarc", "compauth"),
+                allowed_url_prefixes=("https://s3.ap-southeast-2.amazonaws.com/private/",),
             )
             for name in ("O365_AUTH_ID", "O365_AUTH_SECRET", "TENANT_ID"):
                 credentials = {

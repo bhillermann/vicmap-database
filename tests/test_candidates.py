@@ -15,11 +15,18 @@ from vicmap_acquire.candidates import (
     select_candidate,
 )
 from vicmap_acquire.graph import MessageMetadata
+from vicmap_acquire.origin import OriginUnauthenticated
 
 
 SENDER = "noreply@datashare.maps.vic.gov.au"
 READY = "Your DataShare Order {order_id} is ready to download"
 BASE_URL = "https://s3.ap-southeast-2.amazonaws.com/private/{filename}"
+AUTH_RESULTS_PASS = (
+    "spf=pass smtp.mailfrom=maps.vic.gov.au;"
+    "dkim=pass (signature was verified) header.d=maps.vic.gov.au;"
+    "dmarc=pass action=none header.from=datashare.maps.vic.gov.au;"
+    "compauth=pass reason=100"
+)
 
 
 def _metadata(
@@ -45,6 +52,7 @@ def _mime(*, plain: str | None = None, html: str | None = None) -> bytes:
     message["From"] = SENDER
     message["To"] = "automations@vegetationlink.com.au"
     message["Subject"] = READY.format(order_id="OK0VUZ")
+    message["Authentication-Results"] = AUTH_RESULTS_PASS
     if plain is not None:
         message.set_content(plain)
         if html is not None:
@@ -257,15 +265,15 @@ class CandidateRecognitionTest(unittest.TestCase):
                     _recognize(_metadata(), _mime(plain=_url(filename)))
                 self.assertEqual("order_id_mismatch", caught.exception.code)
 
-    def test_malformed_mime_fails_with_closed_reason_only(self):
-        with self.assertRaises(CandidateError) as caught:
+    def test_malformed_mime_fails_origin_verification_before_link_extraction(self):
+        with self.assertRaises(OriginUnauthenticated) as caught:
             _recognize(
                 _metadata(),
                 b"Content-Type: text/plain; charset=unknown-charset\r\n\r\nsecret",
             )
 
-        self.assertEqual("candidate_ambiguous", caught.exception.code)
-        self.assertEqual("candidate_ambiguous", str(caught.exception))
+        self.assertEqual("origin_unauthenticated", caught.exception.code)
+        self.assertEqual("origin_unauthenticated", str(caught.exception))
 
 
 def _candidate(

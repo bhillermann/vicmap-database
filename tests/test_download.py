@@ -105,10 +105,14 @@ def _response(
     return _FakeResponse(status, headers=response_headers, chunks=(payload,))
 
 
+ALLOWED_URL_PREFIX = f"https://{ALLOWED_HOST}/orders/"
+
+
 def _legacy_download(session: _FakeSession, directory: Path, **overrides):
     arguments = {
         "output_dir": directory,
         "allowed_hosts": (ALLOWED_HOST,),
+        "allowed_url_prefixes": (ALLOWED_URL_PREFIX,),
         "max_bytes": 1024,
         "connect_timeout_seconds": 10,
         "read_timeout_seconds": 60,
@@ -122,6 +126,7 @@ def _legacy_download(session: _FakeSession, directory: Path, **overrides):
 def _policy(**overrides) -> download.DownloadPolicy:
     arguments = {
         "allowed_hosts": (ALLOWED_HOST,),
+        "allowed_url_prefixes": (ALLOWED_URL_PREFIX,),
         "max_bytes": 1024,
         "connect_timeout_seconds": 10,
         "stalled_read_timeout_seconds": 60,
@@ -175,7 +180,9 @@ class DownloadTargetPolicyTest(unittest.TestCase):
             f"https://{ALLOWED_HOST}:443/archive.zip",
         ):
             with self.subTest(url=url):
-                target = download.validate_https_target(url, (ALLOWED_HOST,))
+                target = download.validate_https_target(
+                    url, (ALLOWED_HOST,), (f"https://{ALLOWED_HOST}/",)
+                )
                 self.assertEqual(ALLOWED_HOST, target.hostname.casefold())
 
     def test_rejects_unsafe_or_malformed_authorities_before_transport(self):
@@ -195,8 +202,23 @@ class DownloadTargetPolicyTest(unittest.TestCase):
         for url in rejected:
             with self.subTest(url=url):
                 with self.assertRaises(download.DownloadError) as caught:
-                    download.validate_https_target(url, (ALLOWED_HOST,))
+                    download.validate_https_target(
+                        url, (ALLOWED_HOST,), (f"https://{ALLOWED_HOST}/",)
+                    )
                 self.assertEqual("download_url_rejected", caught.exception.code)
+
+    def test_prefix_authority_narrows_the_allowed_host(self):
+        prefix = (f"https://{ALLOWED_HOST}/private/",)
+        accepted = download.validate_https_target(
+            f"https://{ALLOWED_HOST}/private/archive.zip", (ALLOWED_HOST,), prefix
+        )
+        self.assertEqual(ALLOWED_HOST, accepted.hostname.casefold())
+
+        with self.assertRaises(download.DownloadError) as caught:
+            download.validate_https_target(
+                f"https://{ALLOWED_HOST}/other/archive.zip", (ALLOWED_HOST,), prefix
+            )
+        self.assertEqual("download_url_rejected", caught.exception.code)
 
 
 class DownloadTransportBoundaryTest(unittest.TestCase):
@@ -222,7 +244,7 @@ class DownloadTransportBoundaryTest(unittest.TestCase):
         self.assertTrue(session.closed)
 
     def test_relative_redirect_is_resolved_and_each_response_is_closed(self):
-        redirect = _FakeResponse(302, headers={"Location": "../final.zip?new=secret"})
+        redirect = _FakeResponse(302, headers={"Location": "final.zip?new=secret"})
         final = _response()
         session = _FakeSession((redirect, final))
         with tempfile.TemporaryDirectory() as directory:
@@ -231,7 +253,7 @@ class DownloadTransportBoundaryTest(unittest.TestCase):
         self.assertEqual(
             [
                 BASE_URL,
-                f"https://{ALLOWED_HOST}/final.zip?new=secret",
+                f"https://{ALLOWED_HOST}/orders/final.zip?new=secret",
             ],
             [call[0] for call in session.calls],
         )
@@ -264,7 +286,7 @@ class DownloadTransportBoundaryTest(unittest.TestCase):
         self.assertTrue(redirect.closed)
 
     def test_redirect_loop_stops_without_recontacting_a_seen_target(self):
-        first = _FakeResponse(302, headers={"Location": "/second.zip"})
+        first = _FakeResponse(302, headers={"Location": "/orders/second.zip"})
         second = _FakeResponse(302, headers={"Location": BASE_URL})
         session = _FakeSession((first, second))
         with tempfile.TemporaryDirectory() as directory:
@@ -277,7 +299,7 @@ class DownloadTransportBoundaryTest(unittest.TestCase):
 
     def test_default_ceiling_rejects_sixth_redirect_without_contact(self):
         responses = tuple(
-            _FakeResponse(302, headers={"Location": f"/hop-{index}.zip"})
+            _FakeResponse(302, headers={"Location": f"/orders/hop-{index}.zip"})
             for index in range(1, 7)
         )
         session = _FakeSession(responses)
@@ -287,7 +309,7 @@ class DownloadTransportBoundaryTest(unittest.TestCase):
         self.assertEqual("download_redirect_rejected", caught.exception.code)
         self.assertEqual(6, len(session.calls))
         self.assertNotIn(
-            f"https://{ALLOWED_HOST}/hop-6.zip",
+            f"https://{ALLOWED_HOST}/orders/hop-6.zip",
             [call[0] for call in session.calls],
         )
         self.assertTrue(all(response.closed for response in responses))

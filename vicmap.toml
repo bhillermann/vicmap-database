@@ -5,6 +5,7 @@ allowed_senders = ["noreply@datashare.maps.vic.gov.au"]
 allowed_order_ids = ["OK0VUZ"]
 lookback_days = 15
 allow_order_id_mismatch = false
+required_authentication_results = ["dkim", "dmarc", "compauth"]
 
 [download]
 allowed_hosts = ["s3.ap-southeast-2.amazonaws.com"]
@@ -15,3 +16,4 @@ progress_interval_seconds = 5
 max_redirects = 5
 fingerprint_hex_chars = 16
 output_dir = "artifacts"
+allowed_url_prefixes = ["https://s3.ap-southeast-2.amazonaws.com/REPLACE-WITH-EXACT-TRUSTED-BUCKET-PREFIX/"]
