@@ -684,6 +684,195 @@ class DownloadStreamingBoundaryTest(unittest.TestCase):
             self.assertEqual(
                 [output_dir / "artifact.zip"], list(output_dir.iterdir())
             )
+            self.assertFalse(
+                any(
+                    entry.name.startswith(".vicmap-download-")
+                    for entry in output_dir.iterdir()
+                )
+            )
+
+    def test_exact_ceiling_byte_count_succeeds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            payload = b"abcd"
+            response = _FakeResponse(
+                headers={"Content-Encoding": "identity"}, chunks=(payload,)
+            )
+            result, _ = _download_new(
+                response, output_dir, policy=_policy(max_bytes=len(payload))
+            )
+            self.assertEqual(len(payload), result.byte_count)
+            self.assertEqual(payload, result.path.read_bytes())
+
+    def test_ceiling_plus_one_byte_is_rejected_and_leaves_no_final_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            payload = b"abcde"
+            response = _FakeResponse(
+                headers={"Content-Encoding": "identity"}, chunks=(payload,)
+            )
+            with self.assertRaises(download.DownloadTooLarge):
+                _download_new(
+                    response,
+                    output_dir,
+                    policy=_policy(max_bytes=len(payload) - 1),
+                )
+            self.assertEqual([], list(output_dir.iterdir()))
+
+    def test_over_declared_content_length_rejected_before_any_chunk_consumed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+
+            class _CountingResponse(_FakeResponse):
+                def __init__(self, *args, **kwargs) -> None:
+                    super().__init__(*args, **kwargs)
+                    self.iter_content_calls = 0
+
+                def iter_content(self, chunk_size: int):
+                    self.iter_content_calls += 1
+                    return super().iter_content(chunk_size)
+
+            response = _CountingResponse(
+                headers={"Content-Length": "5", "Content-Encoding": "identity"},
+                chunks=(b"abcde",),
+            )
+            with self.assertRaises(download.DownloadTooLarge):
+                _download_new(response, output_dir, policy=_policy(max_bytes=4))
+            self.assertEqual(0, response.iter_content_calls)
+            self.assertEqual([], list(output_dir.iterdir()))
+
+    def test_precision_table_uses_floor_division_and_never_exceeds_cap(self):
+        cases = (
+            (1, 3, 33.3),
+            (2, 3, 66.6),
+            (999999, 1000000, 99.9),
+            (5, 0, None),
+        )
+        for byte_count, total_bytes, expected_percent in cases:
+            with self.subTest(byte_count=byte_count, total_bytes=total_bytes):
+                event = download.format_progress(byte_count, total_bytes)
+                if expected_percent is None:
+                    self.assertNotIn("percent", event)
+                else:
+                    self.assertEqual(expected_percent, event["percent"])
+                    self.assertLessEqual(event["percent"], 100.0)
+                self.assertIsInstance(event["byte_count"], int)
+                self.assertNotIsInstance(event["byte_count"], bool)
+
+    def test_emitted_progress_byte_counts_are_always_int_never_float(self):
+        response = _FakeResponse(
+            headers={"Content-Length": "10", "Content-Encoding": "identity"},
+            chunks=(b"ab", b"cde", b"fghij"),
+        )
+        events: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(download.time, "monotonic", side_effect=(0, 1, 5, 10)):
+                _download_new(response, Path(directory), progress_sink=events.append)
+        self.assertTrue(events)
+        for event in events:
+            self.assertIsInstance(event["byte_count"], int)
+            self.assertNotIsInstance(event["byte_count"], bool)
+
+
+class DownloadCommitPointTest(unittest.TestCase):
+    def test_post_link_cleanup_failure_still_reports_a_committed_success(self):
+        payload = b"committed despite a post-commit cleanup failure"
+        response = _response(payload)
+        real_unlink = Path.unlink
+
+        def flaky_unlink(self: Path, *args, **kwargs):
+            if self.name.startswith(".vicmap-download-"):
+                raise OSError("simulated post-commit cleanup failure")
+            return real_unlink(self, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            with patch.object(Path, "unlink", flaky_unlink):
+                result, session = _download_new(response, output_dir)
+
+            self.assertTrue(result.temp_cleanup_deferred)
+            self.assertEqual(len(payload), result.byte_count)
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), result.sha256)
+            self.assertTrue(result.path.exists())
+            self.assertEqual(payload, result.path.read_bytes())
+            self.assertTrue(session.closed)
+
+    def test_post_link_cleanup_success_reports_deferred_false(self):
+        payload = b"clean commit, clean cleanup"
+        response = _response(payload)
+        with tempfile.TemporaryDirectory() as directory:
+            result, _ = _download_new(response, Path(directory))
+        self.assertFalse(result.temp_cleanup_deferred)
+
+    def test_pre_commit_timeout_family_leaves_no_final_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            response = _FakeResponse(
+                headers={"Content-Encoding": "identity"},
+                chunks=(b"partial",),
+                stream_error=requests.ReadTimeout("boom"),
+            )
+            with self.assertRaises(download.DownloadTimeout):
+                _download_new(response, output_dir)
+            self.assertFalse((output_dir / "artifact.zip").exists())
+
+    def test_pre_commit_over_limit_family_leaves_no_final_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            response = _FakeResponse(
+                headers={"Content-Encoding": "identity"},
+                chunks=(b"abcde",),
+            )
+            with self.assertRaises(download.DownloadTooLarge):
+                _download_new(response, output_dir, policy=_policy(max_bytes=4))
+            self.assertFalse((output_dir / "artifact.zip").exists())
+
+    def test_pre_commit_short_write_family_leaves_no_final_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            response = _response(b"payload")
+
+            class FailingWriter:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def write(self, chunk):
+                    raise OSError("write failed")
+
+            def failing_fdopen(descriptor, mode):
+                os.close(descriptor)
+                return FailingWriter()
+
+            with (
+                patch.object(download.os, "fdopen", side_effect=failing_fdopen),
+                self.assertRaises(download.ArtifactWriteFailed),
+            ):
+                _download_new(response, output_dir)
+            self.assertFalse((output_dir / "artifact.zip").exists())
+
+    def test_pre_commit_declared_length_mismatch_family_leaves_no_final_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            response = _FakeResponse(
+                headers={"Content-Length": "4", "Content-Encoding": "identity"},
+                chunks=(b"abc",),
+            )
+            with self.assertRaises(download.DownloadHttpFailed):
+                _download_new(response, output_dir)
+            self.assertFalse((output_dir / "artifact.zip").exists())
+
+    def test_pre_commit_existing_final_path_family_is_left_untouched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            final_path = output_dir / "artifact.zip"
+            final_path.write_bytes(b"existing")
+            response = _response(b"new")
+            with self.assertRaises(download.ArtifactWriteFailed):
+                _download_new(response, output_dir)
+            self.assertEqual(b"existing", final_path.read_bytes())
 
 
 if __name__ == "__main__":
