@@ -115,8 +115,40 @@ def _reason_code(reason: ReasonCode | str) -> ReasonCode:
     return ReasonCode.INTERNAL_FAILURE
 
 
+class _EmitOnce:
+    """Isolate evidence-sink I/O from acquisition control flow.
+
+    ``emit`` returns immediately once the sink has failed -- a failed sink is
+    never retried -- and otherwise calls the sink inside a guard that catches
+    every exception except ``KeyboardInterrupt``/``SystemExit``, marking
+    ``failed`` without inspecting or interpolating the caught exception's
+    text. ``emit_failure`` delivers at most one failure event per run.
+    """
+
+    def __init__(self, sink: EventSink) -> None:
+        self._sink = sink
+        self.failed = False
+        self.emitted_failure = False
+
+    def emit(self, event: object) -> None:
+        if self.failed:
+            return
+        try:
+            self._sink(event)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            self.failed = True
+
+    def emit_failure(self, failure: SafeFailure) -> None:
+        if self.emitted_failure:
+            return
+        self.emitted_failure = True
+        self.emit(failure)
+
+
 def _emit_failure(
-    event_sink: EventSink,
+    guard: "_EmitOnce",
     reason: ReasonCode | str,
     *,
     fingerprint_hex_chars: int = 16,
@@ -124,7 +156,7 @@ def _emit_failure(
     failure = SafeFailure(
         _reason_code(reason), fingerprint_hex_chars=fingerprint_hex_chars
     )
-    event_sink(failure)
+    guard.emit_failure(failure)
     return failure
 
 
@@ -291,7 +323,18 @@ def run_acquisition(
     session_factory=None,
     event_sink: EventSink = lambda event: None,
 ) -> DownloadResult:
-    """Run the ordered Graph-to-artifact path through injectable I/O seams."""
+    """Run the ordered Graph-to-artifact path through injectable I/O seams.
+
+    Every event -- success, progress, and failure -- is routed through an
+    ``_EmitOnce`` guard so a faulty ``event_sink`` can never turn a closed
+    failure into a raw exception, and is never retried once it has failed.
+    A sink fault on a success event means the operator saw nothing, so a
+    guard failure detected after the final emission converts an otherwise
+    successful run into ``AcquisitionFailure(INTERNAL_FAILURE)`` without
+    touching the already-published artifact.
+    """
+
+    guard = _EmitOnce(event_sink)
 
     try:
         validate_acquisition_policy(config)
@@ -316,7 +359,7 @@ def run_acquisition(
             if candidate is not None:
                 candidates.append(candidate)
         selected = select_candidate(candidates)
-        event_sink(
+        guard.emit(
             SuccessEvent.candidate_selected(
                 order_id=selected.order_id,
                 received_at=selected.received_datetime_utc,
@@ -341,43 +384,45 @@ def run_acquisition(
             final_path=config.output_dir / f"Order_{selected.order_id}.zip",
             policy=download_policy,
             session_factory=session_factory,
-            progress_sink=lambda progress: event_sink(
+            progress_sink=lambda progress: guard.emit(
                 ProgressEvent.from_download_event(progress)
             ),
         )
-        event_sink(
+        guard.emit(
             SuccessEvent.download_target(
                 approved_hostname=result.approved_hostname,
                 path_fingerprint=result.path_fingerprint,
                 fingerprint_hex_chars=config.fingerprint_hex_chars,
             )
         )
-        event_sink(
+        guard.emit(
             SuccessEvent.artifact_finalized(
                 byte_count=result.byte_count,
                 sha256=result.sha256,
             )
         )
+        if guard.failed:
+            raise AcquisitionFailure(ReasonCode.INTERNAL_FAILURE)
         return result
     except AcquisitionFailure as error:
         if error.reported:
             raise
         failure = _emit_failure(
-            event_sink,
+            guard,
             error.failure.reason,
             fingerprint_hex_chars=getattr(config, "fingerprint_hex_chars", 16),
         )
         raise AcquisitionFailure(failure.reason, reported=True) from None
     except (GraphError, CandidateError, DownloadError, OriginUnauthenticated) as error:
         failure = _emit_failure(
-            event_sink,
+            guard,
             error.code,
             fingerprint_hex_chars=getattr(config, "fingerprint_hex_chars", 16),
         )
         raise AcquisitionFailure(failure.reason, reported=True) from None
     except Exception:
         failure = _emit_failure(
-            event_sink,
+            guard,
             ReasonCode.INTERNAL_FAILURE,
             fingerprint_hex_chars=getattr(config, "fingerprint_hex_chars", 16),
         )
@@ -466,21 +511,34 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     def render_event(event: object) -> None:
-        if isinstance(event, SuccessEvent):
-            render_success(event)
-        elif isinstance(event, ProgressEvent):
-            render_progress(event)
-        elif isinstance(event, SafeFailure):
-            render_failure(event)
-        else:
-            render_failure(SafeFailure(ReasonCode.INTERNAL_FAILURE))
+        # A rendering fault (broken pipe, malformed event) must never escape
+        # main -- run_acquisition's _EmitOnce guard already isolates this,
+        # but this is defense in depth for any other caller of render_event.
+        try:
+            if isinstance(event, SuccessEvent):
+                render_success(event)
+            elif isinstance(event, ProgressEvent):
+                render_progress(event)
+            elif isinstance(event, SafeFailure):
+                render_failure(event)
+            else:
+                render_failure(SafeFailure(ReasonCode.INTERNAL_FAILURE))
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            pass
 
     try:
         config = load_config(args.config)
         run_acquisition(config, os.environ, event_sink=render_event)
     except AcquisitionFailure as error:
         if not error.reported:
-            render_failure(error.failure)
+            try:
+                render_failure(error.failure)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception:
+                pass
         return 1
     return 0
 
