@@ -6,12 +6,21 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 from typing import Iterator, Mapping, TYPE_CHECKING
+from urllib.parse import quote
 
 from O365 import Account
 from O365.utils.token import MemoryTokenBackend
 
 if TYPE_CHECKING:
     from read_mailbox import AcquisitionConfig
+
+
+# The Graph MIME value endpoint for a single message: /messages/{id}/$value.
+# This matches the installed O365 2.1.0 SDK's own Message.get_mime_content
+# endpoint shape (see O365/message.py's `get_mime` entry), so a single
+# connection-level GET here reaches exactly the same resource the SDK's own
+# two-request path would have reached with its second request.
+_MIME_VALUE_SUFFIX = "/$value"
 
 
 class GraphFailure(RuntimeError):
@@ -204,17 +213,38 @@ class GraphMailbox:
 
         yield from self.iter_message_metadata(cutoff_utc)
 
+    def _mime_url(self, graph_message_id: str) -> str:
+        """Build the connection-level MIME value URL for one complete Graph ID.
+
+        The complete opaque ID is percent-encoded with an empty safe set so a
+        reserved character in the ID cannot split or malform the request path,
+        and the URL is built through the confirmed folder's own ``build_url``
+        so the mailbox resource segment stays exactly the ``users/{address}``
+        scope ``authenticate_and_confirm`` already established.
+        """
+
+        folder = self._confirmed_folder()
+        encoded_id = quote(graph_message_id, safe="")
+        endpoint = f"/messages/{encoded_id}{_MIME_VALUE_SUFFIX}"
+        return folder.build_url(endpoint)
+
     def get_message_mime(self, graph_message_id: str) -> bytes:
-        """Retrieve MIME for one explicitly qualified complete Graph ID."""
+        """Retrieve MIME for one explicitly qualified complete Graph ID.
+
+        Issues exactly one connection-level GET to the MIME value endpoint,
+        using the same connection object the confirmed folder already owns —
+        no ordinary message representation is fetched first.
+        """
 
         try:
             if not _is_nonblank(graph_message_id):
                 raise GraphScanFailed()
-            message = self._confirmed_folder().get_message(object_id=graph_message_id)
-            if message is None:
-                raise GraphScanFailed()
-            content = message.get_mime_content()
-            if not isinstance(content, bytes):
+            folder = self._confirmed_folder()
+            url = self._mime_url(graph_message_id)
+            response = folder.con.get(url)
+            status_code = getattr(response, "status_code", None)
+            content = getattr(response, "content", None)
+            if status_code != 200 or not isinstance(content, bytes):
                 raise GraphScanFailed()
             return content
         except GraphFailure:
