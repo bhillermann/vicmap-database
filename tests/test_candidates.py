@@ -275,6 +275,46 @@ class CandidateRecognitionTest(unittest.TestCase):
         self.assertEqual("origin_unauthenticated", caught.exception.code)
         self.assertEqual("origin_unauthenticated", str(caught.exception))
 
+    def test_archive_url_only_inside_script_element_yields_no_candidate(self):
+        archive_url = _url()
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(_metadata(), _mime(html=f"<script>{archive_url}</script>"))
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_same_archive_url_moved_to_rendered_text_still_qualifies(self):
+        archive_url = _url()
+        candidate = _recognize(_metadata(), _mime(html=f"<p>{archive_url}</p>"))
+
+        self.assertEqual(archive_url, candidate.artifact_url)
+
+    def test_anchor_href_nested_inside_script_yields_no_archive_link(self):
+        archive_url = _url()
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(
+                _metadata(),
+                _mime(html=f'<script><a href="{archive_url}">x</a></script>'),
+            )
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_archive_url_inside_html_comment_yields_no_archive_link(self):
+        archive_url = _url()
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(_metadata(), _mime(html=f"<!-- {archive_url} -->"))
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_unmatched_closing_tag_does_not_re_enable_collection(self):
+        archive_url = _url()
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(
+                _metadata(),
+                _mime(html=f"<style><script>{archive_url}</script></style>"),
+            )
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
 
 def _candidate(
     graph_message_id: str,
