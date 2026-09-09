@@ -27,9 +27,12 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 3. The selected message yields one artifact through an approved HTTPS host while redirect, timeout, and size limits are enforced.
 4. The completed download reports its byte count and checksum for downstream provenance.
 
-**Plans:** 10/11 plans executed (5 executed, 6 gap-closure pending)
+**Plans:** 11/12 plans executed (5 executed, 6 gap-closure pending)
 
 Plans:
+
+- [x] 01-12-PLAN.md
+
 **Wave 1**
 
 - [x] 01-01-PLAN.md — Prove one safe end-to-end Graph-to-artifact tracer and configuration boundary.
@@ -135,7 +138,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Trusted Graph Acquisition | 10/11 | In Progress|  |
+| 1. Trusted Graph Acquisition | 11/12 | In Progress|  |
 | 2. Safe Geospatial Discovery | 0/TBD | Not started | — |
 | 3. Validated PostGIS Staging | 0/TBD | Not started | — |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |

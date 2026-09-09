@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
-stopped_at: Completed 01-10-PLAN.md
-last_updated: "2026-09-09T06:30:13.407Z"
+stopped_at: Completed 01-12-PLAN.md
+last_updated: "2026-09-09T06:58:36.641Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 01 execution started
-state_head: 9611ad2bf6f54c28b73de8806040a0252f3ecbf2
+state_head: da633a854cf3aaf6ba48e6595dd9545d4bd03626
 progress:
   total_phases: 5
   completed_phases: 0
-  total_plans: 11
-  completed_plans: 10
+  total_plans: 12
+  completed_plans: 11
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 01 (Trusted Graph Acquisition) — EXECUTING
-Plan: 6 of 11
+Plan: 7 of 11
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-09T05:54:14.774Z
-**Stopped at:** Completed 01-10-PLAN.md
+**Last session:** 2026-09-09T06:58:36.602Z
+**Stopped at:** Completed 01-12-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -60,6 +60,7 @@ Last activity: 2026-09-09 — Phase 01 execution started
 | Phase 01 P08 | 40min | 3 tasks | 2 files |
 | Phase 01 P09 | 32min | 3 tasks | 6 files |
 | Phase 01 P10 | 11min | 2 tasks | 2 files |
+| Phase 01 P12 | 20min | 2 tasks | 2 files |
 
 ## Decisions
 
@@ -94,6 +95,7 @@ Last activity: 2026-09-09 — Phase 01 execution started
 - [Phase 01]: Constrained output_dir to the recognised artifacts name and unanchored .gitignore's artifacts/ pattern so every permitted output root, nested or not, is provably git-ignored, closing WR-05.
 - [Phase 01]: Made get_message_mime issue exactly one connection-level GET to the Graph MIME value endpoint (/messages/{id}/$value), replacing the two-request path that fetched an ordinary message representation first.
 - [Phase 01]: Gave PROHIB-01 runtime enforcement evidence at the connection-request level (GET-only method set, no mutation path segments, no mutation-named public callables, non-Inbox rejection) instead of source-text inspection alone.
+- [Phase 01]: Added _VOID_ELEMENTS to _AnchorCollector so a void non-rendered tag (meta, link) never raises the suppression counter, closing the permanent-suppression defect 01-07 introduced. — Void elements have no content model and can never contain content to suppress; bare (unclosed) spellings in real email headers left the counter permanently raised after 01-07's fix, silently suppressing the entire message body.
 
 ### Blockers
 
