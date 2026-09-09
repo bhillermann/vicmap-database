@@ -5,10 +5,10 @@ current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
 stopped_at: Completed 01-12-PLAN.md
-last_updated: "2026-09-09T06:58:36.641Z"
+last_updated: "2026-09-09T07:07:56.499Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 01 execution started
-state_head: da633a854cf3aaf6ba48e6595dd9545d4bd03626
+state_head: a9b97e27cf4ca31428a8bbaa4a3f00953161f763
 progress:
   total_phases: 5
   completed_phases: 0
@@ -99,4 +99,4 @@ Last activity: 2026-09-09 — Phase 01 execution started
 
 ### Blockers
 
-- 01-11 Task 2: one live acquisition invocation against vicmap.toml (real trusted prefix committed) closed with reason candidate_ambiguous at stage candidate (hint: review_ready_message_against_policy). No artifact host was contacted; no partial/final artifact was created. Per 01-07's deliberate non-dedup design, an archive URL occurring twice in one message's chosen body part fails closed rather than being deduplicated -- the current ready message likely contains the archive link twice (e.g. a button anchor plus a duplicate fallback occurrence) in a single body part. Per plan instruction, the run was not retried and no policy/allowlist was relaxed. Operator must review the current ready message's HTML/plain body against the exact-one-link recognition policy and decide next step before 01-11 Task 2/3 can proceed.
+None
