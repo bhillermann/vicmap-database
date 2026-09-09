@@ -700,14 +700,68 @@ class _MetadataMessage:
         return self.mime
 
 
+class _RecordingConnection:
+    """Connection double recording real request URLs and methods.
+
+    Wired as the ``con`` attribute of a fake folder double, this proves the
+    metadata-first Graph boundary at the connection-request level rather than
+    against an in-memory SDK object that hides the SDK's own request
+    behaviour. Only ``get`` is implemented — any attempt by production code
+    to call ``post``/``put``/``patch``/``delete`` raises ``AttributeError``,
+    which is itself part of the read-only enforcement evidence.
+    """
+
+    def __init__(self, response=None):
+        self.requests: list[tuple[str, str]] = []
+        self._response = (
+            response
+            if response is not None
+            else SimpleNamespace(status_code=200, content=b"recorded-mime-bytes")
+        )
+        self._exception = None
+
+    def get(self, url, **kwargs):
+        self.requests.append(("GET", url))
+        if self._exception is not None:
+            raise self._exception
+        return self._response
+
+    def raise_next(self, exception: Exception) -> None:
+        self._exception = exception
+
+    def set_response(self, response) -> None:
+        self._response = response
+
+
+def _build_url_for(main_resource: str, endpoint: str) -> str:
+    return f"https://graph.microsoft.com/v1.0/{main_resource}{endpoint}"
+
+
+class _MetadataMessage:
+    def __init__(self, message_id, received, sender, subject, mime=b"mime-bytes"):
+        self.object_id = message_id
+        self.received = received
+        self.sender = SimpleNamespace(address=sender) if sender is not None else None
+        self.subject = subject
+        self.mime = mime
+        self.mime_calls = 0
+
+    def get_mime_content(self):
+        self.mime_calls += 1
+        if isinstance(self.mime, Exception):
+            raise self.mime
+        return self.mime
+
+
 class _MetadataFolder:
-    def __init__(self, messages=(), paging_failure=None):
+    def __init__(self, messages=(), paging_failure=None, con=None):
         self.messages = list(messages)
         self.paging_failure = paging_failure
         self.query = None
         self.get_messages_calls = []
-        self.get_message_calls = []
         self.yielded_ids = []
+        self.con = con if con is not None else _RecordingConnection()
+        self.main_resource = "users/automations@vegetationlink.com.au"
 
     def new_query(self, attribute):
         self.query = _MetadataQuery(attribute)
@@ -726,10 +780,48 @@ class _MetadataFolder:
 
         return pages()
 
-    def get_message(self, *args, **kwargs):
-        self.get_message_calls.append((args, kwargs))
-        object_id = kwargs["object_id"]
-        return next(message for message in self.messages if message.object_id == object_id)
+    def build_url(self, endpoint):
+        return _build_url_for(self.main_resource, endpoint)
+
+
+class _PagingRecordingFolder:
+    """Folder double whose pagination itself issues one connection GET per
+    page, like the real SDK's lazy paginator — so "number of metadata pages"
+    is a concrete, connection-level-observable quantity in tests."""
+
+    def __init__(self, con, pages, main_resource="users/automations@vegetationlink.com.au"):
+        self.con = con
+        self._pages = [list(page) for page in pages]
+        self.main_resource = main_resource
+        self.query = None
+
+    def new_query(self, attribute):
+        self.query = _MetadataQuery(attribute)
+        return self.query
+
+    def get_messages(self, *args, **kwargs):
+        def pages():
+            for index, page in enumerate(self._pages):
+                self.con.get(self.build_url(f"/messages?$skip={index}"))
+                yield from page
+
+        return pages()
+
+    def build_url(self, endpoint):
+        return _build_url_for(self.main_resource, endpoint)
+
+
+def _adapter_for(folder):
+    from vicmap_acquire.graph import GraphMailbox
+
+    mailbox = _AuthenticationMailbox(folder=folder)
+    account = _AuthenticationAccount(authenticated=True, mailbox=mailbox)
+    return GraphMailbox(
+        credentials=("seed-client-id", "seed-client-secret"),
+        tenant_id="seed-tenant-id",
+        mailbox_address="automations@vegetationlink.com.au",
+        account_factory=lambda *args, **kwargs: account,
+    )
 
 
 class GraphMetadataBoundaryTest(unittest.TestCase):
@@ -743,17 +835,7 @@ class GraphMetadataBoundaryTest(unittest.TestCase):
         self.assertTrue(hasattr(graph.GraphMailbox, "get_message_mime"))
 
     def _adapter(self, folder):
-        from vicmap_acquire.graph import GraphMailbox
-
-        mailbox = _AuthenticationMailbox(folder=folder)
-        account = _AuthenticationAccount(authenticated=True, mailbox=mailbox)
-        adapter = GraphMailbox(
-            credentials=("seed-client-id", "seed-client-secret"),
-            tenant_id="seed-tenant-id",
-            mailbox_address="automations@vegetationlink.com.au",
-            account_factory=lambda *args, **kwargs: account,
-        )
-        return adapter
+        return _adapter_for(folder)
 
     def test_inclusive_cutoff_selects_minimal_fields_and_exhausts_pages(self):
         self._require_task_api()
@@ -831,21 +913,124 @@ class GraphMetadataBoundaryTest(unittest.TestCase):
 
     def test_selective_mime_fetches_by_complete_id_only_on_explicit_call(self):
         self._require_task_api()
+        from vicmap_acquire.graph import _MIME_VALUE_SUFFIX
+
         message = _MetadataMessage(
             "complete-opaque-id",
             datetime(2026, 9, 1, tzinfo=timezone.utc),
             "sender@example.test",
             "subject",
-            mime=b"selective-mime",
         )
-        folder = _MetadataFolder([message])
+        connection = _RecordingConnection(
+            response=SimpleNamespace(status_code=200, content=b"selective-mime")
+        )
+        folder = _MetadataFolder([message], con=connection)
         adapter = self._adapter(folder)
         adapter.authenticate_and_confirm()
 
-        self.assertEqual(0, message.mime_calls)
+        self.assertEqual([], connection.requests)
         self.assertEqual(b"selective-mime", adapter.get_message_mime("complete-opaque-id"))
-        self.assertEqual([((), {"object_id": "complete-opaque-id"})], folder.get_message_calls)
-        self.assertEqual(1, message.mime_calls)
+        self.assertEqual(1, len(connection.requests))
+        method, url = connection.requests[0]
+        self.assertEqual("GET", method)
+        self.assertTrue(url.endswith(_MIME_VALUE_SUFFIX))
+        self.assertIn("complete-opaque-id", url)
+
+    def test_mime_url_percent_encodes_reserved_characters_into_one_request(self):
+        self._require_task_api()
+        from vicmap_acquire.graph import _MIME_VALUE_SUFFIX
+
+        reserved_id = "AAMk/AGI2=?# space"
+        connection = _RecordingConnection(
+            response=SimpleNamespace(status_code=200, content=b"reserved-id-mime")
+        )
+        folder = _MetadataFolder(con=connection)
+        adapter = self._adapter(folder)
+        adapter.authenticate_and_confirm()
+
+        result = adapter.get_message_mime(reserved_id)
+
+        self.assertEqual(b"reserved-id-mime", result)
+        self.assertEqual(1, len(connection.requests))
+        method, url = connection.requests[0]
+        self.assertEqual("GET", method)
+        self.assertTrue(url.endswith(_MIME_VALUE_SUFFIX))
+        from urllib.parse import quote
+
+        self.assertIn(quote(reserved_id, safe=""), url)
+        self.assertNotIn(reserved_id, url)
+
+    def test_mime_retrieval_failure_cases_raise_graphscanfailed_without_leaking(self):
+        self._require_task_api()
+        from vicmap_acquire.graph import GraphScanFailed
+
+        raw_marker = "raw-response-secret-marker"
+
+        response_cases = {
+            "non-200 status": SimpleNamespace(status_code=403, content=raw_marker.encode()),
+            "non-bytes content": SimpleNamespace(status_code=200, content=raw_marker),
+        }
+        for label, response in response_cases.items():
+            with self.subTest(label=label):
+                connection = _RecordingConnection(response=response)
+                folder = _MetadataFolder(con=connection)
+                adapter = self._adapter(folder)
+                adapter.authenticate_and_confirm()
+                with self.assertRaises(GraphScanFailed) as caught:
+                    adapter.get_message_mime("complete-id")
+                rendered = str(caught.exception) + repr(caught.exception)
+                self.assertNotIn(raw_marker, rendered)
+
+        blank_connection = _RecordingConnection()
+        blank_folder = _MetadataFolder(con=blank_connection)
+        blank_adapter = self._adapter(blank_folder)
+        blank_adapter.authenticate_and_confirm()
+        with self.assertRaises(GraphScanFailed):
+            blank_adapter.get_message_mime("   ")
+        self.assertEqual([], blank_connection.requests)
+
+        raising_connection = _RecordingConnection()
+        raising_connection.raise_next(RuntimeError(raw_marker))
+        raising_folder = _MetadataFolder(con=raising_connection)
+        raising_adapter = self._adapter(raising_folder)
+        raising_adapter.authenticate_and_confirm()
+        with self.assertRaises(GraphScanFailed) as raised:
+            raising_adapter.get_message_mime("complete-id")
+        rendered = str(raised.exception) + repr(raised.exception)
+        self.assertNotIn(raw_marker, rendered)
+
+    def test_scan_plus_one_mime_retrieval_issues_one_request_per_page_plus_one(self):
+        self._require_task_api()
+
+        def make_message(object_id):
+            return _MetadataMessage(
+                object_id,
+                datetime(2026, 9, 1, tzinfo=timezone.utc),
+                "sender@example.test",
+                "subject",
+            )
+
+        pages = [
+            [make_message("page-1-id")],
+            [make_message("page-2-id"), make_message("page-3-id")],
+            [make_message("page-4-id")],
+        ]
+        connection = _RecordingConnection(
+            response=SimpleNamespace(status_code=200, content=b"mime-bytes")
+        )
+        folder = _PagingRecordingFolder(connection, pages)
+        adapter = self._adapter(folder)
+
+        metadata = list(
+            adapter.iter_message_metadata(datetime(2026, 8, 1, tzinfo=timezone.utc))
+        )
+
+        self.assertEqual(4, len(metadata))
+        self.assertEqual(len(pages), len(connection.requests))
+
+        adapter.get_message_mime("page-1-id")
+
+        self.assertEqual(len(pages) + 1, len(connection.requests))
 
     def test_paging_and_mime_provider_errors_do_not_escape(self):
         self._require_task_api()
@@ -862,14 +1047,20 @@ class GraphMetadataBoundaryTest(unittest.TestCase):
                     )
                 )
 
-        mime_message = _MetadataMessage(
-            "mime-id",
-            datetime(2026, 9, 1, tzinfo=timezone.utc),
-            "sender@example.test",
-            "subject",
-            mime=RuntimeError(raw_marker),
+        failing_connection = _RecordingConnection()
+        failing_connection.raise_next(RuntimeError(raw_marker))
+        mime_folder = _MetadataFolder(
+            [
+                _MetadataMessage(
+                    "mime-id",
+                    datetime(2026, 9, 1, tzinfo=timezone.utc),
+                    "sender@example.test",
+                    "subject",
+                )
+            ],
+            con=failing_connection,
         )
-        mime_adapter = self._adapter(_MetadataFolder([mime_message]))
+        mime_adapter = self._adapter(mime_folder)
         mime_adapter.authenticate_and_confirm()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             with self.assertRaises(GraphScanFailed) as mime_caught:
@@ -893,6 +1084,114 @@ class GraphMetadataBoundaryTest(unittest.TestCase):
             ".add_category(",
         ):
             self.assertNotIn(mutation, source)
+
+
+_MUTATION_PATH_SEGMENTS = (
+    "/move",
+    "/copy",
+    "/send",
+    "/reply",
+    "/replyAll",
+    "/forward",
+    "/mailFolders/",
+    "/categories",
+    "/sendMail",
+)
+
+_MUTATION_NAME_PREFIXES = (
+    "set_",
+    "update_",
+    "delete_",
+    "move_",
+    "mark_",
+    "send_",
+    "create_",
+)
+
+
+class GraphReadOnlyEnforcementTest(unittest.TestCase):
+    """Runtime enforcement evidence for PROHIB-01 (MAIL-02).
+
+    Unlike ``test_adapter_source_contains_no_mailbox_mutation_calls`` above
+    (source-text inspection, which the verifier flagged as insufficient on
+    its own), these assertions are made against connection-level requests
+    recorded by ``_RecordingConnection`` — proof at the boundary the
+    provider actually sees, not against adapter source text.
+    """
+
+    def _scan_and_fetch_one_mime(self):
+        def make_message(object_id):
+            return _MetadataMessage(
+                object_id,
+                datetime(2026, 9, 1, tzinfo=timezone.utc),
+                "sender@example.test",
+                "subject",
+            )
+
+        pages = [
+            [make_message("page-1-id")],
+            [make_message("page-2-id"), make_message("page-3-id")],
+        ]
+        connection = _RecordingConnection(
+            response=SimpleNamespace(status_code=200, content=b"mime-bytes")
+        )
+        folder = _PagingRecordingFolder(connection, pages)
+        adapter = _adapter_for(folder)
+
+        metadata = list(
+            adapter.iter_message_metadata(datetime(2026, 8, 1, tzinfo=timezone.utc))
+        )
+        adapter.get_message_mime(metadata[0].graph_message_id)
+        return connection
+
+    def test_prohib_01_complete_scan_and_mime_use_only_read_requests(self):
+        connection = self._scan_and_fetch_one_mime()
+
+        self.assertGreaterEqual(len(connection.requests), 2)
+        methods = {method for method, _ in connection.requests}
+        self.assertEqual({"GET"}, methods)
+
+    def test_prohib_01_no_recorded_request_touches_a_mutation_endpoint(self):
+        connection = self._scan_and_fetch_one_mime()
+
+        for segment in _MUTATION_PATH_SEGMENTS:
+            with self.subTest(segment=segment):
+                for _, url in connection.requests:
+                    self.assertNotIn(segment, url)
+
+    def test_prohib_01_public_surface_exposes_no_mutation_named_callable(self):
+        from vicmap_acquire.graph import GraphMailbox
+
+        for name in dir(GraphMailbox):
+            if name.startswith("_"):
+                continue
+            with self.subTest(name=name):
+                for prefix in _MUTATION_NAME_PREFIXES:
+                    self.assertFalse(
+                        name.startswith(prefix),
+                        f"{name} looks like a mutating public callable",
+                    )
+
+    def test_prohib_01_non_inbox_folder_rejected_before_any_request(self):
+        from vicmap_acquire.graph import GraphAuthenticationFailed, GraphMailbox
+
+        connection = _RecordingConnection()
+        folder = _MetadataFolder(con=connection)
+        mailbox = _AuthenticationMailbox(folder=folder)
+        account = _AuthenticationAccount(authenticated=True, mailbox=mailbox)
+        construction = unittest.mock.Mock(return_value=account)
+
+        with self.assertRaises(GraphAuthenticationFailed):
+            GraphMailbox(
+                credentials=("seed-client-id", "seed-client-secret"),
+                tenant_id="seed-tenant-id",
+                mailbox_address="automations@vegetationlink.com.au",
+                folder_name="Drafts",
+                account_factory=construction,
+            )
+
+        construction.assert_not_called()
+        self.assertEqual([], connection.requests)
 
 
 if __name__ == "__main__":
