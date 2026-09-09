@@ -12,6 +12,10 @@
 | graph.message-metadata-select | INTEGRATE | |
 | graph.complete-pagination | INTEGRATE | |
 | graph.single-message-mime-value | INTEGRATE | |
+| graph.mime-value-direct-request | INTEGRATE | |
+| graph.ordinary-message-representation-get | OPT-OUT | A metadata-first boundary must not fetch a default message representation before MIME. |
+| graph.internet-message-headers-property | OPT-OUT | Authentication headers are read from the already-retrieved MIME value with no extra request. |
+| graph.authentication-results-headers | INTEGRATE | |
 | graph.message-body-expansion-in-list | OPT-OUT | Metadata-first retrieval is required so non-qualifying message bodies do not cross the application boundary. |
 | graph.attachments | OPT-OUT | DataShare delivery is an HTTPS body link, not a Graph attachment. |
 | graph.send-reply-forward | OPT-OUT | The phase is read-only acquisition and sends no mailbox content. |
@@ -40,6 +44,7 @@
 | artifact.upload-and-non-get-methods | OPT-OUT | Acquisition only reads one artifact and performs no remote mutation. |
 | artifact.proxy-netrc-ambient-auth | OPT-OUT | The clean artifact session must not inherit credentials or proxy routing from the Graph environment. |
 | artifact.alternate-hostnames | OPT-OUT | D-13 initially permits only the exact host `s3.ap-southeast-2.amazonaws.com`. |
+| artifact.authorized-bucket-path-prefix | INTEGRATE | |
 | artifact.archive-extraction | OPT-OUT | Archive inspection and extraction belong to Phase 2. |
 
 ## Boundary note
