@@ -315,6 +315,105 @@ class CandidateRecognitionTest(unittest.TestCase):
 
         self.assertEqual("candidate_ambiguous", caught.exception.code)
 
+    def test_every_non_rendered_tag_suppresses_its_sole_archive_url(self):
+        archive_url = _url()
+        for tag in (
+            "script",
+            "style",
+            "template",
+            "noscript",
+            "title",
+            "meta",
+            "object",
+            "iframe",
+        ):
+            with self.subTest(tag=tag):
+                with self.assertRaises(CandidateError) as caught:
+                    _recognize(
+                        _metadata(), _mime(html=f"<{tag}>{archive_url}</{tag}>")
+                    )
+                self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_malformed_non_rendered_nesting_never_yields_an_archive_link(self):
+        archive_url = _url()
+        malformed_bodies = {
+            "unclosed_script": f"<script>{archive_url}",
+            "script_closed_by_mismatched_style_tag": f"<script>{archive_url}</style>",
+            "script_nested_inside_style": (
+                f"<style><script>{archive_url}</script></style>"
+            ),
+            "non_rendered_start_tag_after_the_url_text": (
+                f"<script>{archive_url}<style></script>"
+            ),
+        }
+        for name, html in malformed_bodies.items():
+            with self.subTest(shape=name):
+                with self.assertRaises(CandidateError) as caught:
+                    _recognize(_metadata(), _mime(html=html))
+                self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_repeated_identical_archive_url_in_rendered_html_text_is_ambiguous(self):
+        archive_url = _url()
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(
+                _metadata(),
+                _mime(html=f"<p>{archive_url}</p><p>{archive_url}</p>"),
+            )
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_empty_bytes_mime_fails_closed_before_any_link_extraction(self):
+        with self.assertRaises(OriginUnauthenticated) as caught:
+            _recognize(_metadata(), b"")
+
+        self.assertEqual("origin_unauthenticated", caught.exception.code)
+
+    def test_html_body_with_no_archive_url_fails_closed_as_ambiguous(self):
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(
+                _metadata(),
+                _mime(html="<p>No archive link anywhere in this body.</p>"),
+            )
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_non_strictly_decodable_percent_encoding_is_not_an_archive_link(self):
+        undecodable_url = _url("Order_%FFsuffix.zip")
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(_metadata(), _mime(plain=undecodable_url))
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_html_only_prefers_anchor_hrefs_over_rendered_text(self):
+        archive_url = _url()
+        decorative_text = "See the attached instructions for details."
+        candidate = _recognize(
+            _metadata(),
+            _mime(
+                html=(
+                    f'<p><a href="{archive_url}">download</a></p>'
+                    f"<p>{decorative_text}</p>"
+                )
+            ),
+        )
+
+        self.assertEqual(archive_url, candidate.artifact_url)
+
+    def test_html_only_falls_back_to_rendered_text_when_no_anchor_matches(self):
+        archive_url = _url()
+        decorative_href = "https://example.invalid/help"
+        candidate = _recognize(
+            _metadata(),
+            _mime(
+                html=(
+                    f'<p><a href="{decorative_href}">help</a></p>'
+                    f"<p>{archive_url}</p>"
+                )
+            ),
+        )
+
+        self.assertEqual(archive_url, candidate.artifact_url)
+
 
 def _candidate(
     graph_message_id: str,
@@ -459,6 +558,27 @@ class CandidateSelectionTest(unittest.TestCase):
                     CandidateAmbiguous,
                     lambda invalid=invalid: select_candidate([invalid]),
                 )
+
+    def test_single_element_input_selects_that_element(self):
+        self.assertIs(self.oldest, select_candidate([self.oldest]))
+
+    def test_tie_break_ordering_is_stable_across_case_and_normalization_variants(self):
+        received = datetime(2026, 9, 7, tzinfo=timezone.utc)
+        case_lower = _candidate("id-ı", received)
+        case_upper = _candidate("id-İ", received)
+        nfc_form = _candidate("id-é", received)
+        nfd_form = _candidate("id-é", received)
+
+        expected_case_winner = max(case_lower, case_upper, key=lambda c: c.graph_message_id)
+        expected_norm_winner = max(nfc_form, nfd_form, key=lambda c: c.graph_message_id)
+
+        for ordering in itertools.permutations((case_lower, case_upper)):
+            with self.subTest(kind="case", ordering=[c.graph_message_id for c in ordering]):
+                self.assertIs(expected_case_winner, select_candidate(list(ordering)))
+
+        for ordering in itertools.permutations((nfc_form, nfd_form)):
+            with self.subTest(kind="normalization", ordering=[c.graph_message_id for c in ordering]):
+                self.assertIs(expected_norm_winner, select_candidate(list(ordering)))
 
 
 if __name__ == "__main__":
