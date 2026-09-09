@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-09-09T04:38:30.806Z"
+stopped_at: Completed 01-07-PLAN.md
+last_updated: "2026-09-09T04:51:46.247Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 01 execution started
-state_head: e4f82f663835e1c002c7f87471aaa1601a60729a
+state_head: 9208b49cf3a6c7d6cf4ab32662b5d9177eec17a0
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 11
-  completed_plans: 6
+  completed_plans: 7
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 01 (Trusted Graph Acquisition) — EXECUTING
-Plan: 2 of 11
+Plan: 3 of 11
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-09T04:38:30.777Z
-**Stopped at:** Completed 01-06-PLAN.md
+**Last session:** 2026-09-09T04:51:46.215Z
+**Stopped at:** Completed 01-07-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -56,6 +56,7 @@ Last activity: 2026-09-09 — Phase 01 execution started
 | Phase 01 P04 | 22min | 2 tasks | 4 files |
 | Phase 01 P05 | 21h 15m | 2 tasks | 11 files |
 | Phase 01 P06 | 20min | 3 tasks | 11 files |
+| Phase 01 P07 | 15min | 2 tasks | 2 files |
 
 ## Decisions
 
@@ -79,3 +80,5 @@ Last activity: 2026-09-09 — Phase 01 execution started
 - [Phase 01]: Distinguish automated live checks and redacted recovery evidence from operator attestations about tenant scope and legacy-token handling.
 - [Phase 01]: Bound D-01's sender allowlist to the DKIM-covered From header verified by the trusted receiving mail infrastructure, not any provider-supplied label. — Vicmap DataShare publishes no artifact signature; the mailbox's own DKIM/DMARC/compauth verdict is the only cryptographically grounded origin signal available.
 - [Phase 01]: Narrowed the D-13 host allowlist with an exact configured URL prefix applied to the initial target and every redirect hop. — A shared bucket host alone let a label-matching message point at any path on that host; the prefix binds the artifact to the sender's own object authority.
+- [Phase 01]: Gated non-rendered-element archive-link collection with a depth counter on _AnchorCollector so script/style/comment content can never supply the accepted archive URL. — Closes verification gap G-04 where a script-only URL was accepted as the sole candidate link.
+- [Phase 01]: Asserted OriginUnauthenticated (not CandidateAmbiguous) for literal-b"" MIME, matching 01-06's actual check order. — 01-06's origin verification runs before link extraction; both are closed failures, satisfying the must_haves.truths wording.

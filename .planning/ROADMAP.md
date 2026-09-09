@@ -27,7 +27,7 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 3. The selected message yields one artifact through an approved HTTPS host while redirect, timeout, and size limits are enforced.
 4. The completed download reports its byte count and checksum for downstream provenance.
 
-**Plans:** 6/11 plans executed (5 executed, 6 gap-closure pending)
+**Plans:** 7/11 plans executed (5 executed, 6 gap-closure pending)
 
 Plans:
 **Wave 1**
@@ -52,7 +52,7 @@ Plans:
 
 **Gap-closure Wave 2** *(blocked on Gap-closure Wave 1)*
 
-- [ ] 01-07-PLAN.md — Collect archive URLs only from rendered HTML context and close the MAIL-02/MAIL-03 edge gaps.
+- [x] 01-07-PLAN.md — Collect archive URLs only from rendered HTML context and close the MAIL-02/MAIL-03 edge gaps.
 - [ ] 01-08-PLAN.md — Define the publication commit point and authorize every redirect hop against the URL prefix.
 - [ ] 01-09-PLAN.md — Unify the policy validator and fingerprint contract and guard evidence delivery.
 - [ ] 01-10-PLAN.md — Retrieve MIME in one request and add runtime read-only enforcement evidence.
@@ -135,7 +135,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Trusted Graph Acquisition | 6/11 | In Progress|  |
+| 1. Trusted Graph Acquisition | 7/11 | In Progress|  |
 | 2. Safe Geospatial Discovery | 0/TBD | Not started | — |
 | 3. Validated PostGIS Staging | 0/TBD | Not started | — |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
