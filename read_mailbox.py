@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping
+from urllib.parse import urlsplit
 
 import requests
 
@@ -20,6 +21,7 @@ from vicmap_acquire.download import (
     DownloadError,
     DownloadPolicy,
     DownloadResult,
+    _normalize_url_prefix,
     download_artifact,
 )
 from vicmap_acquire.graph import GraphError, GraphMailbox
@@ -62,6 +64,7 @@ _HOSTNAME = re.compile(
     r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 )
+_ALLOWED_OUTPUT_NAMES = frozenset({"artifacts"})
 
 
 @dataclass(frozen=True)
@@ -137,12 +140,23 @@ def _strict_string(value: object) -> str:
 
 
 def _string_list(value: object) -> tuple[str, ...]:
+    """Extract a non-empty tuple of strict strings; no semantic checks here.
+
+    Format, duplicate, and closed-set checks all live in
+    ``validate_acquisition_policy`` -- the one configuration contract -- so a
+    directly constructed ``AcquisitionConfig`` cannot bypass them.
+    """
+
     if not isinstance(value, list) or not value:
         raise AcquisitionFailure("config_invalid")
-    items = tuple(_strict_string(item) for item in value)
-    if len(set(items)) != len(items):
+    return tuple(_strict_string(item) for item in value)
+
+
+def _strict_email(value: object) -> str:
+    value = _strict_string(value)
+    if value.count("@") != 1 or any(character.isspace() for character in value):
         raise AcquisitionFailure("config_invalid")
-    return items
+    return value
 
 
 def _bounded_integer(value: object, minimum: int, maximum: int) -> int:
@@ -153,18 +167,95 @@ def _bounded_integer(value: object, minimum: int, maximum: int) -> int:
     return value
 
 
-def _validate_config_object(config: AcquisitionConfig) -> None:
-    _strict_string(config.mailbox)
-    _strict_string(config.folder)
-    if (
-        not config.allowed_senders
-        or not config.allowed_order_ids
-        or not config.allowed_hosts
-        or not config.required_authentication_results
-        or not config.allowed_url_prefixes
-        or "dkim" not in config.required_authentication_results
+def validate_acquisition_policy(config: AcquisitionConfig) -> None:
+    """The one configuration contract enforced identically by every entry point.
+
+    Both ``load_config`` (the TOML path) and ``run_acquisition`` (the
+    programmatic seam) call this and nothing else for semantic policy
+    checks, so a directly constructed ``AcquisitionConfig`` cannot bypass a
+    rule the TOML loader would have enforced. Every check here runs before
+    any credential is read, any Graph adapter is constructed, any network
+    call is made, and any directory is created.
+
+    All string comparisons use ``str.casefold()`` on the exact code-point
+    sequence; nothing here calls ``unicodedata.normalize``, so two values
+    that are canonically equivalent but differ in code points are treated as
+    different values, while two values differing only by ASCII case are
+    treated as the same value.
+    """
+
+    _strict_email(config.mailbox)
+    if config.folder != "Inbox":
+        raise AcquisitionFailure("config_invalid")
+
+    if not isinstance(config.allowed_senders, tuple) or not config.allowed_senders:
+        raise AcquisitionFailure("config_invalid")
+    for sender in config.allowed_senders:
+        _strict_email(sender)
+    if len({sender.casefold() for sender in config.allowed_senders}) != len(
+        config.allowed_senders
     ):
         raise AcquisitionFailure("config_invalid")
+
+    if not isinstance(config.allowed_order_ids, tuple) or not config.allowed_order_ids:
+        raise AcquisitionFailure("config_invalid")
+    for order_id in config.allowed_order_ids:
+        if not isinstance(order_id, str) or _ORDER_ID.fullmatch(order_id) is None:
+            raise AcquisitionFailure("config_invalid")
+    if len(set(config.allowed_order_ids)) != len(config.allowed_order_ids):
+        raise AcquisitionFailure("config_invalid")
+
+    if not isinstance(config.allowed_hosts, tuple) or not config.allowed_hosts:
+        raise AcquisitionFailure("config_invalid")
+    for host in config.allowed_hosts:
+        if (
+            not isinstance(host, str)
+            or host != host.casefold()
+            or host.endswith(".")
+            or _HOSTNAME.fullmatch(host) is None
+        ):
+            raise AcquisitionFailure("config_invalid")
+    if len(set(config.allowed_hosts)) != len(config.allowed_hosts):
+        raise AcquisitionFailure("config_invalid")
+
+    if (
+        not isinstance(config.allowed_url_prefixes, tuple)
+        or not config.allowed_url_prefixes
+    ):
+        raise AcquisitionFailure("config_invalid")
+    allowed_host_set = set(config.allowed_hosts)
+    normalized_prefixes = []
+    for prefix in config.allowed_url_prefixes:
+        try:
+            normalized = _normalize_url_prefix(prefix)
+        except ValueError:
+            raise AcquisitionFailure("config_invalid") from None
+        prefix_host = urlsplit(normalized).hostname
+        if prefix_host is None or prefix_host not in allowed_host_set:
+            raise AcquisitionFailure("config_invalid")
+        normalized_prefixes.append(normalized)
+    if len(set(normalized_prefixes)) != len(normalized_prefixes):
+        raise AcquisitionFailure("config_invalid")
+
+    if (
+        not isinstance(config.required_authentication_results, tuple)
+        or not config.required_authentication_results
+    ):
+        raise AcquisitionFailure("config_invalid")
+    for method in config.required_authentication_results:
+        if (
+            not isinstance(method, str)
+            or method != method.casefold()
+            or method not in _AUTH_METHODS
+        ):
+            raise AcquisitionFailure("config_invalid")
+    if "dkim" not in config.required_authentication_results:
+        raise AcquisitionFailure("config_invalid")
+    if len(set(config.required_authentication_results)) != len(
+        config.required_authentication_results
+    ):
+        raise AcquisitionFailure("config_invalid")
+
     _bounded_integer(config.lookback_days, 1, 3660)
     _bounded_integer(config.max_bytes, 1, 10 * 1024**4)
     _bounded_integer(config.connect_timeout_seconds, 1, 3600)
@@ -172,7 +263,17 @@ def _validate_config_object(config: AcquisitionConfig) -> None:
     _bounded_integer(config.progress_interval_seconds, 1, 3600)
     _bounded_integer(config.max_redirects, 1, 20)
     _bounded_integer(config.fingerprint_hex_chars, 8, 64)
+
     if not isinstance(config.allow_order_id_mismatch, bool):
+        raise AcquisitionFailure("config_invalid")
+
+    if (
+        not isinstance(config.output_dir, Path)
+        or not config.output_dir.is_absolute()
+        or config.output_dir.name not in _ALLOWED_OUTPUT_NAMES
+        or config.output_dir.is_symlink()
+        or (config.output_dir.exists() and not config.output_dir.is_dir())
+    ):
         raise AcquisitionFailure("config_invalid")
 
 
@@ -186,7 +287,7 @@ def run_acquisition(
     """Run the ordered Graph-to-artifact path through injectable I/O seams."""
 
     try:
-        _validate_config_object(config)
+        validate_acquisition_policy(config)
         _require_credentials(credentials)
         _suppress_dependency_logs()
         graph_factory = GraphMailbox if graph_factory is None else graph_factory
@@ -263,7 +364,14 @@ def run_acquisition(
 
 
 def load_config(path: Path) -> AcquisitionConfig:
-    """Load and fully validate non-secret policy without creating runtime state."""
+    """Load non-secret policy shape from TOML, then apply the shared contract.
+
+    This body performs only TOML shape work -- key-set equality, type
+    extraction, ``Path`` construction, and output-root resolution. Every
+    semantic check (format, closed sets, duplicates, bounds) is delegated to
+    ``validate_acquisition_policy`` so there is exactly one place those rules
+    exist.
+    """
 
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -279,30 +387,11 @@ def load_config(path: Path) -> AcquisitionConfig:
         address = _strict_string(mailbox["address"])
         folder = _strict_string(mailbox["folder"])
         senders = _string_list(mailbox["allowed_senders"])
-        for sender in senders:
-            if sender.count("@") != 1 or any(character.isspace() for character in sender):
-                raise AcquisitionFailure("config_invalid")
         order_ids = _string_list(mailbox["allowed_order_ids"])
-        if any(_ORDER_ID.fullmatch(order_id) is None for order_id in order_ids):
-            raise AcquisitionFailure("config_invalid")
         required_authentication_results = _string_list(
             mailbox["required_authentication_results"]
         )
-        if any(
-            method != method.casefold() or method not in _AUTH_METHODS
-            for method in required_authentication_results
-        ):
-            raise AcquisitionFailure("config_invalid")
-        if "dkim" not in required_authentication_results:
-            raise AcquisitionFailure("config_invalid")
         hosts = _string_list(download["allowed_hosts"])
-        if any(
-            host != host.casefold()
-            or host.endswith(".")
-            or _HOSTNAME.fullmatch(host) is None
-            for host in hosts
-        ):
-            raise AcquisitionFailure("config_invalid")
         allowed_url_prefixes = _string_list(download["allowed_url_prefixes"])
 
         output_value = _strict_string(download["output_dir"])
@@ -314,8 +403,6 @@ def load_config(path: Path) -> AcquisitionConfig:
         config_root = path.parent.resolve()
         output_dir = (config_root / configured_output).resolve()
         if output_dir != config_root and config_root not in output_dir.parents:
-            raise AcquisitionFailure("config_invalid")
-        if output_dir.exists() and not output_dir.is_dir():
             raise AcquisitionFailure("config_invalid")
 
         config = AcquisitionConfig(
@@ -344,7 +431,7 @@ def load_config(path: Path) -> AcquisitionConfig:
             required_authentication_results=required_authentication_results,
             allowed_url_prefixes=allowed_url_prefixes,
         )
-        _validate_config_object(config)
+        validate_acquisition_policy(config)
         return config
     except AcquisitionFailure:
         raise
