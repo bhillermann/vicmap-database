@@ -189,6 +189,7 @@ class DownloadResult:
     sha256: str
     approved_hostname: str = ""
     path_fingerprint: str = ""
+    temp_cleanup_deferred: bool = False
 
 
 def _nonnegative_integer(value: object, name: str) -> int:
@@ -255,6 +256,53 @@ def validate_https_target(
         raise DownloadUrlRejected()
 
     return target
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Fsync a directory entry so a completed publish is durably recorded.
+
+    Directory fsync is unsupported on some platforms; any ``OSError`` raised
+    by opening, syncing, or closing the directory descriptor is swallowed
+    because the publish itself has already committed and this call only
+    strengthens durability, never correctness.
+    """
+
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _publish_artifact(temp_path: Path, final_path: Path) -> bool:
+    """Publish ``temp_path`` at ``final_path``; this call is the one commit point.
+
+    A same-directory hard link is the atomic publication step. A
+    ``FileExistsError`` from ``os.link`` propagates uncaught -- publication
+    did not happen, so the caller translates it to ``ArtifactWriteFailed``
+    exactly as before this existed. Once ``os.link`` succeeds, publication is
+    committed and cannot be undone by this function: the parent directory is
+    fsynced for durability and the temporary name is best-effort removed.
+    Returns ``True`` when that cleanup also succeeded, ``False`` when the
+    temporary name could not be removed (``temp_cleanup_deferred``). No
+    exception raised by post-commit cleanup may leave this function.
+    """
+
+    os.link(temp_path, final_path)
+    _fsync_directory(final_path.parent)
+    try:
+        temp_path.unlink()
+    except OSError:
+        return False
+    return True
 
 
 def _clean_session(session: object) -> None:
@@ -432,7 +480,19 @@ def download_artifact(
     session_factory=requests.Session,
     **legacy,
 ) -> DownloadResult:
-    """Validate each hop, stream exact bytes privately, then publish atomically."""
+    """Validate each hop, stream exact bytes privately, then publish atomically.
+
+    Publication has exactly one commit point: the successful return of
+    ``_publish_artifact`` (a same-directory hard link from the private
+    temporary name to ``final_path``, fsynced for durability). Every failure
+    before that point leaves no final path and removes the private partial.
+    Once committed, a failure of the post-commit temporary-name cleanup can
+    never be reported as a transfer failure -- the returned
+    ``DownloadResult.temp_cleanup_deferred`` records that condition instead,
+    so a successful return always agrees with on-disk state: the final path
+    exists and nothing this call already decided about gets a second,
+    contradictory outcome from the surrounding ``finally`` block.
+    """
 
     final_path, policy, progress_sink, session_factory, legacy_output_dir = (
         _legacy_arguments(final_path, policy, progress_sink, session_factory, legacy)
@@ -521,10 +581,9 @@ def download_artifact(
         if declared_bytes is not None and declared_bytes != received:
             raise DownloadHttpFailed()
         try:
-            os.link(temp_path, final_path)
+            cleanup_succeeded = _publish_artifact(temp_path, final_path)
         except FileExistsError:
             raise ArtifactWriteFailed() from None
-        temp_path.unlink()
         temp_path = None
         return DownloadResult(
             path=final_path,
@@ -534,6 +593,7 @@ def download_artifact(
             path_fingerprint=hashlib.sha256(target.path.encode("utf-8")).hexdigest()[
                 : policy.fingerprint_hex_length
             ],
+            temp_cleanup_deferred=not cleanup_succeeded,
         )
     except DownloadFailure:
         raise
