@@ -5,10 +5,10 @@ current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
 stopped_at: Completed 01-10-PLAN.md
-last_updated: "2026-09-09T05:54:14.809Z"
+last_updated: "2026-09-09T06:30:13.407Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 01 execution started
-state_head: 64b43a01f93c29db68f06ccc14ac25df36a87c95
+state_head: 9611ad2bf6f54c28b73de8806040a0252f3ecbf2
 progress:
   total_phases: 5
   completed_phases: 0
@@ -94,3 +94,7 @@ Last activity: 2026-09-09 — Phase 01 execution started
 - [Phase 01]: Constrained output_dir to the recognised artifacts name and unanchored .gitignore's artifacts/ pattern so every permitted output root, nested or not, is provably git-ignored, closing WR-05.
 - [Phase 01]: Made get_message_mime issue exactly one connection-level GET to the Graph MIME value endpoint (/messages/{id}/$value), replacing the two-request path that fetched an ordinary message representation first.
 - [Phase 01]: Gave PROHIB-01 runtime enforcement evidence at the connection-request level (GET-only method set, no mutation path segments, no mutation-named public callables, non-Inbox rejection) instead of source-text inspection alone.
+
+### Blockers
+
+- 01-11 Task 2: one live acquisition invocation against vicmap.toml (real trusted prefix committed) closed with reason candidate_ambiguous at stage candidate (hint: review_ready_message_against_policy). No artifact host was contacted; no partial/final artifact was created. Per 01-07's deliberate non-dedup design, an archive URL occurring twice in one message's chosen body part fails closed rather than being deduplicated -- the current ready message likely contains the archive link twice (e.g. a button anchor plus a duplicate fallback occurrence) in a single body part. Per plan instruction, the run was not retried and no policy/allowlist was relaxed. Operator must review the current ready message's HTML/plain body against the exact-one-link recognition policy and decide next step before 01-11 Task 2/3 can proceed.
