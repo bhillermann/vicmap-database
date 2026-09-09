@@ -172,7 +172,7 @@ class PipelineTracerTest(unittest.TestCase):
                 max_redirects=5,
                 fingerprint_hex_chars=16,
                 allow_order_id_mismatch=False,
-                output_dir=Path(output_dir),
+                output_dir=Path(output_dir) / "artifacts",
                 required_authentication_results=("dkim", "dmarc", "compauth"),
                 allowed_url_prefixes=("https://s3.ap-southeast-2.amazonaws.com/private/",),
             )
@@ -269,7 +269,7 @@ class PipelineTracerTest(unittest.TestCase):
                 max_redirects=5,
                 fingerprint_hex_chars=16,
                 allow_order_id_mismatch=False,
-                output_dir=Path(output_dir),
+                output_dir=Path(output_dir) / "artifacts",
                 required_authentication_results=("dkim", "dmarc", "compauth"),
                 allowed_url_prefixes=("https://s3.ap-southeast-2.amazonaws.com/private/",),
             )

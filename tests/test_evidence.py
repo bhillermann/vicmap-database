@@ -6,11 +6,12 @@ import importlib
 import io
 import json
 import tempfile
+import unicodedata
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 try:
@@ -31,6 +32,127 @@ AUTH_RESULTS_DKIM_FAIL = (
     "dmarc=pass action=none header.from=datashare.maps.vic.gov.au;"
     "compauth=pass reason=100"
 )
+
+
+def _policy_kwargs(output_dir: Path, **overrides: object) -> dict[str, object]:
+    """Build a complete, valid ``AcquisitionConfig`` kwargs mapping.
+
+    ``overrides`` replaces individual fields so malformed-policy tests can
+    mutate exactly one field while every other field remains valid.
+    """
+
+    base: dict[str, object] = dict(
+        mailbox="automations@vegetationlink.com.au",
+        folder="Inbox",
+        allowed_senders=("noreply@datashare.maps.vic.gov.au",),
+        allowed_order_ids=("OK0VUZ",),
+        allowed_hosts=("s3.ap-southeast-2.amazonaws.com",),
+        lookback_days=15,
+        max_bytes=10 * 1024**3,
+        connect_timeout_seconds=10,
+        read_timeout_seconds=60,
+        progress_interval_seconds=5,
+        max_redirects=5,
+        fingerprint_hex_chars=16,
+        allow_order_id_mismatch=False,
+        output_dir=output_dir,
+        required_authentication_results=("dkim", "dmarc", "compauth"),
+        allowed_url_prefixes=("https://s3.ap-southeast-2.amazonaws.com/private/",),
+    )
+    base.update(overrides)
+    return base
+
+
+def _toml_scalar(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    raise TypeError(f"unsupported TOML scalar: {value!r}")
+
+
+def _toml_list(values) -> str:
+    return "[" + ", ".join(_toml_scalar(value) for value in values) + "]"
+
+
+def _render_policy_toml(kwargs: dict[str, object], output_value: str) -> str:
+    """Render the exact TOML shape ``load_config`` expects from ``kwargs``."""
+
+    return (
+        "[mailbox]\n"
+        f'address = {_toml_scalar(kwargs["mailbox"])}\n'
+        f'folder = {_toml_scalar(kwargs["folder"])}\n'
+        f'allowed_senders = {_toml_list(kwargs["allowed_senders"])}\n'
+        f'allowed_order_ids = {_toml_list(kwargs["allowed_order_ids"])}\n'
+        f'lookback_days = {_toml_scalar(kwargs["lookback_days"])}\n'
+        f'allow_order_id_mismatch = {_toml_scalar(kwargs["allow_order_id_mismatch"])}\n'
+        "required_authentication_results = "
+        f'{_toml_list(kwargs["required_authentication_results"])}\n'
+        "\n"
+        "[download]\n"
+        f'allowed_hosts = {_toml_list(kwargs["allowed_hosts"])}\n'
+        f'max_bytes = {_toml_scalar(kwargs["max_bytes"])}\n'
+        f'connect_timeout_seconds = {_toml_scalar(kwargs["connect_timeout_seconds"])}\n'
+        f'read_timeout_seconds = {_toml_scalar(kwargs["read_timeout_seconds"])}\n'
+        "progress_interval_seconds = "
+        f'{_toml_scalar(kwargs["progress_interval_seconds"])}\n'
+        f'max_redirects = {_toml_scalar(kwargs["max_redirects"])}\n'
+        f'fingerprint_hex_chars = {_toml_scalar(kwargs["fingerprint_hex_chars"])}\n'
+        f'output_dir = {_toml_scalar(output_value)}\n'
+        f'allowed_url_prefixes = {_toml_list(kwargs["allowed_url_prefixes"])}\n'
+    )
+
+
+# Each case overrides exactly one policy field (or, for the last case, only
+# the TOML-only ``output_dir`` string) and must be rejected as
+# ``config_invalid`` through both ``load_config`` and a direct
+# ``AcquisitionConfig`` passed to ``run_acquisition`` -- the "one complete
+# policy validator used by both" requirement from verification gap G-02.
+_POLICY_MALFORMED_CASES: dict[str, tuple[dict[str, object], str | None]] = {
+    "non-inbox folder": ({"folder": "Archive"}, None),
+    "sender missing exactly one at-sign": (
+        {"allowed_senders": ("not-an-email",)},
+        None,
+    ),
+    "order id has a non-alphanumeric character": (
+        {"allowed_order_ids": ("OK-0VUZ",)},
+        None,
+    ),
+    "host has an uppercase letter": (
+        {"allowed_hosts": ("S3.ap-southeast-2.amazonaws.com",)},
+        None,
+    ),
+    "host contains a scheme": (
+        {"allowed_hosts": ("https://s3.ap-southeast-2.amazonaws.com",)},
+        None,
+    ),
+    "url prefix hostname is not allowlisted": (
+        {"allowed_url_prefixes": ("https://attacker.example/private/",)},
+        None,
+    ),
+    "duplicate sender entry": (
+        {
+            "allowed_senders": (
+                "noreply@datashare.maps.vic.gov.au",
+                "noreply@datashare.maps.vic.gov.au",
+            )
+        },
+        None,
+    ),
+    "empty sender allowlist": ({"allowed_senders": ()}, None),
+    "authentication method outside the closed set": (
+        {"required_authentication_results": ("dkim", "not-a-real-method")},
+        None,
+    ),
+    "authentication methods missing dkim": (
+        {"required_authentication_results": ("dmarc", "compauth")},
+        None,
+    ),
+    "non-bool order id mismatch flag": ({"allow_order_id_mismatch": 1}, None),
+    "output directory name is not recognised": ({}, "nested/mydir"),
+}
 
 
 def _e2e_mime(
@@ -299,7 +421,7 @@ class ControllerDisclosureTest(unittest.TestCase):
                 max_redirects=5,
                 fingerprint_hex_chars=16,
                 allow_order_id_mismatch=False,
-                output_dir=Path(directory),
+                output_dir=Path(directory) / "artifacts",
                 required_authentication_results=("dkim", "dmarc", "compauth"),
                 allowed_url_prefixes=("https://s3.ap-southeast-2.amazonaws.com/private/",),
             )
@@ -688,7 +810,7 @@ class ControllerCompositionTest(unittest.TestCase):
             with patch.object(read_mailbox, "download_artifact") as downloader:
                 with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
                     read_mailbox.run_acquisition(
-                        self._config(Path(directory)),
+                        self._config(Path(directory) / "artifacts"),
                         self._credentials(),
                         graph_factory=EmptyGraph,
                         event_sink=events.append,
@@ -741,7 +863,7 @@ class ControllerCompositionTest(unittest.TestCase):
             ):
                 with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
                     read_mailbox.run_acquisition(
-                        self._config(Path(directory)),
+                        self._config(Path(directory) / "artifacts"),
                         self._credentials(),
                         graph_factory=Graph,
                         event_sink=events.append,
@@ -752,6 +874,169 @@ class ControllerCompositionTest(unittest.TestCase):
         self.assertEqual(newest_url, downloader.call_args.args[0])
         self.assertEqual("download", events[-1]["stage"])
         self.assertEqual("download_expired_or_missing", events[-1]["reason"])
+
+
+class ControllerPolicyContractTest(unittest.TestCase):
+    """Closes verification gap G-02: one complete policy validator.
+
+    Every case here must be rejected identically -- same ``config_invalid``
+    code, zero adapter calls, zero filesystem writes -- whether the malformed
+    policy arrives through the TOML loader or a directly constructed
+    ``AcquisitionConfig`` passed straight to ``run_acquisition``.
+    """
+
+    def test_malformed_policy_is_rejected_identically_by_both_entry_points(self):
+        import read_mailbox
+
+        for label, (overrides, output_value) in _POLICY_MALFORMED_CASES.items():
+            resolved_output_value = "artifacts" if output_value is None else output_value
+
+            with self.subTest(entry_point="load_config", label=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    kwargs = _policy_kwargs(Path(directory), **overrides)
+                    toml_text = _render_policy_toml(kwargs, resolved_output_value)
+                    policy_path = Path(directory) / "policy.toml"
+                    policy_path.write_text(toml_text, encoding="utf-8")
+
+                    with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                        read_mailbox.load_config(policy_path)
+                    self.assertEqual("config_invalid", caught.exception.code)
+                    self.assertEqual(
+                        [policy_path],
+                        list(Path(directory).iterdir()),
+                        "malformed policy must create no directory or file",
+                    )
+
+            with self.subTest(entry_point="run_acquisition", label=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    output_dir = Path(directory) / resolved_output_value
+                    kwargs = _policy_kwargs(output_dir, **overrides)
+                    config = read_mailbox.AcquisitionConfig(**kwargs)
+                    graph_factory = Mock()
+                    session_factory = Mock()
+
+                    with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                        read_mailbox.run_acquisition(
+                            config,
+                            {
+                                "O365_AUTH_ID": "private-client-id",
+                                "O365_AUTH_SECRET": "private-client-secret",
+                                "TENANT_ID": "private-tenant-id",
+                            },
+                            graph_factory=graph_factory,
+                            session_factory=session_factory,
+                        )
+                    self.assertEqual("config_invalid", caught.exception.code)
+                    graph_factory.assert_not_called()
+                    session_factory.assert_not_called()
+                    self.assertEqual(
+                        [],
+                        list(Path(directory).iterdir()),
+                        "malformed policy must create no directory or file",
+                    )
+
+    def test_single_element_allowlists_are_valid(self):
+        import read_mailbox
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = read_mailbox.AcquisitionConfig(
+                **_policy_kwargs(Path(directory) / "artifacts")
+            )
+            read_mailbox.validate_acquisition_policy(config)  # must not raise
+            self.assertEqual(1, len(config.allowed_senders))
+            self.assertEqual(1, len(config.allowed_order_ids))
+            self.assertEqual(1, len(config.allowed_hosts))
+            self.assertEqual(1, len(config.allowed_url_prefixes))
+
+    def test_nfc_equivalent_but_code_point_different_senders_are_both_accepted(self):
+        import read_mailbox
+
+        composed = "user-caf\u00e9@example.test"
+        decomposed = "user-cafe\u0301@example.test"
+        self.assertNotEqual(composed, decomposed)
+        self.assertEqual(
+            unicodedata.normalize("NFC", composed),
+            unicodedata.normalize("NFC", decomposed),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = read_mailbox.AcquisitionConfig(
+                **_policy_kwargs(
+                    Path(directory) / "artifacts",
+                    allowed_senders=(composed, decomposed),
+                )
+            )
+            read_mailbox.validate_acquisition_policy(config)  # must not raise
+
+    def test_ascii_case_variant_sender_is_treated_as_a_duplicate(self):
+        import read_mailbox
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = read_mailbox.AcquisitionConfig(
+                **_policy_kwargs(
+                    Path(directory) / "artifacts",
+                    allowed_senders=(
+                        "Noreply@Datashare.Maps.Vic.Gov.Au",
+                        "noreply@datashare.maps.vic.gov.au",
+                    ),
+                )
+            )
+            with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                read_mailbox.validate_acquisition_policy(config)
+        self.assertEqual("config_invalid", caught.exception.code)
+
+
+class ControllerCredentialContractTest(unittest.TestCase):
+    def test_missing_blank_and_non_string_credentials_are_rejected_pre_adapter(self):
+        import read_mailbox
+
+        valid_credentials = {
+            "O365_AUTH_ID": "private-client-id",
+            "O365_AUTH_SECRET": "private-client-secret",
+            "TENANT_ID": "private-tenant-id",
+        }
+        malformed_values = ("", "   ", None, 12345)
+        for name in ("O365_AUTH_ID", "O365_AUTH_SECRET", "TENANT_ID"):
+            for malformed in malformed_values:
+                with self.subTest(name=name, malformed=repr(malformed)):
+                    credentials = dict(valid_credentials)
+                    credentials[name] = malformed
+                    graph_factory = Mock()
+                    session_factory = Mock()
+                    with tempfile.TemporaryDirectory() as directory:
+                        config = ControllerCompositionTest._config(
+                            Path(directory) / "artifacts"
+                        )
+                        with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                            read_mailbox.run_acquisition(
+                                config,
+                                credentials,
+                                graph_factory=graph_factory,
+                                session_factory=session_factory,
+                            )
+                    self.assertEqual("config_invalid", caught.exception.code)
+                    graph_factory.assert_not_called()
+                    session_factory.assert_not_called()
+
+            with self.subTest(name=name, malformed="missing key"):
+                credentials = dict(valid_credentials)
+                del credentials[name]
+                graph_factory = Mock()
+                session_factory = Mock()
+                with tempfile.TemporaryDirectory() as directory:
+                    config = ControllerCompositionTest._config(
+                        Path(directory) / "artifacts"
+                    )
+                    with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                        read_mailbox.run_acquisition(
+                            config,
+                            credentials,
+                            graph_factory=graph_factory,
+                            session_factory=session_factory,
+                        )
+                self.assertEqual("config_invalid", caught.exception.code)
+                graph_factory.assert_not_called()
+                session_factory.assert_not_called()
 
 
 if __name__ == "__main__":
