@@ -47,6 +47,29 @@ def _url(filename: str = "Order_OK0VUZ.zip") -> str:
     return BASE_URL.format(filename=filename)
 
 
+def _bare_email_head() -> str:
+    """Realistic transactional-email `<head>` using bare (unclosed) void
+
+    elements, matching the markup shape traced against the live Vicmap
+    DataShare ready message: several bare `<meta>` tags, several bare
+    `<link>` tags, and an interior `<style>` block that opens and closes.
+    """
+
+    return (
+        "<head>"
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta http-equiv="X-UA-Compatible" content="IE=edge">'
+        '<meta name="format-detection" content="telephone=no">'
+        '<link rel="stylesheet" href="https://example.invalid/reset.css">'
+        '<link rel="stylesheet" href="https://example.invalid/base.css">'
+        '<link rel="preconnect" href="https://example.invalid">'
+        "<style>body { margin: 0; }</style>"
+        '<meta name="x-apple-disable-message-reformatting">'
+        "</head>"
+    )
+
+
 def _mime(*, plain: str | None = None, html: str | None = None) -> bytes:
     message = EmailMessage()
     message["From"] = SENDER
@@ -411,6 +434,13 @@ class CandidateRecognitionTest(unittest.TestCase):
                 )
             ),
         )
+
+        self.assertEqual(archive_url, candidate.artifact_url)
+
+    def test_bare_void_elements_in_realistic_head_do_not_suppress_the_body(self):
+        archive_url = _url()
+        html = f"<html>{_bare_email_head()}<body><p>{archive_url}</p></body></html>"
+        candidate = _recognize(_metadata(), _mime(html=html))
 
         self.assertEqual(archive_url, candidate.artifact_url)
 
