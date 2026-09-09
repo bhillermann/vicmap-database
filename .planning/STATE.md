@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
-stopped_at: Completed 01-08-PLAN.md
-last_updated: "2026-09-09T05:08:15.447Z"
+stopped_at: Completed 01-09-PLAN.md
+last_updated: "2026-09-09T05:40:45.435Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 01 execution started
-state_head: ef259cb927ac3fe31e735b5df0e8ec350890c68a
+state_head: 36d2cade1c98105fc5d31c1b29b8ea40264a9892
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 11
-  completed_plans: 8
+  completed_plans: 9
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 01 (Trusted Graph Acquisition) — EXECUTING
-Plan: 4 of 11
+Plan: 5 of 11
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-09T05:08:15.411Z
-**Stopped at:** Completed 01-08-PLAN.md
+**Last session:** 2026-09-09T05:40:45.405Z
+**Stopped at:** Completed 01-09-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -58,6 +58,7 @@ Last activity: 2026-09-09 — Phase 01 execution started
 | Phase 01 P06 | 20min | 3 tasks | 11 files |
 | Phase 01 P07 | 15min | 2 tasks | 2 files |
 | Phase 01 P08 | 40min | 3 tasks | 2 files |
+| Phase 01 P09 | 32min | 3 tasks | 6 files |
 
 ## Decisions
 
@@ -86,3 +87,7 @@ Last activity: 2026-09-09 — Phase 01 execution started
 - [Phase 01]: Made os.link's success the exact commit boundary: temp_path is set to None unconditionally once _publish_artifact returns, so cleanup failure can never re-decide an already-committed outcome (closes gap G-03).
 - [Phase 01]: Post-commit temp-name cleanup failure is surfaced as DownloadResult.temp_cleanup_deferred, never re-raised as ArtifactWriteFailed for already-published state.
 - [Phase 01]: Confirmed (rather than re-implemented) that every redirect hop is already authorized against both the host allowlist and the configured URL prefix from 01-06; 01-08's Task 3 contribution is regression proof, not new production code.
+- [Phase 01]: Made validate_acquisition_policy the single configuration contract for both load_config and run_acquisition, closing gap G-02.
+- [Phase 01]: Threaded config.fingerprint_hex_chars through fingerprint()/SuccessEvent/SafeFailure so an accepted non-default length can no longer publish an artifact and then fail at the evidence boundary.
+- [Phase 01]: Added an _EmitOnce guard around every event emission so a failing evidence sink is never retried and can never turn a closed failure into a raw exception, closing gap G-05.
+- [Phase 01]: Constrained output_dir to the recognised artifacts name and unanchored .gitignore's artifacts/ pattern so every permitted output root, nested or not, is provably git-ignored, closing WR-05.
