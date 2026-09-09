@@ -11,6 +11,7 @@ from vicmap_acquire.candidates import (
     CandidateAmbiguous,
     CandidateError,
     CandidateNone,
+    _AnchorCollector,
     recognize_candidate,
     select_candidate,
 )
@@ -461,6 +462,80 @@ class CandidateRecognitionTest(unittest.TestCase):
         candidate = _recognize(_metadata(), _mime(html=html))
 
         self.assertEqual(archive_url, candidate.artifact_url)
+
+    def test_suppression_counter_returns_to_zero_after_realistic_bare_head(self):
+        archive_url = _url()
+        html = f"<html>{_bare_email_head()}<body><p>{archive_url}</p></body></html>"
+
+        parser = _AnchorCollector()
+        parser.feed(html)
+
+        self.assertEqual(0, parser.non_rendered_depth)
+
+    def test_bare_and_self_closing_void_spellings_are_equivalent(self):
+        archive_url = _url()
+        void_tags = (
+            ("meta", ' charset="utf-8"'),
+            ("link", ' rel="stylesheet" href="https://example.invalid/a.css"'),
+        )
+        for tag, attrs in void_tags:
+            with self.subTest(tag=tag):
+                bare_html = (
+                    f"<head><{tag}{attrs}></head>"
+                    f"<body><p>{archive_url}</p></body>"
+                )
+                self_closing_html = (
+                    f"<head><{tag}{attrs} /></head>"
+                    f"<body><p>{archive_url}</p></body>"
+                )
+
+                bare_candidate = _recognize(_metadata(), _mime(html=bare_html))
+                self_closing_candidate = _recognize(
+                    _metadata(), _mime(html=self_closing_html)
+                )
+
+                self.assertEqual(archive_url, bare_candidate.artifact_url)
+                self.assertEqual(archive_url, self_closing_candidate.artifact_url)
+
+                bare_parser = _AnchorCollector()
+                bare_parser.feed(bare_html)
+                self_closing_parser = _AnchorCollector()
+                self_closing_parser.feed(self_closing_html)
+                self.assertEqual(
+                    bare_parser.non_rendered_depth,
+                    self_closing_parser.non_rendered_depth,
+                )
+
+    def test_stray_void_end_tag_does_not_lower_the_counter(self):
+        # A stray `</meta>` sits inside `<noscript>`, a genuine (non-CDATA)
+        # non-rendered container, so html.parser actually parses it as an
+        # end tag (unlike inside `<script>`/`<style>`, which html.parser
+        # scans as raw CDATA text and never calls handle_endtag at all).
+        # This is the shape that actually exercises handle_endtag's
+        # void-element test.
+        archive_url = _url()
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(
+                _metadata(),
+                _mime(html=f"<noscript></meta>{archive_url}</noscript>"),
+            )
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_archive_url_inside_title_or_style_within_head_still_yields_no_link(
+        self,
+    ):
+        archive_url = _url()
+        for container in ("title", "style"):
+            with self.subTest(container=container):
+                html = (
+                    f"<head><{container}>{archive_url}</{container}></head>"
+                    "<body><p>No link here.</p></body>"
+                )
+                with self.assertRaises(CandidateError) as caught:
+                    _recognize(_metadata(), _mime(html=html))
+
+                self.assertEqual("candidate_ambiguous", caught.exception.code)
 
 
 def _candidate(
