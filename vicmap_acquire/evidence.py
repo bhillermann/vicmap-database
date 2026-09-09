@@ -13,10 +13,25 @@ from types import MappingProxyType
 from typing import TextIO
 
 
-_HEX_16 = re.compile(r"[0-9a-f]{16}")
+_HEX_LOWER = re.compile(r"[0-9a-f]+")
 _HEX_64 = re.compile(r"[0-9a-f]{64}")
 _ORDER_ID = re.compile(r"[A-Za-z0-9]+")
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+_MIN_FINGERPRINT_HEX_CHARS = 8
+_MAX_FINGERPRINT_HEX_CHARS = 64
+
+
+def _require_fingerprint_length(expected_length: int) -> int:
+    if (
+        isinstance(expected_length, bool)
+        or not isinstance(expected_length, int)
+        or not (_MIN_FINGERPRINT_HEX_CHARS <= expected_length <= _MAX_FINGERPRINT_HEX_CHARS)
+    ):
+        raise ValueError(
+            "fingerprint length must be an int between "
+            f"{_MIN_FINGERPRINT_HEX_CHARS} and {_MAX_FINGERPRINT_HEX_CHARS}"
+        )
+    return expected_length
 
 
 class Stage(str, Enum):
@@ -119,12 +134,13 @@ _FAILURE_POLICY = MappingProxyType(
 )
 
 
-def fingerprint(value: str) -> str:
-    """Return the fixed 16-hex correlation fingerprint for one opaque value."""
+def fingerprint(value: str, expected_length: int = 16) -> str:
+    """Return the ``expected_length``-hex correlation fingerprint for one value."""
 
     if not isinstance(value, str) or not value:
         raise ValueError("fingerprint input must be a non-empty string")
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    expected_length = _require_fingerprint_length(expected_length)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:expected_length]
 
 
 def mask_sender(sender: str) -> str:
@@ -160,9 +176,16 @@ def _require_order_id(value: str) -> str:
     return value
 
 
-def _require_fingerprint(value: str) -> str:
-    if not isinstance(value, str) or _HEX_16.fullmatch(value) is None:
-        raise ValueError("fingerprint is not a 16-character lowercase hex value")
+def _require_fingerprint(value: str, expected_length: int = 16) -> str:
+    expected_length = _require_fingerprint_length(expected_length)
+    if (
+        not isinstance(value, str)
+        or len(value) != expected_length
+        or _HEX_LOWER.fullmatch(value) is None
+    ):
+        raise ValueError(
+            f"fingerprint is not a {expected_length}-character lowercase hex value"
+        )
     return value
 
 
@@ -200,6 +223,7 @@ class SuccessEvent(_SafeEvent):
         received_at: datetime,
         sender: str,
         graph_message_id: str,
+        fingerprint_hex_chars: int = 16,
     ) -> "SuccessEvent":
         if (
             not isinstance(received_at, datetime)
@@ -214,13 +238,19 @@ class SuccessEvent(_SafeEvent):
                 "order_id": _require_order_id(order_id),
                 "received_at": received_utc.isoformat(),
                 "sender": mask_sender(sender),
-                "message_fingerprint": fingerprint(graph_message_id),
+                "message_fingerprint": fingerprint(
+                    graph_message_id, fingerprint_hex_chars
+                ),
             }
         )
 
     @classmethod
     def download_target(
-        cls, *, approved_hostname: str, path_fingerprint: str
+        cls,
+        *,
+        approved_hostname: str,
+        path_fingerprint: str,
+        fingerprint_hex_chars: int = 16,
     ) -> "SuccessEvent":
         if (
             not isinstance(approved_hostname, str)
@@ -232,7 +262,9 @@ class SuccessEvent(_SafeEvent):
             {
                 "event": "download_target",
                 "host": approved_hostname,
-                "path_fingerprint": _require_fingerprint(path_fingerprint),
+                "path_fingerprint": _require_fingerprint(
+                    path_fingerprint, fingerprint_hex_chars
+                ),
             }
         )
 
@@ -297,6 +329,7 @@ class SafeFailure(_SafeEvent):
         order_id: str | None = None,
         message_fingerprint: str | None = None,
         path_fingerprint: str | None = None,
+        fingerprint_hex_chars: int = 16,
     ) -> None:
         if not isinstance(reason, ReasonCode):
             raise TypeError("reason must be a ReasonCode")
@@ -310,9 +343,13 @@ class SafeFailure(_SafeEvent):
         if order_id is not None:
             fields["order_id"] = _require_order_id(order_id)
         if message_fingerprint is not None:
-            fields["message_fingerprint"] = _require_fingerprint(message_fingerprint)
+            fields["message_fingerprint"] = _require_fingerprint(
+                message_fingerprint, fingerprint_hex_chars
+            )
         if path_fingerprint is not None:
-            fields["path_fingerprint"] = _require_fingerprint(path_fingerprint)
+            fields["path_fingerprint"] = _require_fingerprint(
+                path_fingerprint, fingerprint_hex_chars
+            )
         super().__init__(fields)
 
     @property

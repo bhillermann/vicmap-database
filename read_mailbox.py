@@ -115,8 +115,15 @@ def _reason_code(reason: ReasonCode | str) -> ReasonCode:
     return ReasonCode.INTERNAL_FAILURE
 
 
-def _emit_failure(event_sink: EventSink, reason: ReasonCode | str) -> SafeFailure:
-    failure = SafeFailure(_reason_code(reason))
+def _emit_failure(
+    event_sink: EventSink,
+    reason: ReasonCode | str,
+    *,
+    fingerprint_hex_chars: int = 16,
+) -> SafeFailure:
+    failure = SafeFailure(
+        _reason_code(reason), fingerprint_hex_chars=fingerprint_hex_chars
+    )
     event_sink(failure)
     return failure
 
@@ -315,6 +322,7 @@ def run_acquisition(
                 received_at=selected.received_datetime_utc,
                 sender=selected.sender,
                 graph_message_id=selected.graph_message_id,
+                fingerprint_hex_chars=config.fingerprint_hex_chars,
             )
         )
 
@@ -341,6 +349,7 @@ def run_acquisition(
             SuccessEvent.download_target(
                 approved_hostname=result.approved_hostname,
                 path_fingerprint=result.path_fingerprint,
+                fingerprint_hex_chars=config.fingerprint_hex_chars,
             )
         )
         event_sink(
@@ -353,13 +362,25 @@ def run_acquisition(
     except AcquisitionFailure as error:
         if error.reported:
             raise
-        failure = _emit_failure(event_sink, error.failure.reason)
+        failure = _emit_failure(
+            event_sink,
+            error.failure.reason,
+            fingerprint_hex_chars=getattr(config, "fingerprint_hex_chars", 16),
+        )
         raise AcquisitionFailure(failure.reason, reported=True) from None
     except (GraphError, CandidateError, DownloadError, OriginUnauthenticated) as error:
-        failure = _emit_failure(event_sink, error.code)
+        failure = _emit_failure(
+            event_sink,
+            error.code,
+            fingerprint_hex_chars=getattr(config, "fingerprint_hex_chars", 16),
+        )
         raise AcquisitionFailure(failure.reason, reported=True) from None
     except Exception:
-        failure = _emit_failure(event_sink, ReasonCode.INTERNAL_FAILURE)
+        failure = _emit_failure(
+            event_sink,
+            ReasonCode.INTERNAL_FAILURE,
+            fingerprint_hex_chars=getattr(config, "fingerprint_hex_chars", 16),
+        )
         raise AcquisitionFailure(failure.reason, reported=True) from None
 
 
