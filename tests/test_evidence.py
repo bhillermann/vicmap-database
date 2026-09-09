@@ -363,6 +363,76 @@ class EvidenceContractTest(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     evidence.render_failure(unsafe, stream=io.StringIO())
 
+    def test_fingerprint_length_is_configurable_within_bounds(self):
+        for length in (8, 16, 64):
+            with self.subTest(length=length):
+                value = evidence.fingerprint("opaque-value", length)
+                self.assertEqual(length, len(value))
+                self.assertRegex(value, r"^[0-9a-f]+$")
+        for length in (7, 65):
+            with self.subTest(length=length):
+                with self.assertRaises(ValueError):
+                    evidence.fingerprint("opaque-value", length)
+
+    def test_download_target_fingerprint_length_is_configurable(self):
+        short = "a" * 8
+        event = evidence.SuccessEvent.download_target(
+            approved_hostname="s3.ap-southeast-2.amazonaws.com",
+            path_fingerprint=short,
+            fingerprint_hex_chars=8,
+        )
+        self.assertEqual(short, dict(event)["path_fingerprint"])
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.download_target(
+                approved_hostname="s3.ap-southeast-2.amazonaws.com",
+                path_fingerprint="a" * 16,
+                fingerprint_hex_chars=8,
+            )
+
+        long = "b" * 16
+        event16 = evidence.SuccessEvent.download_target(
+            approved_hostname="s3.ap-southeast-2.amazonaws.com",
+            path_fingerprint=long,
+            fingerprint_hex_chars=16,
+        )
+        self.assertEqual(long, dict(event16)["path_fingerprint"])
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.download_target(
+                approved_hostname="s3.ap-southeast-2.amazonaws.com",
+                path_fingerprint="a" * 8,
+                fingerprint_hex_chars=16,
+            )
+
+    def test_candidate_selected_message_fingerprint_length_is_configurable(self):
+        received = datetime(2026, 9, 7, tzinfo=timezone.utc)
+        for length in (8, 16, 64):
+            with self.subTest(length=length):
+                event = evidence.SuccessEvent.candidate_selected(
+                    order_id="OK0VUZ",
+                    received_at=received,
+                    sender="noreply@datashare.maps.vic.gov.au",
+                    graph_message_id="opaque-id",
+                    fingerprint_hex_chars=length,
+                )
+                self.assertEqual(length, len(dict(event)["message_fingerprint"]))
+
+    def test_safe_failure_fingerprint_length_is_configurable(self):
+        failure = evidence.SafeFailure(
+            evidence.ReasonCode.DOWNLOAD_EXPIRED_OR_MISSING,
+            message_fingerprint="a" * 8,
+            path_fingerprint="b" * 8,
+            fingerprint_hex_chars=8,
+        )
+        payload = dict(failure)
+        self.assertEqual("a" * 8, payload["message_fingerprint"])
+        self.assertEqual("b" * 8, payload["path_fingerprint"])
+        with self.assertRaises(ValueError):
+            evidence.SafeFailure(
+                evidence.ReasonCode.DOWNLOAD_EXPIRED_OR_MISSING,
+                message_fingerprint="a" * 16,
+                fingerprint_hex_chars=8,
+            )
+
     def test_failure_optional_identifiers_are_allowlisted_and_redacted(self):
         failure = evidence.SafeFailure(
             evidence.ReasonCode.DOWNLOAD_EXPIRED_OR_MISSING,
@@ -467,6 +537,7 @@ class ControllerCompositionTest(unittest.TestCase):
         output_dir: Path,
         *,
         allowed_senders: tuple[str, ...] = ("noreply@datashare.maps.vic.gov.au",),
+        fingerprint_hex_chars: int = 16,
     ):
         import read_mailbox
 
@@ -482,7 +553,7 @@ class ControllerCompositionTest(unittest.TestCase):
             read_timeout_seconds=23,
             progress_interval_seconds=29,
             max_redirects=3,
-            fingerprint_hex_chars=16,
+            fingerprint_hex_chars=fingerprint_hex_chars,
             allow_order_id_mismatch=False,
             output_dir=output_dir,
             required_authentication_results=("dkim", "dmarc", "compauth"),
@@ -548,6 +619,74 @@ class ControllerCompositionTest(unittest.TestCase):
             [event["event"] for event in events],
         )
         self.assertEqual(1, len(session.calls))
+
+    def test_end_to_end_fingerprint_length_is_threaded_through_evidence(self):
+        import read_mailbox
+        from vicmap_acquire.graph import MessageMetadata
+
+        for length in (8, 16, 64):
+            with self.subTest(fingerprint_hex_chars=length):
+                message_id = f"opaque-length-{length}-message-id"
+                artifact_url = (
+                    "https://s3.ap-southeast-2.amazonaws.com/private/Order_OK0VUZ.zip"
+                )
+                payload = b"authentic-artifact-bytes"
+                metadata = [
+                    MessageMetadata(
+                        graph_message_id=message_id,
+                        received_datetime_utc=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                        sender="noreply@datashare.maps.vic.gov.au",
+                        subject="Your DataShare Order OK0VUZ is ready to download",
+                    )
+                ]
+                graph = _E2EGraph(
+                    metadata, {message_id: _e2e_mime(artifact_url=artifact_url)}
+                )
+                session = _E2ESession(payload)
+                events = []
+
+                with tempfile.TemporaryDirectory() as directory:
+                    output_dir = Path(directory) / "artifacts"
+                    config = self._config(output_dir, fingerprint_hex_chars=length)
+                    result = read_mailbox.run_acquisition(
+                        config,
+                        self._credentials(),
+                        graph_factory=lambda **kwargs: graph,
+                        session_factory=lambda: session,
+                        event_sink=events.append,
+                    )
+
+                self.assertEqual(len(payload), result.byte_count)
+                by_event = {event["event"]: event for event in events}
+                self.assertEqual(
+                    length, len(by_event["candidate_selected"]["message_fingerprint"])
+                )
+                self.assertEqual(
+                    length, len(by_event["download_target"]["path_fingerprint"])
+                )
+
+    def test_fingerprint_length_outside_bounds_is_rejected_pre_adapter(self):
+        import read_mailbox
+
+        for length in (7, 65):
+            with self.subTest(fingerprint_hex_chars=length):
+                with tempfile.TemporaryDirectory() as directory:
+                    config = self._config(
+                        Path(directory) / "artifacts", fingerprint_hex_chars=length
+                    )
+                    graph_factory = Mock()
+                    session_factory = Mock()
+                    with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                        read_mailbox.run_acquisition(
+                            config,
+                            self._credentials(),
+                            graph_factory=graph_factory,
+                            session_factory=session_factory,
+                        )
+                    self.assertEqual("config_invalid", caught.exception.code)
+                    graph_factory.assert_not_called()
+                    session_factory.assert_not_called()
+                    self.assertEqual([], list(Path(directory).iterdir()))
 
     def test_matching_message_pointing_outside_the_configured_prefix_is_rejected(self):
         import read_mailbox
