@@ -220,6 +220,14 @@ class DownloadTargetPolicyTest(unittest.TestCase):
             )
         self.assertEqual("download_url_rejected", caught.exception.code)
 
+    def test_prefix_path_case_difference_is_rejected_byte_exact(self):
+        prefix = (f"https://{ALLOWED_HOST}/Private/",)
+        with self.assertRaises(download.DownloadError) as caught:
+            download.validate_https_target(
+                f"https://{ALLOWED_HOST}/private/archive.zip", (ALLOWED_HOST,), prefix
+            )
+        self.assertEqual("download_url_rejected", caught.exception.code)
+
 
 class DownloadTransportBoundaryTest(unittest.TestCase):
     def test_clean_session_uses_manual_redirects_tls_and_timeout_tuple(self):
@@ -271,6 +279,39 @@ class DownloadTransportBoundaryTest(unittest.TestCase):
         self.assertEqual("download_redirect_rejected", caught.exception.code)
         self.assertEqual([BASE_URL], [call[0] for call in session.calls])
         self.assertTrue(redirect.closed)
+
+    def test_relative_redirect_leaving_the_configured_prefix_is_rejected_before_recontact(
+        self,
+    ):
+        redirect = _FakeResponse(
+            302, headers={"Location": "../other-bucket/Order_OK0VUZ.zip"}
+        )
+        session = _FakeSession((redirect,))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(download.DownloadError) as caught:
+                _legacy_download(session, Path(directory))
+        self.assertEqual("download_redirect_rejected", caught.exception.code)
+        self.assertEqual([BASE_URL], [call[0] for call in session.calls])
+        self.assertTrue(redirect.closed)
+
+    def test_prohib_02_no_ambient_or_graph_authority_reaches_artifact_host(self):
+        redirect = _FakeResponse(302, headers={"Location": "/orders/hop2.zip"})
+        final = _response()
+        session = _FakeSession((redirect, final))
+        with tempfile.TemporaryDirectory() as directory:
+            _legacy_download(session, Path(directory))
+
+        self.assertEqual(2, len(session.calls))
+        for called_url, kwargs, auth, trust_env, headers in session.calls:
+            self.assertIsNone(auth)
+            self.assertFalse(trust_env)
+            for key in headers:
+                self.assertNotIn(key.casefold(), {"authorization", "cookie"})
+            request_headers = kwargs.get("headers", {})
+            for key in request_headers:
+                self.assertNotIn(key.casefold(), {"authorization", "cookie"})
+        self.assertIsNone(session.auth)
+        self.assertFalse(session.trust_env)
 
     def test_unsafe_redirects_are_rejected_before_contact(self):
         for location in (
@@ -393,6 +434,28 @@ class DownloadPolicyValidationTest(unittest.TestCase):
     def test_fingerprint_length_cannot_exceed_sha256(self):
         with self.assertRaises(ValueError):
             _policy(fingerprint_hex_length=65)
+
+    def test_allowed_url_prefixes_rejects_seven_invalid_shapes(self):
+        shapes = {
+            "empty": (),
+            "hostname_not_allowed": ("https://other.example.com/orders/",),
+            "has_query": (f"https://{ALLOWED_HOST}/orders/?x=1",),
+            "has_fragment": (f"https://{ALLOWED_HOST}/orders/#frag",),
+            "has_userinfo": (f"https://user@{ALLOWED_HOST}/orders/",),
+            "missing_trailing_slash": (f"https://{ALLOWED_HOST}/orders",),
+            "no_non_empty_segment": (f"https://{ALLOWED_HOST}/",),
+            "duplicate": (ALLOWED_URL_PREFIX, ALLOWED_URL_PREFIX),
+        }
+        for name, prefixes in shapes.items():
+            with self.subTest(shape=name):
+                with self.assertRaises(ValueError):
+                    _policy(allowed_url_prefixes=prefixes)
+
+    def test_allowed_url_prefixes_casefold_scheme_and_host_but_preserve_path(self):
+        normalized = _policy(
+            allowed_url_prefixes=(f"HTTPS://{ALLOWED_HOST.upper()}/Orders/",)
+        )
+        self.assertEqual((f"https://{ALLOWED_HOST}/Orders/",), normalized.allowed_url_prefixes)
 
 
 class DownloadStreamingBoundaryTest(unittest.TestCase):
