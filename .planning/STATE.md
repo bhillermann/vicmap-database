@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
-stopped_at: Completed 01-09-PLAN.md
-last_updated: "2026-09-09T05:40:45.435Z"
+stopped_at: Completed 01-10-PLAN.md
+last_updated: "2026-09-09T05:54:14.809Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 01 execution started
-state_head: 36d2cade1c98105fc5d31c1b29b8ea40264a9892
+state_head: 64b43a01f93c29db68f06ccc14ac25df36a87c95
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 11
-  completed_plans: 9
+  completed_plans: 10
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 01 (Trusted Graph Acquisition) — EXECUTING
-Plan: 5 of 11
+Plan: 6 of 11
 Status: Ready to execute
 Last activity: 2026-09-09 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-09T05:40:45.405Z
-**Stopped at:** Completed 01-09-PLAN.md
+**Last session:** 2026-09-09T05:54:14.774Z
+**Stopped at:** Completed 01-10-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -59,6 +59,7 @@ Last activity: 2026-09-09 — Phase 01 execution started
 | Phase 01 P07 | 15min | 2 tasks | 2 files |
 | Phase 01 P08 | 40min | 3 tasks | 2 files |
 | Phase 01 P09 | 32min | 3 tasks | 6 files |
+| Phase 01 P10 | 11min | 2 tasks | 2 files |
 
 ## Decisions
 
@@ -91,3 +92,5 @@ Last activity: 2026-09-09 — Phase 01 execution started
 - [Phase 01]: Threaded config.fingerprint_hex_chars through fingerprint()/SuccessEvent/SafeFailure so an accepted non-default length can no longer publish an artifact and then fail at the evidence boundary.
 - [Phase 01]: Added an _EmitOnce guard around every event emission so a failing evidence sink is never retried and can never turn a closed failure into a raw exception, closing gap G-05.
 - [Phase 01]: Constrained output_dir to the recognised artifacts name and unanchored .gitignore's artifacts/ pattern so every permitted output root, nested or not, is provably git-ignored, closing WR-05.
+- [Phase 01]: Made get_message_mime issue exactly one connection-level GET to the Graph MIME value endpoint (/messages/{id}/$value), replacing the two-request path that fetched an ordinary message representation first.
+- [Phase 01]: Gave PROHIB-01 runtime enforcement evidence at the connection-request level (GET-only method set, no mutation path segments, no mutation-named public callables, non-Inbox rejection) instead of source-text inspection alone.
