@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v0.1
 current_phase: 01
-current_phase_name: trusted-graph-acquisition
+current_phase_name: Trusted Graph Acquisition
 status: executing
-stopped_at: Completed 01-05-PLAN.md
-last_updated: "2026-09-09T03:56:32.513Z"
-last_activity: 2026-09-07
+stopped_at: Completed 01-06-PLAN.md
+last_updated: "2026-09-09T04:38:30.806Z"
+last_activity: 2026-09-09
 last_activity_desc: Phase 01 execution started
-state_head: bc35561d749c9e13074353a834ed7eac7d5d1ecb
+state_head: e4f82f663835e1c002c7f87471aaa1601a60729a
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 11
-  completed_plans: 5
+  completed_plans: 6
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -35,15 +35,15 @@ See: .planning/PROJECT.md
 
 ## Current Position
 
-Phase: 01 (trusted-graph-acquisition) — READY TO EXECUTE
-Plan: 5 of 5
+Phase: 01 (Trusted Graph Acquisition) — EXECUTING
+Plan: 2 of 11
 Status: Ready to execute
-Last activity: 2026-09-07 — Phase 01 execution started
+Last activity: 2026-09-09 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-09T01:42:29.175Z
-**Stopped at:** Completed 01-05-PLAN.md
+**Last session:** 2026-09-09T04:38:30.777Z
+**Stopped at:** Completed 01-06-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -55,6 +55,7 @@ Last activity: 2026-09-07 — Phase 01 execution started
 | Phase 01 P03 | 17min | 2 tasks | 4 files |
 | Phase 01 P04 | 22min | 2 tasks | 4 files |
 | Phase 01 P05 | 21h 15m | 2 tasks | 11 files |
+| Phase 01 P06 | 20min | 3 tasks | 11 files |
 
 ## Decisions
 
@@ -76,3 +77,5 @@ Last activity: 2026-09-07 — Phase 01 execution started
 - [Phase 01]: Request Graph's from field because O365 2.1.0 hydrates Message.sender from that provider property.
 - [Phase 01]: Treat a visible direct archive URL independently from an opaque tracking href while preserving exact-one-link ambiguity rules.
 - [Phase 01]: Distinguish automated live checks and redacted recovery evidence from operator attestations about tenant scope and legacy-token handling.
+- [Phase 01]: Bound D-01's sender allowlist to the DKIM-covered From header verified by the trusted receiving mail infrastructure, not any provider-supplied label. — Vicmap DataShare publishes no artifact signature; the mailbox's own DKIM/DMARC/compauth verdict is the only cryptographically grounded origin signal available.
+- [Phase 01]: Narrowed the D-13 host allowlist with an exact configured URL prefix applied to the initial target and every redirect hop. — A shared bucket host alone let a label-matching message point at any path on that host; the prefix binds the artifact to the sender's own object authority.
