@@ -1178,5 +1178,318 @@ class ControllerCredentialContractTest(unittest.TestCase):
                 session_factory.assert_not_called()
 
 
+class ControllerSinkFailureTest(unittest.TestCase):
+    """Closes verification gap G-05: evidence delivery cannot leak into control flow.
+
+    Whatever the caller-supplied sink does, ``run_acquisition`` and ``main``
+    must always end in the closed vocabulary and a non-zero result -- never
+    a raw exception, never a sink invoked twice for the same failure.
+    """
+
+    def test_emit_once_exposes_emit_and_emit_failure(self):
+        import read_mailbox
+
+        self.assertTrue(hasattr(read_mailbox, "_EmitOnce"))
+        self.assertTrue(callable(getattr(read_mailbox._EmitOnce, "emit", None)))
+        self.assertTrue(
+            callable(getattr(read_mailbox._EmitOnce, "emit_failure", None))
+        )
+
+    def test_emit_once_swallows_sink_faults_for_any_event_without_retry(self):
+        import read_mailbox
+
+        calls = []
+
+        def raising_sink(event):
+            calls.append(event)
+            raise RuntimeError("guard-swallow-private-marker")
+
+        guard = read_mailbox._EmitOnce(raising_sink)
+        self.assertFalse(guard.failed)
+
+        guard.emit({"event": "download_progress", "byte_count": 1})
+        self.assertTrue(guard.failed)
+        self.assertEqual(1, len(calls))
+
+        # The guard must never retry a sink that has already failed.
+        guard.emit({"event": "download_progress", "byte_count": 2})
+        self.assertEqual(1, len(calls))
+
+    def test_sink_failing_on_candidate_selected_yields_internal_failure(self):
+        import read_mailbox
+        from vicmap_acquire.graph import MessageMetadata
+
+        marker = "candidate-sink-private-marker"
+        message_id = "opaque-sink-candidate-message-id"
+        artifact_url = (
+            "https://s3.ap-southeast-2.amazonaws.com/private/Order_OK0VUZ.zip"
+        )
+        metadata = [
+            MessageMetadata(
+                graph_message_id=message_id,
+                received_datetime_utc=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                sender="noreply@datashare.maps.vic.gov.au",
+                subject="Your DataShare Order OK0VUZ is ready to download",
+            )
+        ]
+        graph = _E2EGraph(metadata, {message_id: _e2e_mime(artifact_url=artifact_url)})
+        session = _E2ESession()
+
+        def failing_sink(event):
+            if event["event"] == "candidate_selected":
+                raise RuntimeError(marker)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = ControllerCompositionTest._config(Path(directory) / "artifacts")
+            with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                read_mailbox.run_acquisition(
+                    config,
+                    ControllerCompositionTest._credentials(),
+                    graph_factory=lambda **kwargs: graph,
+                    session_factory=lambda: session,
+                    event_sink=failing_sink,
+                )
+
+        self.assertEqual("internal_failure", caught.exception.code)
+        self.assertNotIn(marker, str(caught.exception))
+        self.assertNotIn(marker, repr(caught.exception.failure))
+
+    def test_sink_failing_on_progress_completes_transfer_then_fails_closed(self):
+        import read_mailbox
+        from vicmap_acquire.download import DownloadResult
+        from vicmap_acquire.graph import MessageMetadata
+
+        message_id = "opaque-sink-progress-message-id"
+        artifact_url = (
+            "https://s3.ap-southeast-2.amazonaws.com/private/Order_OK0VUZ.zip"
+        )
+        metadata = [
+            MessageMetadata(
+                graph_message_id=message_id,
+                received_datetime_utc=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                sender="noreply@datashare.maps.vic.gov.au",
+                subject="Your DataShare Order OK0VUZ is ready to download",
+            )
+        ]
+        graph = _E2EGraph(metadata, {message_id: _e2e_mime(artifact_url=artifact_url)})
+        events_seen = []
+
+        def failing_on_progress_sink(event):
+            events_seen.append(event["event"])
+            if event["event"] == "download_progress":
+                raise RuntimeError("progress-sink-private-marker")
+
+        def fake_download_artifact(url, final_path, policy, session_factory, progress_sink):
+            # Simulate a real transfer that emits one progress tick, then
+            # completes and publishes the artifact -- proving that a guarded
+            # progress-sink fault no longer aborts the transfer.
+            progress_sink({"byte_count": 5})
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            final_path.write_bytes(b"authentic-artifact-bytes")
+            return DownloadResult(
+                path=final_path,
+                byte_count=25,
+                sha256=hashlib.sha256(b"authentic-artifact-bytes").hexdigest(),
+                approved_hostname="s3.ap-southeast-2.amazonaws.com",
+                path_fingerprint="0123456789abcdef",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "artifacts"
+            config = ControllerCompositionTest._config(output_dir)
+            with patch.object(
+                read_mailbox, "download_artifact", side_effect=fake_download_artifact
+            ):
+                with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                    read_mailbox.run_acquisition(
+                        config,
+                        ControllerCompositionTest._credentials(),
+                        graph_factory=lambda **kwargs: graph,
+                        session_factory=lambda: object(),
+                        event_sink=failing_on_progress_sink,
+                    )
+            final_path = output_dir / "Order_OK0VUZ.zip"
+            self.assertTrue(
+                final_path.exists(), "the completed transfer must not be undone"
+            )
+
+        self.assertEqual("internal_failure", caught.exception.code)
+        self.assertEqual(["candidate_selected", "download_progress"], events_seen)
+
+    def test_sink_failing_on_a_late_success_event_does_not_delete_the_artifact(self):
+        import read_mailbox
+        from vicmap_acquire.graph import MessageMetadata
+
+        for failing_event in ("download_target", "artifact_finalized"):
+            with self.subTest(failing_event=failing_event):
+                message_id = f"opaque-sink-{failing_event}-message-id"
+                artifact_url = (
+                    "https://s3.ap-southeast-2.amazonaws.com/private/Order_OK0VUZ.zip"
+                )
+                payload = b"authentic-artifact-bytes"
+                metadata = [
+                    MessageMetadata(
+                        graph_message_id=message_id,
+                        received_datetime_utc=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                        sender="noreply@datashare.maps.vic.gov.au",
+                        subject="Your DataShare Order OK0VUZ is ready to download",
+                    )
+                ]
+                graph = _E2EGraph(
+                    metadata, {message_id: _e2e_mime(artifact_url=artifact_url)}
+                )
+                session = _E2ESession(payload)
+
+                def failing_sink(event, failing_event=failing_event):
+                    if event["event"] == failing_event:
+                        raise RuntimeError(f"{failing_event}-sink-private-marker")
+
+                with tempfile.TemporaryDirectory() as directory:
+                    output_dir = Path(directory) / "artifacts"
+                    config = ControllerCompositionTest._config(output_dir)
+                    with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                        read_mailbox.run_acquisition(
+                            config,
+                            ControllerCompositionTest._credentials(),
+                            graph_factory=lambda **kwargs: graph,
+                            session_factory=lambda: session,
+                            event_sink=failing_sink,
+                        )
+                    final_path = output_dir / "Order_OK0VUZ.zip"
+                    self.assertTrue(final_path.exists())
+                    self.assertEqual(payload, final_path.read_bytes())
+
+                self.assertEqual("internal_failure", caught.exception.code)
+
+    def test_sink_failing_on_the_failure_event_preserves_the_original_reason(self):
+        import read_mailbox
+
+        class EmptyGraph:
+            def __init__(self, **kwargs):
+                pass
+
+            def iter_metadata(self, cutoff_utc):
+                return iter(())
+
+        calls = []
+
+        def failing_only_on_failure(event):
+            calls.append(event["event"])
+            if event["event"] == "failure":
+                raise RuntimeError("failure-sink-private-marker")
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = ControllerCompositionTest._config(Path(directory) / "artifacts")
+            with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                read_mailbox.run_acquisition(
+                    config,
+                    ControllerCompositionTest._credentials(),
+                    graph_factory=EmptyGraph,
+                    event_sink=failing_only_on_failure,
+                )
+
+        self.assertEqual("candidate_none", caught.exception.code)
+        self.assertEqual(["failure"], calls)
+
+    def test_counting_sink_receives_at_most_one_failure_event(self):
+        import read_mailbox
+
+        class EmptyGraph:
+            def __init__(self, **kwargs):
+                pass
+
+            def iter_metadata(self, cutoff_utc):
+                return iter(())
+
+        failure_count = 0
+
+        def counting_sink(event):
+            nonlocal failure_count
+            if event["event"] == "failure":
+                failure_count += 1
+            raise RuntimeError("counting-sink-private-marker")
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = ControllerCompositionTest._config(Path(directory) / "artifacts")
+            with self.assertRaises(read_mailbox.AcquisitionFailure):
+                read_mailbox.run_acquisition(
+                    config,
+                    ControllerCompositionTest._credentials(),
+                    graph_factory=EmptyGraph,
+                    event_sink=counting_sink,
+                )
+
+        self.assertLessEqual(failure_count, 1)
+
+    def test_sink_failing_on_every_call_still_returns_a_clean_cli_result(self):
+        import read_mailbox
+
+        class EmptyGraph:
+            def __init__(self, **kwargs):
+                pass
+
+            def iter_metadata(self, cutoff_utc):
+                return iter(())
+
+        marker = "always-failing-sink-private-marker"
+
+        def always_failing(event):
+            raise RuntimeError(marker)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = ControllerCompositionTest._config(Path(directory) / "artifacts")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.object(read_mailbox, "load_config", return_value=config),
+                patch.object(read_mailbox, "GraphMailbox", EmptyGraph),
+                patch.dict(
+                    read_mailbox.os.environ,
+                    {
+                        "O365_AUTH_ID": "private-client-id",
+                        "O365_AUTH_SECRET": "private-client-secret",
+                        "TENANT_ID": "private-tenant-id",
+                    },
+                    clear=True,
+                ),
+                patch.object(read_mailbox, "render_success", always_failing),
+                patch.object(read_mailbox, "render_progress", always_failing),
+                patch.object(read_mailbox, "render_failure", always_failing),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = read_mailbox.main(["--config", "ignored.toml"])
+
+        self.assertNotEqual(0, exit_code)
+        rendered = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn(marker, rendered)
+        self.assertNotIn("Traceback", rendered)
+
+    def test_main_survives_a_render_failure_fault_reporting_an_unreported_failure(self):
+        import read_mailbox
+
+        marker = "main-render-failure-private-marker"
+
+        def exploding_render_failure(event):
+            raise RuntimeError(marker)
+
+        with tempfile.TemporaryDirectory() as directory:
+            policy_path = Path(directory) / "policy.toml"
+            policy_path.write_text("not valid toml [[[", encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.object(read_mailbox, "render_failure", exploding_render_failure),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = read_mailbox.main(["--config", str(policy_path)])
+
+        self.assertEqual(1, exit_code)
+        rendered = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn(marker, rendered)
+        self.assertNotIn("Traceback", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
