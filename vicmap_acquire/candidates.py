@@ -17,6 +17,23 @@ from vicmap_acquire.origin import OriginPolicy, verify_authenticated_origin
 
 _TEXT_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"']+")
 
+_NON_RENDERED = frozenset(
+    {
+        "script",
+        "style",
+        "template",
+        "noscript",
+        "head",
+        "title",
+        "meta",
+        "link",
+        "object",
+        "iframe",
+        "applet",
+        "xmp",
+    }
+)
+
 
 class CandidateFailure(RuntimeError):
     """Closed candidate-policy failure containing no source-controlled values."""
@@ -83,16 +100,50 @@ class _AnchorCollector(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.urls: list[str] = []
         self.visible_urls: list[str] = []
+        self.non_rendered_depth = 0
 
     def handle_starttag(self, tag, attrs):
-        if tag.casefold() != "a":
+        casefolded = tag.casefold()
+        if casefolded in _NON_RENDERED:
+            self.non_rendered_depth += 1
+            return
+        if self.non_rendered_depth > 0:
+            return
+        if casefolded != "a":
             return
         for key, value in attrs:
             if key.casefold() == "href" and isinstance(value, str):
                 self.urls.append(value)
 
+    def handle_startendtag(self, tag, attrs):
+        casefolded = tag.casefold()
+        if casefolded in _NON_RENDERED:
+            self.non_rendered_depth += 1
+            self.non_rendered_depth = max(0, self.non_rendered_depth - 1)
+            return
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        if tag.casefold() in _NON_RENDERED:
+            self.non_rendered_depth = max(0, self.non_rendered_depth - 1)
+
     def handle_data(self, data):
+        if self.non_rendered_depth > 0:
+            return
         self.visible_urls.extend(extract_text_urls(data))
+
+    def handle_comment(self, data):
+        return
+
+    def handle_decl(self, decl):
+        return
+
+    def handle_pi(self, data):
+        return
+
+    def unknown_decl(self, data):
+        return
 
 
 def _subject_order_id(subject: str, allowed_order_ids: tuple[str, ...]) -> str | None:
@@ -122,7 +173,13 @@ def extract_text_urls(text: str) -> list[str]:
 
 
 def extract_html_hrefs(html: str) -> list[str]:
-    """Return anchor href occurrences without rendering or executing HTML."""
+    """Return anchor href occurrences from rendered HTML context only.
+
+    Hrefs on anchors nested inside non-rendered elements (script, style,
+    template, noscript, head, title, meta, link, object, iframe, applet,
+    xmp) or inside comments are excluded, without rendering or executing
+    HTML.
+    """
 
     parser = _AnchorCollector()
     parser.feed(html)
