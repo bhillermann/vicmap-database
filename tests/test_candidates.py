@@ -338,7 +338,12 @@ class CandidateRecognitionTest(unittest.TestCase):
 
         self.assertEqual("candidate_ambiguous", caught.exception.code)
 
-    def test_every_non_rendered_tag_suppresses_its_sole_archive_url(self):
+    def test_every_non_rendered_container_tag_suppresses_its_sole_archive_url(self):
+        # `meta` is deliberately excluded here: it is a void element with no
+        # content model, so `<meta>{url}</meta>` cannot suppress "contained"
+        # text the way a real container can. See
+        # test_void_elements_do_not_suppress_paired_content_even_when_explicitly_closed
+        # for the corrected, void-element-specific behavior this replaces.
         archive_url = _url()
         for tag in (
             "script",
@@ -346,7 +351,6 @@ class CandidateRecognitionTest(unittest.TestCase):
             "template",
             "noscript",
             "title",
-            "meta",
             "object",
             "iframe",
         ):
@@ -356,6 +360,20 @@ class CandidateRecognitionTest(unittest.TestCase):
                         _metadata(), _mime(html=f"<{tag}>{archive_url}</{tag}>")
                     )
                 self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_void_elements_do_not_suppress_paired_content_even_when_explicitly_closed(
+        self,
+    ):
+        # meta and link cannot contain anything (void elements), so a
+        # paired-looking `<meta>text</meta>` cannot suppress "text" as
+        # contained content -- there is no content model to suppress.
+        archive_url = _url()
+        for tag in ("meta", "link"):
+            with self.subTest(tag=tag):
+                candidate = _recognize(
+                    _metadata(), _mime(html=f"<{tag}>{archive_url}</{tag}>")
+                )
+                self.assertEqual(archive_url, candidate.artifact_url)
 
     def test_malformed_non_rendered_nesting_never_yields_an_archive_link(self):
         archive_url = _url()

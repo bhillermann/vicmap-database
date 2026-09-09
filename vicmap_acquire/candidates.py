@@ -34,6 +34,30 @@ _NON_RENDERED = frozenset(
     }
 )
 
+# HTML void elements: elements that cannot contain anything (no end tag is
+# ever emitted for them in normal markup) and therefore can never suppress
+# content. `meta` and `link` are both non-rendered AND void: they remain in
+# `_NON_RENDERED` because that fact (they are never rendered) stays true, but
+# `_VOID_ELEMENTS` is what encodes that they have no contents to suppress.
+_VOID_ELEMENTS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+
 
 class CandidateFailure(RuntimeError):
     """Closed candidate-policy failure containing no source-controlled values."""
@@ -105,7 +129,12 @@ class _AnchorCollector(HTMLParser):
     def handle_starttag(self, tag, attrs):
         casefolded = tag.casefold()
         if casefolded in _NON_RENDERED:
-            self.non_rendered_depth += 1
+            # A void element (meta, link) can never contain anything, so it
+            # is neither a container to suppress nor an anchor to collect —
+            # it falls through untouched. A real non-rendered container
+            # raises the depth counter.
+            if casefolded not in _VOID_ELEMENTS:
+                self.non_rendered_depth += 1
             return
         if self.non_rendered_depth > 0:
             return
@@ -118,14 +147,23 @@ class _AnchorCollector(HTMLParser):
     def handle_startendtag(self, tag, attrs):
         casefolded = tag.casefold()
         if casefolded in _NON_RENDERED:
-            self.non_rendered_depth += 1
-            self.non_rendered_depth = max(0, self.non_rendered_depth - 1)
+            # Route both spellings of a void element through the same test
+            # so `<meta ...>` and `<meta ... />` behave identically: neither
+            # ever touches the counter.
+            if casefolded not in _VOID_ELEMENTS:
+                self.non_rendered_depth += 1
+                self.non_rendered_depth = max(0, self.non_rendered_depth - 1)
             return
         self.handle_starttag(tag, attrs)
         self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
-        if tag.casefold() in _NON_RENDERED:
+        casefolded = tag.casefold()
+        if casefolded in _NON_RENDERED and casefolded not in _VOID_ELEMENTS:
+            # A stray `</meta>` or `</link>` must never lower the counter —
+            # a void element has no contents, so its end tag (bare markup
+            # never emits one, but malformed input might) cannot be the
+            # closing half of a suppression scope.
             self.non_rendered_depth = max(0, self.non_rendered_depth - 1)
 
     def handle_data(self, data):
