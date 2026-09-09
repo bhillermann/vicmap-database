@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
-status: executing
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-09-08T03:16:45.643Z"
+status: verifying
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-09-09T01:42:29.195Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 01 execution started
-state_head: 5c8d865700e796ec510a968230977bd71974efef
+state_head: fc9ddac3b510af439ef21b98c7335b96af843503
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 5
-  completed_plans: 4
+  completed_plans: 5
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
 **Current phase:** 01
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 
 ## Session Log
 
@@ -37,13 +37,13 @@ See: .planning/PROJECT.md
 
 Phase: 01 (Trusted Graph Acquisition) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-07 — Phase 01 execution started
 
 ## Session
 
-**Last session:** 2026-09-08T03:16:45.621Z
-**Stopped at:** Completed 01-04-PLAN.md
+**Last session:** 2026-09-09T01:42:29.175Z
+**Stopped at:** Completed 01-05-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -54,6 +54,7 @@ Last activity: 2026-09-07 — Phase 01 execution started
 | Phase 01 P02 | 14min | 2 tasks | 4 files |
 | Phase 01 P03 | 17min | 2 tasks | 4 files |
 | Phase 01 P04 | 22min | 2 tasks | 4 files |
+| Phase 01 P05 | 21h 15m | 2 tasks | 11 files |
 
 ## Decisions
 
@@ -70,3 +71,8 @@ Last activity: 2026-09-07 — Phase 01 execution started
 - [Phase 01]: Reject redirect loops by normalized host, effective port, path, and query before recontact.
 - [Phase 01]: Derive progress with integer tenths and fingerprint only the approved final URL path.
 - [Phase 01]: Publish artifacts with same-directory hard links so existing and concurrent destinations cannot be overwritten.
+- [Phase 01]: Render operator output only from typed project-owned safe events; unexpected exceptions map to one fixed internal failure without interpolation.
+- [Phase 01]: Pass exactly one fully selected candidate into one complete DownloadPolicy call and never fall back after the chosen download fails.
+- [Phase 01]: Request Graph's from field because O365 2.1.0 hydrates Message.sender from that provider property.
+- [Phase 01]: Treat a visible direct archive URL independently from an opaque tracking href while preserving exact-one-link ambiguity rules.
+- [Phase 01]: Distinguish automated live checks and redacted recovery evidence from operator attestations about tenant scope and legacy-token handling.

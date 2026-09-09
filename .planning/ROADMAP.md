@@ -27,7 +27,7 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 3. The selected message yields one artifact through an approved HTTPS host while redirect, timeout, and size limits are enforced.
 4. The completed download reports its byte count and checksum for downstream provenance.
 
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans executed
 
 Plans:
 **Wave 1**
@@ -42,7 +42,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 01-05-PLAN.md — Compose closed redacted evidence and record one controlled live acquisition.
+- [x] 01-05-PLAN.md — Compose closed redacted evidence and record one controlled live acquisition.
 
 ### Phase 2: Safe Geospatial Discovery
 
@@ -118,7 +118,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Trusted Graph Acquisition | 4/5 | In Progress|  |
+| 1. Trusted Graph Acquisition | 5/5 | In Progress|  |
 | 2. Safe Geospatial Discovery | 0/TBD | Not started | — |
 | 3. Validated PostGIS Staging | 0/TBD | Not started | — |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
