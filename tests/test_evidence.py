@@ -93,11 +93,13 @@ class _E2EGraph:
     def __init__(self, metadata, mime_by_id, **kwargs) -> None:
         self._metadata = metadata
         self._mime_by_id = mime_by_id
+        self.mime_requests: list[str] = []
 
     def iter_metadata(self, cutoff_utc):
         return iter(self._metadata)
 
     def get_mime_content(self, graph_message_id):
+        self.mime_requests.append(graph_message_id)
         return self._mime_by_id[graph_message_id]
 
 
@@ -339,13 +341,17 @@ class ControllerDisclosureTest(unittest.TestCase):
 
 class ControllerCompositionTest(unittest.TestCase):
     @staticmethod
-    def _config(output_dir: Path):
+    def _config(
+        output_dir: Path,
+        *,
+        allowed_senders: tuple[str, ...] = ("noreply@datashare.maps.vic.gov.au",),
+    ):
         import read_mailbox
 
         return read_mailbox.AcquisitionConfig(
             mailbox="automations@vegetationlink.com.au",
             folder="Inbox",
-            allowed_senders=("noreply@datashare.maps.vic.gov.au",),
+            allowed_senders=allowed_senders,
             allowed_order_ids=("OK0VUZ",),
             allowed_hosts=("s3.ap-southeast-2.amazonaws.com",),
             lookback_days=15,
@@ -420,6 +426,169 @@ class ControllerCompositionTest(unittest.TestCase):
             [event["event"] for event in events],
         )
         self.assertEqual(1, len(session.calls))
+
+    def test_matching_message_pointing_outside_the_configured_prefix_is_rejected(self):
+        import read_mailbox
+        from vicmap_acquire.graph import MessageMetadata
+
+        message_id = "opaque-wrong-bucket-message-id"
+        artifact_url = "https://s3.ap-southeast-2.amazonaws.com/other/Order_OK0VUZ.zip"
+        metadata = [
+            MessageMetadata(
+                graph_message_id=message_id,
+                received_datetime_utc=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                sender="noreply@datashare.maps.vic.gov.au",
+                subject="Your DataShare Order OK0VUZ is ready to download",
+            )
+        ]
+        graph = _E2EGraph(metadata, {message_id: _e2e_mime(artifact_url=artifact_url)})
+        session = _E2ESession()
+        events = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "artifacts"
+            config = self._config(output_dir)
+            with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                read_mailbox.run_acquisition(
+                    config,
+                    self._credentials(),
+                    graph_factory=lambda **kwargs: graph,
+                    session_factory=lambda: session,
+                    event_sink=events.append,
+                )
+            self.assertFalse(output_dir.exists())
+
+        self.assertEqual("download_url_rejected", caught.exception.code)
+        self.assertEqual([], session.calls)
+        self.assertEqual("download_url_rejected", events[-1]["reason"])
+
+    def test_unauthenticated_dkim_verdict_is_rejected_before_any_download_contact(self):
+        import read_mailbox
+        from vicmap_acquire.graph import MessageMetadata
+
+        message_id = "opaque-dkim-fail-message-id"
+        artifact_url = "https://s3.ap-southeast-2.amazonaws.com/private/Order_OK0VUZ.zip"
+        metadata = [
+            MessageMetadata(
+                graph_message_id=message_id,
+                received_datetime_utc=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                sender="noreply@datashare.maps.vic.gov.au",
+                subject="Your DataShare Order OK0VUZ is ready to download",
+            )
+        ]
+        graph = _E2EGraph(
+            metadata,
+            {
+                message_id: _e2e_mime(
+                    artifact_url=artifact_url,
+                    auth_results=(AUTH_RESULTS_DKIM_FAIL,),
+                )
+            },
+        )
+        session = _E2ESession()
+        events = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "artifacts"
+            config = self._config(output_dir)
+            with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                read_mailbox.run_acquisition(
+                    config,
+                    self._credentials(),
+                    graph_factory=lambda **kwargs: graph,
+                    session_factory=lambda: session,
+                    event_sink=events.append,
+                )
+
+        self.assertEqual("origin_unauthenticated", caught.exception.code)
+        self.assertEqual([message_id], graph.mime_requests)
+        self.assertEqual([], session.calls)
+        self.assertEqual("origin_unauthenticated", events[-1]["reason"])
+
+    def test_injected_passing_header_cannot_rescue_a_genuine_failing_verdict(self):
+        import read_mailbox
+        from vicmap_acquire.graph import MessageMetadata
+
+        message_id = "opaque-injected-header-message-id"
+        artifact_url = "https://s3.ap-southeast-2.amazonaws.com/private/Order_OK0VUZ.zip"
+        metadata = [
+            MessageMetadata(
+                graph_message_id=message_id,
+                received_datetime_utc=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                sender="noreply@datashare.maps.vic.gov.au",
+                subject="Your DataShare Order OK0VUZ is ready to download",
+            )
+        ]
+        graph = _E2EGraph(
+            metadata,
+            {
+                message_id: _e2e_mime(
+                    artifact_url=artifact_url,
+                    auth_results=(AUTH_RESULTS_PASS, AUTH_RESULTS_DKIM_FAIL),
+                )
+            },
+        )
+        session = _E2ESession()
+        events = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "artifacts"
+            config = self._config(output_dir)
+            with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                read_mailbox.run_acquisition(
+                    config,
+                    self._credentials(),
+                    graph_factory=lambda **kwargs: graph,
+                    session_factory=lambda: session,
+                    event_sink=events.append,
+                )
+
+        self.assertEqual("origin_unauthenticated", caught.exception.code)
+        self.assertEqual([], session.calls)
+
+    def test_from_header_disagreeing_with_graph_metadata_sender_is_rejected(self):
+        import read_mailbox
+        from vicmap_acquire.graph import MessageMetadata
+
+        message_id = "opaque-sender-mismatch-message-id"
+        artifact_url = "https://s3.ap-southeast-2.amazonaws.com/private/Order_OK0VUZ.zip"
+        graph_sender = "noreply@datashare.maps.vic.gov.au"
+        from_sender = "reports@datashare.maps.vic.gov.au"
+        metadata = [
+            MessageMetadata(
+                graph_message_id=message_id,
+                received_datetime_utc=datetime(2026, 9, 7, tzinfo=timezone.utc),
+                sender=graph_sender,
+                subject="Your DataShare Order OK0VUZ is ready to download",
+            )
+        ]
+        graph = _E2EGraph(
+            metadata,
+            {
+                message_id: _e2e_mime(
+                    artifact_url=artifact_url, from_header=from_sender
+                )
+            },
+        )
+        session = _E2ESession()
+        events = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "artifacts"
+            config = self._config(
+                output_dir, allowed_senders=(graph_sender, from_sender)
+            )
+            with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                read_mailbox.run_acquisition(
+                    config,
+                    self._credentials(),
+                    graph_factory=lambda **kwargs: graph,
+                    session_factory=lambda: session,
+                    event_sink=events.append,
+                )
+
+        self.assertEqual("origin_unauthenticated", caught.exception.code)
+        self.assertEqual([], session.calls)
 
     def test_controller_passes_complete_policy_to_one_newest_download(self):
         import read_mailbox

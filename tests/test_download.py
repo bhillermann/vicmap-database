@@ -260,6 +260,18 @@ class DownloadTransportBoundaryTest(unittest.TestCase):
         self.assertTrue(redirect.closed)
         self.assertTrue(final.closed)
 
+    def test_redirect_leaving_the_configured_prefix_is_rejected_after_one_contact(self):
+        redirect = _FakeResponse(
+            307, headers={"Location": f"https://{ALLOWED_HOST}/other/final.zip"}
+        )
+        session = _FakeSession((redirect,))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(download.DownloadError) as caught:
+                _legacy_download(session, Path(directory))
+        self.assertEqual("download_redirect_rejected", caught.exception.code)
+        self.assertEqual([BASE_URL], [call[0] for call in session.calls])
+        self.assertTrue(redirect.closed)
+
     def test_unsafe_redirects_are_rejected_before_contact(self):
         for location in (
             "http://s3.ap-southeast-2.amazonaws.com/archive.zip",
