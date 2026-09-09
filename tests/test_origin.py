@@ -47,6 +47,23 @@ def _mime(*, from_header: str = SENDER, auth_results: str | tuple[str, ...] | No
     return message.as_bytes()
 
 
+def _auth_header(
+    *,
+    spf: str = "pass",
+    dkim: str = "pass",
+    dmarc: str = "pass",
+    compauth: str = "pass",
+    header_d: str = "maps.vic.gov.au",
+    header_from: str = "datashare.maps.vic.gov.au",
+) -> str:
+    return (
+        f"spf={spf} smtp.mailfrom=maps.vic.gov.au;"
+        f"dkim={dkim} (signature was verified) header.d={header_d};"
+        f"dmarc={dmarc} action=none header.from={header_from};"
+        f"compauth={compauth} reason=100"
+    )
+
+
 class ParseAuthenticationResultsTest(unittest.TestCase):
     def test_verdicts_and_properties_are_extracted_with_comments_discarded(self):
         verdicts, properties = parse_authentication_results(AUTH_RESULTS_PASS)
@@ -94,6 +111,116 @@ class VerifyAuthenticatedOriginTest(unittest.TestCase):
         )
         with self.assertRaises(OriginUnauthenticated):
             verify_authenticated_origin(_mime(auth_results=failing), SENDER, _policy())
+
+
+class HardenedOriginParserTest(unittest.TestCase):
+    def test_empty_whitespace_and_unterminated_comment_headers_are_rejected(self):
+        for auth_results in ("", "   ", "dkim=pass (unterminated comment"):
+            with self.subTest(auth_results=auth_results):
+                with self.assertRaises(OriginUnauthenticated):
+                    verify_authenticated_origin(
+                        _mime(auth_results=auth_results), SENDER, _policy()
+                    )
+
+    def test_required_method_absent_from_header_is_rejected(self):
+        header = (
+            "spf=pass smtp.mailfrom=maps.vic.gov.au;"
+            "dkim=pass (signature was verified) header.d=maps.vic.gov.au;"
+            "dmarc=pass action=none header.from=datashare.maps.vic.gov.au"
+        )
+        with self.assertRaises(OriginUnauthenticated):
+            verify_authenticated_origin(_mime(auth_results=header), SENDER, _policy())
+
+    def test_non_pass_verdicts_are_all_rejected(self):
+        for verdict in (
+            "fail",
+            "none",
+            "neutral",
+            "temperror",
+            "permerror",
+            "softfail",
+            "bestguesspass",
+        ):
+            with self.subTest(verdict=verdict):
+                header = _auth_header(dkim=verdict)
+                with self.assertRaises(OriginUnauthenticated):
+                    verify_authenticated_origin(
+                        _mime(auth_results=header), SENDER, _policy()
+                    )
+
+    def test_sibling_domain_sharing_a_suffix_is_rejected_but_true_parent_is_accepted(self):
+        header = _auth_header(header_d="evilmaps.vic.gov.au")
+        with self.assertRaises(OriginUnauthenticated):
+            verify_authenticated_origin(_mime(auth_results=header), SENDER, _policy())
+
+        accepted_header = _auth_header(header_d="maps.vic.gov.au")
+        address = verify_authenticated_origin(
+            _mime(auth_results=accepted_header), SENDER, _policy()
+        )
+        self.assertEqual(SENDER, address)
+
+    def test_header_from_disagreeing_with_from_domain_is_rejected(self):
+        header = _auth_header(header_from="attacker.example")
+        with self.assertRaises(OriginUnauthenticated):
+            verify_authenticated_origin(_mime(auth_results=header), SENDER, _policy())
+
+    def test_from_header_cardinality_violations_are_rejected(self):
+        subject = "Subject: Your DataShare Order OK0VUZ is ready to download\r\n"
+        auth = f"Authentication-Results: {AUTH_RESULTS_PASS}\r\n"
+        to_header = "To: automations@vegetationlink.com.au\r\n"
+
+        two_from = (
+            f"From: {SENDER}\r\nFrom: {SENDER}\r\n{to_header}{subject}{auth}\r\nbody\r\n"
+        ).encode()
+        zero_from = (f"{to_header}{subject}{auth}\r\nbody\r\n").encode()
+        two_addresses = (
+            f"From: {SENDER}, other@datashare.maps.vic.gov.au\r\n"
+            f"{to_header}{subject}{auth}\r\nbody\r\n"
+        ).encode()
+
+        for mime_content in (two_from, zero_from, two_addresses):
+            with self.subTest(mime_content=mime_content[:40]):
+                with self.assertRaises(OriginUnauthenticated):
+                    verify_authenticated_origin(mime_content, SENDER, _policy())
+
+    def test_non_bytes_empty_and_unparseable_mime_content_is_rejected(self):
+        for mime_content in (None, "not-bytes", b"", 12345):
+            with self.subTest(mime_content=mime_content):
+                with self.assertRaises(OriginUnauthenticated):
+                    verify_authenticated_origin(mime_content, SENDER, _policy())
+
+    def test_verdict_and_property_comparison_is_casefolded(self):
+        header = (
+            "SPF=Pass smtp.mailfrom=maps.vic.gov.au;"
+            "DKIM=Pass (signature was verified) header.D=Maps.Vic.Gov.AU;"
+            "DMARC=Pass action=none header.From=Datashare.Maps.Vic.Gov.AU;"
+            "COMPAUTH=Pass reason=100"
+        )
+        address = verify_authenticated_origin(
+            _mime(auth_results=header), SENDER, _policy()
+        )
+        self.assertEqual(SENDER, address)
+
+    def test_no_raised_error_leaks_seeded_private_mime_content(self):
+        message = EmailMessage()
+        message["From"] = "noreply@attacker.example"
+        message["To"] = "automations@vegetationlink.com.au"
+        message["Subject"] = "private-seeded-subject-marker"
+        message["Message-ID"] = "<private-seeded-message-id-marker@example.test>"
+        message.set_content("private-seeded-body-marker")
+        mime_content = message.as_bytes()
+
+        with self.assertRaises(OriginUnauthenticated) as caught:
+            verify_authenticated_origin(mime_content, SENDER, _policy())
+
+        for marker in (
+            "private-seeded-subject-marker",
+            "private-seeded-message-id-marker",
+            "private-seeded-body-marker",
+            "attacker.example",
+        ):
+            self.assertNotIn(marker, str(caught.exception))
+            self.assertNotIn(marker, repr(caught.exception))
 
 
 if __name__ == "__main__":
