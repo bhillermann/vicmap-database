@@ -537,6 +537,49 @@ class CandidateRecognitionTest(unittest.TestCase):
 
                 self.assertEqual("candidate_ambiguous", caught.exception.code)
 
+    def test_self_closing_syntax_on_non_void_elements_does_not_close_them(self):
+        # HTML5 ignores a trailing "/" on a non-void element: the element
+        # stays open and swallows what follows, exactly like an ordinary
+        # unclosed start tag. A mail reader would never display this text.
+        archive_url = _url()
+        self_closing_shapes = {
+            "script": f'<script src="x"/>{archive_url}',
+            "style": f"<style/>{archive_url}",
+            "head": f"<head/>{archive_url}",
+            "noscript": f"<noscript/>{archive_url}",
+            "template": f"<template/>{archive_url}",
+            "title": f"<title/>{archive_url}",
+        }
+        for tag, html in self_closing_shapes.items():
+            with self.subTest(tag=tag):
+                with self.assertRaises(CandidateError) as caught:
+                    _recognize(_metadata(), _mime(html=html))
+                self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_self_closing_script_with_src_and_real_end_tag_control_is_still_suppressed(
+        self,
+    ):
+        # The control case from the CR-01 reproduction: a properly-closed
+        # script (self-closing spelling on the *open* tag plus a real end
+        # tag) must remain correctly suppressed.
+        archive_url = _url()
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(
+                _metadata(),
+                _mime(html=f'<script src="x">{archive_url}</script>'),
+            )
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_self_closing_anchor_still_contributes_its_href_attribute(self):
+        # `a` is neither void nor non-rendered, and its href is an
+        # attribute, not content, so self-closing spelling must not change
+        # anchor recognition.
+        archive_url = _url()
+        candidate = _recognize(
+            _metadata(), _mime(html=f'<a href="{archive_url}"/>')
+        )
+        self.assertEqual(archive_url, candidate.artifact_url)
+
 
 def _candidate(
     graph_message_id: str,
