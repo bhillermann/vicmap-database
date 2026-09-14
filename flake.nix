@@ -59,7 +59,22 @@
           packages = with pkgs; [
             git
             buildOpnix
-            (python3.withPackages (ps: [ python-o365 ps.html5lib ]))
+            gdal  # provides the ogrinfo/ogr2ogr CLI tools -- python3Packages.pyogrio
+                  # does not propagate them (its propagatedBuildInputs are only
+                  # certifi, numpy, packaging, python3), so ogrinfo needs this
+                  # separate flake dependency to resolve inside `nix develop`.
+            (python3.withPackages (ps: [
+              python-o365
+              ps.html5lib
+              # Reviewed supply-chain evidence (02-RESEARCH.md Package Legitimacy
+              # Audit): both flagged [SUS] by the automated PyPI metadata lookup
+              # (unknown-downloads/too-new/no-repository), assessed as lookup
+              # artifacts rather than slopsquat signals, and the operator waived
+              # the checkpoint:human-verify during Phase 2 planning (see
+              # 02-01-PLAN.md's "Package legitimacy - operator waiver" note).
+              ps.pyogrio  # https://github.com/geopandas/pyogrio
+              ps.pyproj   # https://github.com/pyproj4/pyproj
+            ]))
           ];
 
         shellHook = ''

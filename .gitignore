@@ -22,3 +22,4 @@ __pycache__/
 # Private partial downloads and finalized acquisition output
 **/.vicmap-download-*.part
 artifacts/
+runs/

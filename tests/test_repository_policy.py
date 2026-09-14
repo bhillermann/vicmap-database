@@ -83,6 +83,37 @@ class RepositoryIgnoreCoverageTest(unittest.TestCase):
         finally:
             shutil.rmtree(output_root.parent)
 
+    def test_root_level_run_root_is_ignored(self):
+        output_root = REPO_ROOT / "runs"
+        created = not output_root.exists()
+        output_root.mkdir(exist_ok=True)
+        try:
+            probe = output_root / f"probe-{uuid.uuid4().hex}"
+            probe.write_bytes(b"probe")
+            try:
+                self._assert_ignored(
+                    probe.relative_to(REPO_ROOT),
+                    "a run directory member under the root-level permitted run root",
+                )
+            finally:
+                probe.unlink()
+        finally:
+            if created:
+                shutil.rmtree(output_root)
+
+    def test_nested_run_root_is_ignored(self):
+        output_root = REPO_ROOT / f"nested-probe-{uuid.uuid4().hex}" / "runs"
+        output_root.mkdir(parents=True)
+        try:
+            probe = output_root / "probe"
+            probe.write_bytes(b"probe")
+            self._assert_ignored(
+                probe.relative_to(REPO_ROOT),
+                "a run directory member under a nested permitted run root",
+            )
+        finally:
+            shutil.rmtree(output_root.parent)
+
 
 if __name__ == "__main__":
     unittest.main()
