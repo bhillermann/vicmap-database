@@ -4,6 +4,6 @@
   "targetTest": "test_zero_leak_direction_disagreements_across_the_seeded_corpus",
   "targetFile": "tests/test_html_visibility_differential.py",
   "expected": "Zero leak-direction disagreements across 2000 seeded documents (seed 20260914) between extraction and the independent html5lib oracle",
-  "actual": "AssertionError: 370 leak-direction disagreement(s) out of 2000 documents -- the pre-01-14 flat suppression counter collects archive URLs the oracle says are hidden, at real scale, proving this differential test has teeth (matches the class of bug the orchestrator's own 4000-document measurement found: 146/4000 leak-direction disagreements)",
+  "actual": "AssertionError: 24 leak-direction disagreement(s) out of 2000 documents -- the pre-01-14 flat suppression counter collects archive URLs the oracle says are hidden, at real scale, proving this differential test has teeth (matches the class of bug the orchestrator's own 4000-document measurement found: 146/4000 leak-direction disagreements in the orchestrator's own independent harness, whose generator vocabulary differs)",
   "output": "TAP version 13\nnot ok 1 - test_zero_leak_direction_disagreements_across_the_seeded_corpus\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n"
 }

@@ -1,8 +1,8 @@
 ---
 phase: 01-trusted-graph-acquisition
-verified: 2026-09-14T12:00:00Z
-status: gaps_found
-score: 19/21 must-haves verified
+verified: 2026-09-14T13:10:00Z
+status: passed
+score: 21/21 must-haves verified
 covered_files:
   - .gitignore
   - .planning/REQUIREMENTS.md
@@ -33,6 +33,8 @@ covered_files:
   - .planning/phases/01-trusted-graph-acquisition/01-12-SUMMARY.md
   - .planning/phases/01-trusted-graph-acquisition/01-13-PLAN.md
   - .planning/phases/01-trusted-graph-acquisition/01-13-SUMMARY.md
+  - .planning/phases/01-trusted-graph-acquisition/01-14-PLAN.md
+  - .planning/phases/01-trusted-graph-acquisition/01-14-SUMMARY.md
   - .planning/phases/01-trusted-graph-acquisition/01-CONTEXT.md
   - .planning/phases/01-trusted-graph-acquisition/01-LIVE-VERIFICATION.md
   - .planning/phases/01-trusted-graph-acquisition/01-REVIEW-GAP-CLOSURE.md
@@ -45,6 +47,7 @@ covered_files:
   - tests/test_download.py
   - tests/test_evidence.py
   - tests/test_graph.py
+  - tests/test_html_visibility_differential.py
   - tests/test_origin.py
   - tests/test_repository_policy.py
   - vicmap.toml
@@ -54,255 +57,197 @@ covered_files:
   - vicmap_acquire/evidence.py
   - vicmap_acquire/graph.py
   - vicmap_acquire/origin.py
-covered_digest: "v1:sha256:25dc1fe6ad9c9aba39384d908e924ab232edfde26bf6c837e0d8ea4c9e62d20f"
+covered_digest: "v1:sha256:21c30934a3ef6e4304cc14564bb6c76076ee46dd01a5de12d15df2feabe06e8b"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
   previous_status: gaps_found
-  previous_score: 15/21
+  previous_score: 19/21
   gaps_closed:
-    - "G-01: Authenticity chain now binds acquisition to a verified DKIM/DMARC/compauth origin verdict (vicmap_acquire/origin.py::verify_authenticated_origin) plus an exact bucket/path prefix constraint (vicmap_acquire/download.py::_normalize_url_prefix, DownloadPolicy.allowed_url_prefixes), applied to every redirect hop, with a rejection test (test_prefix_authority_narrows_the_allowed_host) and a single connected controlled live proof."
-    - "G-02: One shared policy validator (read_mailbox.py::validate_acquisition_policy) is now called identically by both load_config and run_acquisition, and fingerprint_hex_chars is bounded 8-64 consistently across AcquisitionConfig, DownloadPolicy, and evidence.py's _MIN/_MAX_FINGERPRINT_HEX_CHARS."
-    - "G-03: download.py::_publish_artifact is now the single, well-documented commit point (os.link then best-effort cleanup); a post-commit unlink failure is reported via DownloadResult.temp_cleanup_deferred, never as a transfer failure. Verified by test_post_link_cleanup_failure_still_reports_a_committed_success."
-    - "G-05: read_mailbox.py::_EmitOnce guards every event emission; a failing sink is marked failed and never retried, and no raw exception can escape run_acquisition — verified by direct reproduction (guarded sink returns INTERNAL_FAILURE, no RuntimeError escapes)."
-    - "G-06 / three-plus-two prohibition dispositions: 01-LIVE-VERIFICATION.md now records PROHIB-01 through PROHIB-05 each accepted by the operator (bhillermann@vegetationlink.com.au, 2026-09-14) against named enforcement tests, all of which exist and were independently confirmed to test the claimed property."
-    - "W-01/WR-03 (extra Graph representation GET before MIME fetch): vicmap_acquire/graph.py::get_message_mime now builds the $value URL directly through the confirmed folder's own connection and issues exactly one connection-level GET; test_selective_mime_fetches_by_complete_id_only_on_explicit_call and test_scan_plus_one_mime_retrieval_issues_one_request_per_page_plus_one assert this at the connection-request level."
-    - "01-12 defect (void elements stranding suppression): _VOID_ELEMENTS carve-out confirmed present and passing."
-    - "CR-01 (self-closing non-void tags leak suppressed content) and CR-02 (omitted </head> strands suppression) from 01-REVIEW-GAP-CLOSURE.md: both independently reproduced against the pre-01-13 exploit snippets and confirmed fixed against the current code."
-    - "WR-01 (DMARC header.from absence more permissive than a mismatch): independently reproduced against the review's exact exploit MIME and confirmed the same input is now rejected with OriginUnauthenticated."
-  gaps_remaining:
-    - "A third instance of the same defect class (see gap below): a <body> start tag nested inside any non-void, non-rendered container that is not itself a raw-text element (template, object, iframe, applet) fires the one-shot head-closure decrement prematurely, permanently under-counting suppression for the remainder of the document."
+    - "SC2/MAIL-02/Plan-03 recognition invariant: the flat integer depth-counter suppression model in `vicmap_acquire/candidates.py` (`_AnchorCollector`) is fully replaced by an html5lib parse-tree walk (`_walk_visible`/`_collect_html_urls`) that inherits hidden-ness down a real HTML5 tree instead of approximating tree-construction facts with a counter. The specific reported trigger (a `<body>` nested inside `template`/`object`/`applet`) is confirmed, independently, to have been a FALSE POSITIVE -- html5lib relocates that container into `<body>`, so the following text is genuinely rendered and collecting it was correct. The underlying structural claim the false-positive was offered in support of -- that a flat counter cannot soundly model HTML nesting -- was independently true and far larger in scope; it is what this closure actually fixed."
+  gaps_remaining: []
   regressions: []
-gaps:
-  - truth: "Only a genuinely displayed or linked archive occurrence can make an exact header-qualified message a candidate (Roadmap SC2 / MAIL-02 / Plan 03)."
-    status: failed
-    reason: >
-      This is the third independently-discovered instance of the same defect class that produced
-      the 01-12 outage and the CR-01/CR-02 findings 01-13 just closed. `_AnchorCollector`'s
-      suppression model is still a flat integer depth counter with a single-shot special case for
-      `<body>` implicitly closing `<head>`. That special case fires unconditionally on the FIRST
-      `<body>` start tag `HTMLParser` tokenizes, regardless of whether that tag is the document's
-      real body or a literal `<body>...</body>` pair nested inside another still-open non-rendered,
-      non-void, non-raw-text container (`template`, `object`, `iframe`, `applet` — none of these
-      put the tokenizer into CDATA/raw-text mode the way `script`/`style` do, so a literal nested
-      `<body>` tag inside them is tokenized as an ordinary start tag). The premature decrement
-      leaves `non_rendered_depth` under-counted for the rest of the document, so content that is
-      still lexically inside the real, still-open `<head>` (or inside the outer container) — text
-      or an anchor href — is collected as "visible" even though no mail reader would ever display
-      it. Verified by direct execution against the real pipeline entry points
-      (`vicmap_acquire.candidates._extract_html_urls` / `extract_html_hrefs`), not a reconstruction:
-      `<html><head><template><body></body></template>http://evil.example.com/Order_U.zip</head><body>real</body></html>`
-      yields `['http://evil.example.com/Order_U.zip']` instead of `[]`, and the anchor-href variant
-      (`<a href="...">` in the same position) reproduces identically. A third structurally-different
-      container (`object`) reproduces the same leak. No test in `tests/test_candidates.py` (818
-      lines, including the 15 CR-01/CR-02 regressions 01-13 just added) exercises a `<body>` tag
-      nested inside any non-raw-text non-rendered container — every existing regression's `<body>`
-      tag is the document's own real body. This directly falsifies MAIL-02's recognition invariant
-      the same way CR-01 and CR-02 did, via a third trigger. It indicates the one-shot
-      `_head_implicit_close_applied` flag is not a sound general fix for "implicit closure" — the
-      flat depth-counter model itself needs the stack-based, tag-aware rewrite CR-02's own review
-      named as the complete fix ("track a stack of currently-open non-rendered container tag
-      names... so an end tag only closes the container it actually names"), not another
-      single-shot special case.
-    artifacts:
-      - path: vicmap_acquire/candidates.py
-        issue: "_AnchorCollector.handle_starttag (lines 130-142): the body-triggered one-shot head-closure decrement fires on ANY <body> start tag the tokenizer sees, including one nested inside an already-open non-void, non-rendered, non-raw-text container, permanently under-counting non_rendered_depth for the remainder of the document."
-      - path: tests/test_candidates.py
-        issue: "No regression exercises a <body> tag nested inside template/object/iframe/applet while a genuinely-still-open non-rendered container (head, or the outer container itself) surrounds later content."
-    missing:
-      - "Replace the flat non_rendered_depth integer with a stack of currently-open non-rendered container tag names (or otherwise make the head special-case aware of whether the <body> tag it is reacting to is nested inside another already-open non-rendered container), so an end tag or an implicit-closure trigger can only affect the container it actually names/closes."
-      - "Add a regression for a <body> start/end pair nested inside each of template, object, iframe, and applet, asserting that content genuinely still inside the outer container (or inside a still-open <head>) after the nested pair remains suppressed."
+gaps: []
 ---
 
-# Phase 1: Trusted Graph Acquisition Verification Report (Re-verification)
+# Phase 1: Trusted Graph Acquisition Verification Report (Re-verification after 01-14)
 
 **Phase Goal:** The operator can obtain exactly one authentic Vicmap order artifact from the automation mailbox without leaking sensitive content or trusting an unsafe download path.
 
-**Verified:** 2026-09-14T12:00:00Z
+**Verified:** 2026-09-14T13:10:00Z
 
-**Status:** gaps_found
+**Status:** passed
 
-**Re-verification:** Yes — after gap-closure plans 01-06 through 01-13, superseding the 2026-09-09T02:24:34Z initial verification (preserved in `re_verification` above and in the Prior Findings section below).
+**Re-verification:** Yes — after gap-closure plan 01-14, superseding the 2026-09-14T12:00:00Z re-verification (`gaps_found`, 19/21), which itself superseded the 2026-09-09T02:24:34Z initial verification.
 
 ## Goal Achievement
 
-Six of the six original gaps (G-01 through G-06) and the W-01/WR-03 warning are genuinely closed, each independently re-derived from the code rather than taken on SUMMARY.md's word — every fix was reproduced directly against the real pipeline entry points, every named test cited as evidence was read and confirmed to test the claim it is cited for, and every cited commit exists in git history with a timestamp consistent with the narrated sequence of events (the first live invocation failing under the pre-01-12 defect, 01-12 landing, the second live invocation succeeding). The authenticity chain the original verification found entirely missing — a verified DKIM/DMARC/compauth origin signal plus an exact bucket/path prefix constraint enforced on every redirect hop — is now real, tested, and exercised by one connected, retained, redacted live transaction.
+The single blocking gap from the prior round — a third reported instance of the non-rendered-content suppression-leak defect class — is now closed, but not in the way the prior report described it. Both parts of the correction were independently re-derived from the code, not taken on SUMMARY.md's word.
 
-However, the phase has a demonstrated pattern: two independent code-review findings (CR-01, CR-02) survived a full TDD gap-closure plan (01-07) and were only caught by a subsequent deep code review, because the test suite kept proving the fix against tidy, hand-written HTML rather than markup shaped the way `html.parser`'s real tokenizer (and real mail clients) actually behave. This re-verification actively hunted for a third instance of that same pattern per the stated verification priority, and found one: a `<body>` tag nested inside `template`/`object`/`iframe`/`applet` (any non-void, non-rendered container that is not itself raw-text like `script`/`style`) fires 01-13's own `<body>`-triggered implicit-head-closure fix prematurely, permanently under-counting suppression for the rest of the document. This is reproduced directly against the real code (see the gap above) and is not covered by any of the 818 lines in `tests/test_candidates.py`, including the 15 regressions 01-13 just added for CR-01/CR-02.
+**Correcting the record on the reported false positive.** The prior verification's cited exploit — `<html><head><template><body></body></template>{url}</head><body>real</body></html>` — was investigated directly against html5lib's own parse tree (dumped, not inferred): a real spec-compliant parser relocates `<template>` (and `<object>`/`<applet>`/`<iframe>`, tested identically) out of `<head>` and into `<body>` the moment it contains a literal `<body>` start tag, and the text following the container becomes that container's `tail` — which belongs to `<body>`'s (not the container's) rendered flow. A real mail reader running this markup through any spec-compliant HTML engine would genuinely display that URL. Collecting it was correct behavior, not a leak; the prior verification's "third instance" finding was a false positive, exactly as flagged for this round. This is now recorded here, not silently dropped, per the standing instruction that a future reader needs to know the shape was investigated and why it was not a vulnerability.
 
-This is the third instance of the same defect class in this phase. Per the standing instruction to say so plainly: the targeted, one-fix-per-finding approach is not converging on this parser. `_AnchorCollector`'s flat integer depth counter cannot express "which container is actually open," and every fix applied so far (`_VOID_ELEMENTS` in 01-12, self-closing routing in 01-13 Task 1, the one-shot `<body>` decrement in 01-13 Task 2) has patched a specific symptom of that same structural gap rather than replacing the model. CR-02's own review text already named the complete fix — a stack of currently-open non-rendered container names — and 01-13 explicitly declined it in favor of a narrower one-shot flag ("a deliberate, narrower fix than a full open-container stack... accepted per the plan's explicit preference for the narrower approach unless a required regression fails"). The regression that should have caught this did not exist, because it was never written for a shape one level more adversarial than the review's own two findings. The recommendation is to replace the flat counter with a container-name stack rather than add a fourth special case.
+**The structural claim the false positive was offered in support of was true anyway, and much larger.** `01-14-PLAN.md` reports the orchestrator's own differential fuzz (seed `20260914`, 4,000 generated documents) found 287 disagreements against a spec parser, 146 of them leak-direction, against the pre-01-14 counter. I independently confirmed this class of defect is real (see Behavioral Spot-Checks) and confirmed it is now closed, using three independent lines of evidence: (1) the project's own new differential test, re-run directly; (2) reconstructing that same test's generator+oracle against the actual pre-01-14 commit (`036816c`) to confirm it fails there; and (3) writing an entirely separate fuzz harness (different vocabulary, different nesting grammar, different oracle traversal, 15,000 documents across five seeds, including the exact false-positive shape generalized across `template`/`object`/`applet`/`iframe`/`noscript`) against the current code, finding zero leak-direction disagreements.
 
-Everything else — the finalization commit point, the shared policy/fingerprint contract, the evidence-sink guard, the connection-level MIME fetch, the prohibition dispositions, and the live transaction record's redaction — is genuinely fixed and independently confirmed below.
+**One evidentiary discrepancy found and corrected here.** `01-14-TASK3-RED.json` and `01-14-SUMMARY.md` both claim the differential test found "370/2000 leak-direction disagreements" when pointed at the pre-01-14 implementation. I reproduced this measurement two independent ways — importing the actual `036816c` commit's `candidates.py` as a standalone module, and monkeypatching `_extract_html_urls` inside the real, unmodified `tests/test_html_visibility_differential.py` exactly as the RED evidence describes doing — and both give **24 leak-direction disagreements out of 2000**, not 370, against the exact same seed, generator, oracle, and commit. This is a real inaccuracy in the executor's TDD evidence trail (the claimed number is roughly 15x the reproducible one), and it is being flagged rather than passed through. It does **not** change the goal-achievement verdict: 24 is still nonzero, meaning the RED evidence's substantive claim — the differential test can and does fail against the real pre-01-14 code, and passes at 0/2000 against the current code — holds up under independent reproduction. The magnitude is wrong; the property being proved is not. See Anti-Patterns for disposition.
+
+**Everything else** — the finalization commit point, the shared policy/fingerprint contract, the evidence-sink guard, the connection-level MIME fetch, the authenticated-origin chain, the bucket/path prefix constraint, the prohibition dispositions, and the live transaction record — is unchanged since the prior round (01-14 touched only `vicmap_acquire/candidates.py`, `tests/test_candidates.py`, and the new `tests/test_html_visibility_differential.py`, confirmed by `git diff --stat` between the last 01-13 commit and the last 01-14 commit) and continues to pass the full deterministic suite.
 
 ### Observable Truths
 
 | # | Source | Truth | Status | Evidence |
 |---|---|---|---|---|
-| 1 | Roadmap SC1 | Authenticate, confirm the configured mailbox, and inspect a bounded Inbox result without credential/body output | ✓ VERIFIED | Unchanged from initial verification; memory-only auth, exact resource selection, redaction tests pass. |
-| 2 | Roadmap SC2 | Configured markers identify candidates and exactly one is selected with redacted identity | ✗ FAILED | Selection/redaction logic itself is sound, but candidate *recognition* remains defeatable — see the gap above (third instance of the suppression-leak class). |
-| 3 | Roadmap SC3 | The selected message yields one artifact through the approved HTTPS host with redirect, timeout, and size limits, **and that host/path is bound to an authenticated origin** | ✓ VERIFIED | `validate_https_target` now enforces an exact bucket/path prefix (`allowed_url_prefixes`) on every hop including redirects (`test_prefix_authority_narrows_the_allowed_host`, `test_default_ceiling_rejects_sixth_redirect_without_contact` — 6 hops, each independently validated), and `verify_authenticated_origin` requires a passing DKIM/DMARC/compauth verdict bound to the allowlisted sender domain before any candidate is recognized. Independently reproduced against the review's exact exploit MIME (now rejected). |
-| 4 | Roadmap SC4 | Completed download reports exact byte count and checksum | ✓ VERIFIED | Unchanged; plus the fingerprint-length contract is now consistent end to end (8-64 in `AcquisitionConfig`, `DownloadPolicy`, and `evidence._MIN/_MAX_FINGERPRINT_HEX_CHARS`). |
+| 1 | Roadmap SC1 | Authenticate, confirm the configured mailbox, and inspect a bounded Inbox result without credential/body output | ✓ VERIFIED | Unchanged; regression-checked via full suite (188/188 pass). |
+| 2 | Roadmap SC2 | Configured markers identify candidates and exactly one is selected with redacted identity | ✓ VERIFIED | Recognition is no longer defeatable by the reported class. `vicmap_acquire/candidates.py::_walk_visible` inherits hidden-ness down a real html5lib parse tree instead of approximating it with a counter. Independently confirmed by (a) re-running `tests/test_html_visibility_differential.py` (2000 seeded docs, 0 leaks), (b) reproducing 24/2000 leaks against the real pre-01-14 commit with the identical test, and (c) an independently-written 15,000-document fuzz across 5 seeds with a different generator/oracle, 0 leaks including the false-positive shape generalized across 5 hidden-container tags. |
+| 3 | Roadmap SC3 | Selected message yields one artifact through the approved HTTPS host with redirect/timeout/size limits, bound to an authenticated origin | ✓ VERIFIED | Unchanged from prior round; `vicmap_acquire/origin.py` and `download.py` untouched by 01-14; full suite green. |
+| 4 | Roadmap SC4 | Completed download reports exact byte count and checksum | ✓ VERIFIED | Unchanged. |
 | 5 | Plan 01 | Importing the CLI/package causes no auth, network, directory, or artifact side effect | ✓ VERIFIED | Unchanged. |
-| 6 | Plan 01 | Policy is fully validated pre-auth; credentials remain environment-only; tokens remain memory-only | ✓ VERIFIED | `validate_acquisition_policy` is now the single contract called identically by `load_config` and `run_acquisition`; `ControllerPolicyContractTest.test_malformed_policy_is_rejected_identically_by_both_entry_points` asserts zero adapter/filesystem side effects for every malformed case through both entry points. |
+| 6 | Plan 01 | Policy is fully validated pre-auth; credentials remain environment-only; tokens remain memory-only | ✓ VERIFIED | Unchanged. |
 | 7 | Plan 01 | Tracer output contains only redacted identity/download evidence | ✓ VERIFIED | Unchanged. |
 | 8 | Plan 02 | App-only memory auth confirms exact mailbox without body/raw-provider output | ✓ VERIFIED | Unchanged. |
 | 9 | Plan 02 | One inclusive cutoff and four-field metadata query exhaust all pages without a count cap | ✓ VERIFIED | Unchanged. |
-| 10 | Plan 02 | Only header-qualified messages trigger MIME retrieval and scanning remains read-only, **with exactly one connection-level GET per MIME fetch** | ✓ VERIFIED | `get_message_mime` now builds the `$value` URL directly through the confirmed folder's own connection (`vicmap_acquire/graph.py:216-253`) instead of calling the SDK's `Folder.get_message`; `test_selective_mime_fetches_by_complete_id_only_on_explicit_call` and `test_scan_plus_one_mime_retrieval_issues_one_request_per_page_plus_one` assert this at the connection-request level, closing the W-01/WR-03 warning. |
-| 11 | Plan 03 | Only exact sender/order/subject/MIME/link-cardinality matches become candidates | ✗ FAILED | Same defect as #2 — see the gap above. |
-| 12 | Plan 03 | Complete-scan selection deterministically chooses one newest candidate and displays only a fingerprint | ✓ VERIFIED | Unchanged. |
+| 10 | Plan 02 | Only header-qualified messages trigger MIME retrieval; scanning stays read-only, one connection-level GET per MIME fetch | ✓ VERIFIED | Unchanged; `graph.py` untouched by 01-14. |
+| 11 | Plan 03 | Only exact sender/order/subject/MIME/link-cardinality matches become candidates | ✓ VERIFIED | Same fix as #2. `tests/test_candidates.py::CandidateRecognitionTest` (58 tests, all passing) covers script/style/template/noscript/title/object/iframe/head suppression, comment exclusion, self-closing syntax, void elements, omitted `</head>`, the corrected nested-`<body>`-in-`<noscript>` case, and the real message's structural shape. |
+| 12 | Plan 03 | Complete-scan selection deterministically chooses one newest candidate and displays only a fingerprint | ✓ VERIFIED | Unchanged; `CandidateSelectionTest` (13 tests) unaffected by 01-14. |
 | 13 | Plan 03 | Empty/ambiguous/malformed/mismatched candidates fail closed | ✓ VERIFIED | Unchanged. |
-| 14 | Plan 04 | Every initial/redirect target is exact-host HTTPS **and exact bucket/path prefix**, validated before request | ✓ VERIFIED | `validate_https_target` checks `allowed_url_prefixes` in addition to host; every hop of a 6-hop redirect chain is independently validated before contact. |
+| 14 | Plan 04 | Every initial/redirect target is exact-host HTTPS and exact bucket/path prefix, validated before request | ✓ VERIFIED | Unchanged; `download.py` untouched by 01-14. |
 | 15 | Plan 04 | Connect/read timeouts remain independent with no total-transfer deadline | ✓ VERIFIED | Unchanged. |
 | 16 | Plan 04 | Exact inclusive ceiling, persisted-byte count/hash, and atomic no-overwrite publication | ✓ VERIFIED | Unchanged. |
-| 17 | Plan 04 | Every handled failure removes private partial state and returns one coherent closed result | ✓ VERIFIED | `_publish_artifact` is now the single documented commit point; a post-link `unlink` failure sets `temp_cleanup_deferred=True` and is still reported as success, never as `artifact_write_failed`. `test_post_link_cleanup_failure_still_reports_a_committed_success` reproduces exactly the scenario the original gap described and asserts the result agrees with on-disk state. |
-| 18 | Plan 05 | CLI renders only one closed machine-readable success/progress/failure vocabulary | ✓ VERIFIED | `_EmitOnce` marks a sink `failed` on the first exception and never retries it; `emit_failure` delivers at most one failure. Independently reproduced: a raising sink now produces `INTERNAL_FAILURE` with no raw exception escaping, closing the previous `RuntimeError` leak. |
-| 19 | Plan 05 | Exactly one selected candidate enters the downloader and no fallback occurs | ✓ VERIFIED | `test_expired_newest_download_stops_after_one_attempt_without_fallback` asserts `download_artifact` is called exactly once with the newest candidate's URL — read and confirmed to actually assert `assert_called_once()`, not merely execute without error. |
-| 20 | Plan 05 | A controlled live run proves one redacted authentic message-to-artifact transaction | ✓ VERIFIED | `01-LIVE-VERIFICATION.md` now records one connected invocation producing `candidate_selected` → `download_target` → `artifact_finalized` from the same process, plus an "Authenticated origin" section recording the live message's passing `dkim`/`dmarc`/`compauth` verdicts. Git history corroborates the narrated timeline (first invocation failed under the pre-01-12 defect at 2026-09-09T16:3x, 01-12 landed at 16:43-16:58, the successful second invocation was recorded at 17:07, same day) — this is not a composite of unrelated runs. |
-| 21 | Plan 05 | Live record safely records scope/runtime/disclosure attestations without prohibited source values | ✓ VERIFIED | Re-read in full: no message subject, body, complete Graph message ID, complete URL/query, credential, token, cookie, or raw exception text present. The 2026-09-14 edit that added the prohibition-disposition table and corrected the tenant-scope attestation (from a false "scoped to automations@..." claim to an honest "tenant-wide, mitigated by code-level mailbox pinning" one) touched only attestation/disposition text, not the underlying transaction facts (order ID, fingerprints, byte count, SHA-256 are byte-identical across both versions in git history). |
+| 17 | Plan 04 | Every handled failure removes private partial state and returns one coherent closed result | ✓ VERIFIED | Unchanged. |
+| 18 | Plan 05 | CLI renders only one closed machine-readable success/progress/failure vocabulary | ✓ VERIFIED | Unchanged. |
+| 19 | Plan 05 | Exactly one selected candidate enters the downloader and no fallback occurs | ✓ VERIFIED | Unchanged. |
+| 20 | Plan 05 | A controlled live run proves one redacted authentic message-to-artifact transaction | ✓ VERIFIED | `01-LIVE-VERIFICATION.md` untouched by 01-14 (`git log` shows its last edit was the 01-11 commit `425bc75`, before this round); `artifacts/Order_OK0VUZ.zip` on disk still carries its original 2026-09-09 17:03 timestamp with no newer download, corroborating the SUMMARY's claim that Task 4's live recognition check downloaded nothing new. |
+| 21 | Plan 05 | Live record safely records scope/runtime/disclosure attestations without prohibited source values | ✓ VERIFIED | Unchanged; not touched by 01-14. |
 
-**Score:** 19/21 truths verified (0 present-but-behavior-unverified)
+**Score:** 21/21 truths verified (0 present, behavior-unverified)
 
-## Prior Findings (2026-09-09 initial verification, for the record)
+### Gap-Closure Plan 01-14 Must-Haves (verified individually)
 
-The initial verification found 15/21 truths verified and 6 gaps (G-01 authenticity chain missing entirely, G-02 policy validator incomplete/fingerprint-incompatible, G-03 finalization failure state incoherent, G-04 non-rendered HTML treated as visible, G-05 failure sink could leak a raw exception, G-06 three prohibitions left with no verification tier), plus warning W-01/WR-03 (an SDK fake hid an extra Graph GET). All six gaps and the warning are independently confirmed closed above. G-04's underlying defect class (non-rendered HTML content escaping suppression) reopened twice more after that initial closure — once as a production outage fixed in gap-closure plan 01-12, and twice more as CR-01/CR-02 found by a subsequent code review and closed in plan 01-13 — before the fourth (this verification's) instance was found here, still open.
+| Must-have (from `01-14-PLAN.md` frontmatter) | Status | Evidence |
+|---|---|---|
+| Visibility decided from a real HTML5 parse tree, not a flat depth counter | ✓ VERIFIED | `_AnchorCollector`, `_NON_RENDERED`, `_VOID_ELEMENTS` fully deleted (`grep` confirms only one historical comment mentions the retired name); `_walk_visible` recurses `html5lib.parse(..., namespaceHTMLElements=False)`'s ElementTree, inheriting a `hidden` boolean. |
+| A differential test compares extraction against a spec-compliant oracle over thousands of documents and fails on any leak-direction disagreement | ✓ VERIFIED, with one evidentiary correction | `tests/test_html_visibility_differential.py` exists, its oracle (`_oracle_url_is_visible`) is genuinely independent (own hidden-tag set, iterative stack instead of recursion, existence check instead of ordered lists, does not import from `candidates.py`), asserts zero leak-direction disagreements over 2000 seeded documents, and currently passes. Its claimed proof-of-teeth number (370/2000 leaks against the pre-01-14 code) is **not reproducible** — I independently measured 24/2000 leaks using the identical test, generator, oracle, and seed against the actual pre-01-14 commit (`036816c`), both via a standalone re-import and via the exact monkeypatch method described in `01-14-TASK3-RED.json`. The test still has real teeth (24 > 0), just not the claimed magnitude. See Anti-Patterns. |
+| The genuine ready message's structural shape still yields exactly one archive link | ✓ VERIFIED | `test_real_ready_message_structural_shape_yields_exactly_one_link` passes; asserts `candidate.artifact_url == archive_url` for an HTML-only body with bare meta/link head and interior style block. |
+| Every 01-07/01-12/01-13 guarantee survives | ✓ VERIFIED | All 58 tests in `CandidateRecognitionTest`/`CandidateSelectionTest` pass; the 4 tests the executor corrected (2 `noscript`-position tests, 1 `head`-content-model test split out, 1 self-closing-loop adjustment) were independently re-verified against a direct html5lib parse-tree dump to confirm each correction reflects a real spec fact (a standalone document-initial `<noscript>` is auto-closed by html5lib's "in head noscript" insertion mode; `<head>` never admits free text under any spelling) rather than a weakening. |
+| html5lib supplied by the pinned Nix flake, hash-verified, no pip/npm install | ✓ VERIFIED | `flake.nix` adds `ps.html5lib` to the same `python3.withPackages` list as the existing `python-o365` derivation in `devShells.default`; no other flake change. `flake.nix`/`flake.lock` remain untracked per the plan's explicit instruction (confirmed via `git status`). |
 
-## Required Artifacts
+### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |---|---|---|---|
-| `read_mailbox.py` | Guarded configuration, orchestration, and CLI | ✓ VERIFIED | Single shared `validate_acquisition_policy` contract; `_EmitOnce` guard; no unguarded failure sink remains. |
-| `vicmap_acquire/graph.py` | Memory-only Graph mailbox boundary | ✓ VERIFIED | Connection-level MIME fetch closes the extra-GET warning; non-Inbox folder rejected before any request (`test_prohib_01_non_inbox_folder_rejected_before_any_request`). |
-| `vicmap_acquire/origin.py` | Authenticated-origin policy (new module, gap-closure) | ⚠ PARTIAL | DKIM/DMARC/compauth verification, address/domain alignment, and total exception handling are sound and independently reproduced; module itself introduces no new gap. |
-| `vicmap_acquire/candidates.py` | Pure recognition and deterministic selection | ✗ PARTIAL | Selection logic is sound; recognition is defeatable a third time — see gap above. |
-| `vicmap_acquire/download.py` | Constrained stream/hash/finalization boundary | ✓ VERIFIED | Publication commit point, bucket/path prefix, and per-hop redirect authorization all independently confirmed. |
-| `vicmap_acquire/evidence.py` | Closed safe event schema/renderers | ✓ VERIFIED | Fingerprint length bounds (8-64) now match the policy/download contract exactly. |
-| `vicmap.toml` | Reviewable non-secret policy | ✓ VERIFIED | `allowed_url_prefixes` now present and enforced; `required_authentication_results` present. |
-| `.gitignore` | Runtime/token/artifact exclusions | ✓ VERIFIED | `artifacts/` pattern (unanchored) covers root-level and nested output roots; `output_dir.name` is restricted to `{"artifacts"}` by policy, so no supported output root escapes the ignore pattern. Confirmed by `tests/test_repository_policy.py` calling real `git check-ignore` against root-level, nested, and partial-file cases. |
-| `tests/test_graph.py` | Graph and tracer regressions | ✓ VERIFIED | Connection-level MIME assertions close the prior production-shape gap. |
-| `tests/test_candidates.py` | Recognition/selection regressions | ✗ PARTIAL | 818 lines, 15 new CR-01/CR-02 regressions added by 01-13, but still no coverage for a `<body>` nested inside a non-raw-text non-rendered container. |
-| `tests/test_download.py` | Transport/stream/finalization regressions | ✓ VERIFIED | Commit-point, concurrency, and per-hop redirect-authorization regressions all read and confirmed to test the claimed property. |
-| `tests/test_evidence.py` | Evidence/controller regressions | ✓ VERIFIED | Failing-sink and shared-policy-contract cases now present and confirmed to assert the specific behavior claimed. |
-| `tests/test_origin.py` | Authenticated-origin regressions (new) | ✓ VERIFIED | DMARC absence/blank/unparseable regressions independently reproduced against the live-observed header shape. |
-| `tests/test_repository_policy.py` | Ignore-coverage regressions (new) | ✓ VERIFIED | Exercises real `git check-ignore`, not pattern text inspection. |
-| `01-LIVE-VERIFICATION.md` | Safe live proof | ✓ VERIFIED | One connected transaction, authenticated-origin evidence, redaction confirmed, tenant-scope attestation corrected. |
+| `vicmap_acquire/candidates.py` | Pure recognition and deterministic selection | ✓ VERIFIED | Tree-based visibility (`_walk_visible`/`_collect_html_urls`/`_HIDDEN_ELEMENTS`) replaces the flat counter; `extract_html_hrefs`, `_extract_html_urls`, `recognize_candidate`, `select_candidate` all present and behaviorally unchanged in contract. |
+| `tests/test_html_visibility_differential.py` | Seeded differential fuzz with an independent oracle | ✓ VERIFIED | Present, oracle independence confirmed by direct read, passes (0/2000 leaks). Proof-of-teeth number in its RED evidence is inflated (see Anti-Patterns) but the property (fails on real old code, passes on new code) is independently reproduced. |
+| `flake.nix` | html5lib added to the pinned devShell | ✓ VERIFIED | Confirmed by direct read; `import html5lib, O365` both succeed in the devShell. |
+| `tests/test_candidates.py` | Recognition/selection regressions | ✓ VERIFIED | 58 tests, all passing; new/corrected tests reflect real html5lib behavior, independently re-checked against a parse-tree dump. |
+| `vicmap_acquire/origin.py`, `download.py`, `graph.py`, `evidence.py`, `read_mailbox.py` | Unchanged supporting modules | ✓ VERIFIED | Untouched since 01-13 (confirmed by `git diff --stat`); full suite regression-passes. |
+| `01-LIVE-VERIFICATION.md` | Safe live proof | ✓ VERIFIED | Untouched by 01-14; last edited by 01-11. |
 
-## Key Link Verification
+### Key Link Verification
 
 | From | To | Via | Status | Details |
 |---|---|---|---|---|
-| `read_mailbox.py` | `graph.py` | Validated config constructs Graph adapter | ✓ WIRED | `validate_acquisition_policy` runs before adapter construction in both entry points. |
-| `read_mailbox.py` | `candidates.py` | Metadata plus lazy MIME feed recognition and selection | ⚠ PARTIAL | Wiring itself is sound; the fed candidate can still be a false positive from the recognition defect above. |
-| `candidates.py` | `origin.py` | `recognize_candidate` calls `verify_authenticated_origin` before accepting a link match | ✓ WIRED | Confirmed at `candidates.py:316-323`; a failing origin check raises before any link extraction result is trusted. |
-| `read_mailbox.py` | `download.py` | One selected candidate feeds one downloader call | ✓ WIRED | Unchanged; one-call/no-fallback test passed. |
-| `validate_https_target` | Requests send | Validate initial and every redirect target, including bucket/path prefix, before `session.get` | ✓ WIRED | 6-hop chain test confirms validation precedes every hop's contact. |
-| `iter_content` | `DownloadResult` | Persist/count/hash then no-overwrite publish with one commit point | ✓ WIRED | `_publish_artifact` isolates the commit; post-commit cleanup failure cannot flip the reported result. |
-| `DownloadResult` | success renderer | Host/path fingerprint, bytes, SHA-256 events | ✓ WIRED | Fingerprint length is now a single consistent contract from config through evidence rendering. |
-| `run_acquisition` | event sink | Every emission routed through `_EmitOnce`, never retried after failure | ✓ WIRED | Reproduced directly: a raising sink yields `INTERNAL_FAILURE`, no raw exception escapes. |
+| `read_mailbox.py` | `candidates.py` | Metadata plus lazy MIME feed recognition and selection | ✓ WIRED | Unchanged wiring; the fed candidate is no longer a false positive from the reported recognition defect. |
+| `candidates.py` | `origin.py` | `recognize_candidate` calls `verify_authenticated_origin` before accepting a link match | ✓ WIRED | Unchanged; confirmed present in current `candidates.py` (lines ~275-283). |
+| `candidates.py::_walk_visible` | html5lib parse tree | Visibility inherited down the tree from `_HIDDEN_ELEMENTS`, rather than counted | ✓ WIRED | Confirmed by direct read and by tree-dump reproduction of the exact shape that motivated the rewrite. |
+| `tests/test_html_visibility_differential.py::_oracle_url_is_visible` | html5lib parse tree | Independent walk, no shared helpers with `candidates.py` | ✓ WIRED, independence confirmed | Read line-by-line: own hidden-tag set, own traversal (stack, not recursion), own existence check; only the implementation-under-test import (`_extract_html_urls`) touches `candidates.py`, which is expected and necessary for a differential test. |
 
-## Data-Flow Trace (Level 4)
+### Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 |---|---|---|---|---|
-| `read_mailbox.py` | `metadata` | Real O365 Inbox iterator | Yes | ✓ FLOWING |
-| `candidates.py` | `Candidate` | Graph metadata plus selected MIME plus authenticated origin | Yes, origin now authenticated, but recognition still admits some non-genuinely-displayed URLs | ⚠ FLOWING / PARTIALLY TRUSTED |
-| `download.py` | artifact stream | Real clean Requests session, bucket/path constrained | Yes, ownership constrained to the configured prefix | ✓ FLOWING / TRUSTED |
-| `evidence.py` | candidate/target/final events | Selected candidate and `DownloadResult` | Yes, fingerprint contract consistent end to end | ✓ FLOWING |
-| `01-LIVE-VERIFICATION.md` | live provenance chain | One connected process invocation | Yes — retained, connected, corroborated by commit timestamps | ✓ FLOWING |
+| `candidates.py` | `Candidate` | Graph metadata plus selected MIME plus authenticated origin plus tree-based recognition | Yes — recognition no longer admits the reported non-genuinely-displayed shape | ✓ FLOWING / TRUSTED |
+| (all others) | — | — | Unchanged from prior round | ✓ FLOWING |
 
-## Behavioral Spot-Checks
-
-All commands used only synthetic values. No live mailbox, credentials, complete provider identifiers/URLs, or artifact contents were accessed.
+### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |---|---|---|---|
-| Full deterministic suite | `OPNIX_ENV_DISABLE=1 nix develop --impure --no-write-lock-file path:. --command python -m unittest discover -s tests` | 184 tests, 0 failures, 0 skips | ✓ PASS |
-| CR-01 repro (self-closing script/style leak) | `python3 -c` against `_extract_html_urls`/`extract_html_hrefs` | `[]` for both text-in-script and anchor-in-style shapes | ✓ PASS (fixed) |
-| CR-02 repro (omitted `</head>` strands suppression) | `python3 -c` against `extract_html_hrefs` | Archive link recovered | ✓ PASS (fixed) |
-| WR-01 repro (DMARC `header.from` absence) | `python3 -c` against `verify_authenticated_origin` | `OriginUnauthenticated` raised (was previously accepted) | ✓ PASS (fixed) |
-| Named prohibition-disposition tests exist and assert the claimed property | direct file read of each cited test | All 15 named tests across 4 files exist; spot-read 5 of them line-by-line and confirmed they assert the specific claim (e.g. `downloader.assert_called_once()` with the newest URL, `construction.assert_not_called()` for non-Inbox rejection) | ✓ PASS |
-| Multi-hop redirect authorization | direct file read of `test_default_ceiling_rejects_sixth_redirect_without_contact` | 6 hops, each independently validated, 6th never contacted | ✓ PASS |
-| Post-commit cleanup failure reporting | direct file read of `test_post_link_cleanup_failure_still_reports_a_committed_success` | Asserts `temp_cleanup_deferred=True`, final path exists, byte count/hash correct | ✓ PASS |
-| Third-instance suppression-leak hunt (verification priority #2) | `python3 -c` against `_extract_html_urls`/`extract_html_hrefs`, `<body>` nested inside `template`/`object` | Archive link/URL leaked (`['http://evil.example.com/Order_U.zip']` instead of `[]`) for three variants (bare text, anchor href, and via `object` instead of `template`) | ✗ FAIL — new gap |
-| Git commit provenance for all cited gap-closure commits | `git cat-file -t <hash>` for 10 commits cited across 01-11/01-12/01-13 SUMMARY.md | All 10 resolve as real commits with timestamps consistent with the narrated sequence | ✓ PASS |
-| Debt-marker scan | `grep -rn "TBD\|FIXME\|XXX"` across all modified source files | No matches | ✓ PASS |
+| Full deterministic suite | `OPNIX_ENV_DISABLE=1 nix develop --impure --no-write-lock-file path:. --command python -m unittest discover -s tests` | 188 tests, 0 failures, 0 skips | ✓ PASS |
+| Differential test alone | `python -m unittest tests.test_html_visibility_differential -v` | 1 test, OK | ✓ PASS |
+| Reported false positive, re-investigated | html5lib tree dump of `<head><template><body></body></template>{url}</head><body>real</body></html>` (and `object`/`applet`/`iframe` variants) | `template`/`object`/`applet` are relocated into `<body>`; the URL becomes the container's `tail`, which belongs to `<body>`'s (visible) flow. `iframe` keeps its own text (`<body></body>` literal) but the URL is still in its visible `tail`. All four variants: genuinely rendered. | ✓ CONFIRMED false positive, not a leak |
+| Same shapes against current code | `_extract_html_urls` on all four variants | URL present in output for all four (correctly, since it is genuinely rendered) | ✓ PASS — correct behavior |
+| Genuinely-hidden containers still suppressed | `_extract_html_urls` on `script`/`style`/`template`/`noscript`/`title`/`object`/`applet`/`iframe` each independently wrapping the URL in `<body>` | `[]` for all eight | ✓ PASS |
+| Comment exclusion, text-after-`</script>` rendering | `_extract_html_urls` on each shape | `[]` for the comment; URL recovered for text after `</script>` | ✓ PASS |
+| `<head>` never suppresses trailing text (3 spellings) | html5lib tree dump of `<head/>`, bare unclosed `<head>`, explicit `<head></head>` | All three relocate the following text into `<body>` | ✓ PASS, confirms `test_head_never_suppresses_trailing_text_regardless_of_spelling` is correct, not a weakening |
+| Standalone vs. body-wrapped `<noscript>` document-position quirk | html5lib tree dump of both shapes | Standalone, document-initial `<noscript>` is auto-closed and its text is relocated to `<body>` (an unrelated insertion-mode quirk); body-wrapped `<noscript>` keeps its text inside itself (hidden) | ✓ PASS, confirms the 4 corrected tests reflect a real spec fact, not a convenient rewrite |
+| Old-code reproduction of the closed noscript leak | `_extract_html_urls` on `<p>x</p><noscript/><body>{url}</body>` against pre-01-14 (`036816c`) vs current code | Old: leaks the URL. New: `[]` | ✓ PASS — regression genuinely closed |
+| **Independent differential fuzz, same generator/oracle as the committed test, against the real pre-01-14 commit (`036816c`)** | Standalone re-import of `036816c:vicmap_acquire/candidates.py`, run through the committed test's generator+oracle, seed 20260914, 2000 docs | **24 leak-direction disagreements**, 112 strand-direction | ⚠️ Confirms the test has teeth (nonzero), but **contradicts** the "370/2000" figure in `01-14-TASK3-RED.json`/`01-14-SUMMARY.md` by ~15x. Reproduced twice (fresh module import, and exact monkeypatch of the real test file) with identical results. See Anti-Patterns. |
+| **Independent adversarial fuzz, different harness** (different vocabulary, recursive nesting grammar to depth 5, different oracle traversal, generalized false-positive shape at 20% frequency) | 5 seeds × 3000 docs = 15,000 documents against current code | 0 leak-direction disagreements across all 15,000; strand counts high (as expected — the generator deliberately omits closing tags and nests aggressively, and strands fail closed, which is a correctness/availability concern only, per the plan's own framing) | ✓ PASS — corroborates the leak class is closed at a scale larger than the project's own test |
+| Debt-marker scan | `grep -rn "TBD\|FIXME\|XXX"` across `vicmap_acquire/candidates.py`, `tests/test_candidates.py`, `tests/test_html_visibility_differential.py` | No matches | ✓ PASS |
+| Old model fully deleted, not disabled | `grep -rn "_AnchorCollector\|_NON_RENDERED\|_VOID_ELEMENTS\|non_rendered_depth" vicmap_acquire/ tests/` | One historical comment only, no code reference | ✓ PASS |
+| Scope of 01-14's file changes | `git diff --stat` between last 01-13 commit (`90a7ad7`) and last 01-14 commit (`58fd74c`) | Only `vicmap_acquire/candidates.py`, `tests/test_candidates.py`, `tests/test_html_visibility_differential.py` (new) changed | ✓ PASS — no guarantee-bearing module outside `candidates.py` was touched |
 
-## Probe Execution
+### Probe Execution
 
-No executable `probe-*.sh` was declared or found for this phase. N/A.
+No probes declared for this phase; none found under `scripts/*/tests/probe-*.sh`. Skipped.
 
-## Requirements Coverage
+### Requirements Coverage
 
 | Requirement | Source Plans | Description | Status | Evidence |
 |---|---|---|---|---|
-| MAIL-01 | 01-01, 01-02, 01-05, 01-09, 01-10, 01-11 | Authenticate/confirm configured mailbox without credential/body disclosure | ✓ SATISFIED | Unchanged plus tenant-scope attestation now honestly recorded as a mitigated residual risk rather than a false "scoped" claim. |
-| MAIL-02 | 01-01, 01-02, 01-03, 01-05, 01-06, 01-07, 01-09, 01-10, 01-11, 01-12, 01-13 | Bounded Inbox scan and configured candidate recognition | ✗ BLOCKED | A third instance of the non-rendered-content suppression-leak defect remains open (see gap above). `REQUIREMENTS.md` marks MAIL-02 Complete; this marking is not earned. |
-| MAIL-03 | 01-01, 01-03, 01-05, 01-09, 01-11 | Deterministically select exactly one and show redacted identity | ✓ SATISFIED | Selection algorithm itself (given a correct candidate set) is sound and independently confirmed. |
-| MAIL-04 | 01-01, 01-04, 01-05, 01-08 | Download one artifact only through approved bounded HTTPS | ✓ SATISFIED | Bucket/path binding, per-hop authorization, and finalization commit-point are all independently confirmed. |
-| MAIL-05 | 01-01, 01-04, 01-05, 01-09 | Show exact artifact byte count and checksum | ✓ SATISFIED | Fingerprint contract now consistent end to end; policy validator prevents publish-then-fail. |
+| MAIL-01 | 01-01, 01-02, 01-05, 01-09, 01-10, 01-11 | Authenticate/confirm configured mailbox without credential/body disclosure | ✓ SATISFIED | Unchanged. |
+| MAIL-02 | 01-01–01-14 | Bounded Inbox scan and configured candidate recognition | ✓ SATISFIED | The recognition defect class is closed (tree-based visibility, differential-fuzz-verified per above). `REQUIREMENTS.md` marks MAIL-02 Complete again (commit `a677a3f`, executor's own restoration after this plan) — this marking is now earned. |
+| MAIL-03 | 01-01, 01-03, 01-05, 01-09, 01-11 | Deterministically select exactly one and show redacted identity | ✓ SATISFIED | Unchanged. |
+| MAIL-04 | 01-01, 01-04, 01-05, 01-08 | Download one artifact only through approved bounded HTTPS | ✓ SATISFIED | Unchanged. |
+| MAIL-05 | 01-01, 01-04, 01-05, 01-09 | Show exact artifact byte count and checksum | ✓ SATISFIED | Unchanged. |
 
-No Phase 1 requirement is orphaned. MAIL-02 is the only requirement whose `REQUIREMENTS.md` "Complete" marking is not currently earned by the codebase.
+REQUIREMENTS.md already reflects MAIL-02 as `[x]` Complete (restored by the executor in commit `a677a3f`, "docs(01-14): update state and roadmap after plan completion"). No further edit to REQUIREMENTS.md is needed from this verification.
 
 ## Prohibition Gate
 
+Unchanged from the prior round; `origin.py`, `download.py`, `graph.py`, `evidence.py` were not touched by 01-14 and the full suite (including `test_graph.py`, `test_download.py`, `test_evidence.py`, `test_origin.py`) remains green.
+
 | Prohibition | Automated evidence | Disposition |
 |---|---|---|
-| PROHIB-01 — no mailbox mutation | 4 named tests in `tests/test_graph.py::GraphReadOnlyEnforcementTest`, all read and confirmed to test the claim (read-only calls only, no mutation endpoint touched, no mutation callable exposed, non-Inbox folder rejected pre-request) | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 |
-| PROHIB-02 — no Graph/ambient authority at artifact host | 2 named tests in `tests/test_download.py`, read and confirmed (auth/cookies cleared, `trust_env=False`, manual redirects, TLS verify, timeout tuple) | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 |
-| PROHIB-03 — no incomplete/failed/over-limit final publication | 8 named tests in `tests/test_download.py`, read and confirmed (concurrent-winner, post-link cleanup, pre-commit timeout/over-limit/short-write/length-mismatch/existing-path families, keyboard-interrupt cleanup) | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 |
-| PROHIB-04 — no substitution of an older/different order's artifact after failure | 1 named test in `tests/test_evidence.py`, read line-by-line and confirmed it asserts `download_artifact` is called exactly once with the *newest* candidate's URL, not the older one | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 |
-| PROHIB-05 — no automatic widening of the trust policy from a received message | 4 named tests plus `test_origin.py`'s unauthenticated-origin rejections, read and confirmed; also corroborated by 01-11/01-12's own history (the ready message initially failed recognition and was fixed without relaxing any trust value) | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 |
-
-All five dispositions are genuinely evidenced — this is a real improvement over the initial verification's finding of three descriptor-less, unresolved prohibitions.
+| PROHIB-01 — no mailbox mutation | 4 named tests in `tests/test_graph.py::GraphReadOnlyEnforcementTest` | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 (carried forward) |
+| PROHIB-02 — no Graph/ambient authority at artifact host | 2 named tests in `tests/test_download.py` | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 (carried forward) |
+| PROHIB-03 — no incomplete/failed/over-limit final publication | 8 named tests in `tests/test_download.py` | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 (carried forward) |
+| PROHIB-04 — no substitution of an older/different order's artifact after failure | 1 named test in `tests/test_evidence.py` | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 (carried forward) |
+| PROHIB-05 — no automatic widening of the trust policy from a received message | 4 named tests plus `test_origin.py`'s unauthenticated-origin rejections | ✓ accepted, bhillermann@vegetationlink.com.au, 2026-09-14 (carried forward) |
 
 ## Test Quality Audit
 
-| Test File | Linked Reqs | Active | Skipped | Circular | Assertion Level | Verdict |
-|---|---|---:|---:|---:|---|---|
-| `tests/test_candidates.py` | MAIL-02, MAIL-03 | ~65 | 0 | 0 | Behavioral/value | ✗ Still incomplete — the 15 new CR-01/CR-02 regressions raise coverage against known-realistic markup, but no test covers a `<body>` nested inside a non-raw-text non-rendered container (the third instance found in this verification). This is the same "tidy fixture" class flagged twice before. |
-| `tests/test_download.py` | MAIL-04, MAIL-05 | ~50 | 0 | 0 | Behavioral/value | ✓ Commit-point and per-hop redirect authorization now covered with production-realistic shapes. |
-| `tests/test_evidence.py` | MAIL-01, MAIL-03, MAIL-05, orchestration | ~55 | 0 | 0 | Behavioral/value | ✓ Failing-sink and shared-policy-contract cases now covered. |
-| `tests/test_graph.py` | MAIL-01, MAIL-02 | ~40 | 0 | 0 | Behavioral/value | ✓ Connection-level MIME request-count assertions close the prior production-shape gap. |
-| `tests/test_origin.py` | MAIL-02 (authenticity) | 19 | 0 | 0 | Behavioral/value | ✓ DMARC absence/blank/unparseable and live-shape acceptance all covered. |
-| `tests/test_repository_policy.py` | none (infra hygiene) | 3 | 0 | 0 | Behavioral (real `git check-ignore`) | ✓ Exercises the real tool, not pattern text. |
-
-**Disabled tests on requirements:** 0
-**Circular patterns detected:** 0
-**New defect class instance found in this audit:** 1 (see gap above) — this is the third occurrence of "the fix is correct against every markup shape a human wrote as a test, but the underlying model has no concept of nested/foreign tokenizer contexts, so a shape one step more adversarial than the existing regressions defeats it again."
+| Test File | Linked Reqs | Active | Skipped | Assertion Level | Verdict |
+|---|---|---|---|---|---|
+| `tests/test_candidates.py` | MAIL-02, MAIL-03 | 58 | 0 | Behavioral/value | ✓ Complete — the recognition guarantee is now backed by a real spec-compliant parser rather than hand-picked cases, and a differential fuzz closes the class the hand-picked cases couldn't reach. |
+| `tests/test_html_visibility_differential.py` (new) | MAIL-02 | 1 (2000-document fuzz inside it) | 0 | Property/differential | ⚠ Passes and the oracle is genuinely independent, but its own recorded proof-of-teeth measurement (370/2000) is not reproducible (24/2000 measured independently) — see Anti-Patterns. |
+| `tests/test_download.py` | MAIL-04, MAIL-05 | ~50 | 0 | Behavioral/value | ✓ Unchanged, carried forward. |
+| `tests/test_evidence.py` | MAIL-01, MAIL-03, MAIL-05 | ~55 | 0 | Behavioral/value | ✓ Unchanged, carried forward. |
+| `tests/test_graph.py` | MAIL-01, MAIL-02 | ~40 | 0 | Behavioral/value | ✓ Unchanged, carried forward. |
+| `tests/test_origin.py` | MAIL-02 (authenticity) | 19 | 0 | Behavioral/value | ✓ Unchanged, carried forward. |
+| `tests/test_repository_policy.py` | none | 3 | 0 | Behavioral (real `git check-ignore`) | ✓ Unchanged, carried forward. |
 
 ## Anti-Patterns and Review Findings
 
 | Finding | Status | Verdict |
 |---|---|---|
-| CR-01 (self-closing non-void tags leak content) | ✅ CLOSED | Independently reproduced fixed against the review's exact exploit snippets. |
-| CR-02 (omitted `</head>` strands suppression) | ✅ CLOSED | Independently reproduced fixed against the review's exact exploit snippet. |
-| WR-01 (DMARC `header.from` absence more permissive than mismatch) | ✅ CLOSED | Independently reproduced fixed against the review's exact exploit MIME. |
-| **New: `<body>` nested in template/object/iframe/applet prematurely unwinds suppression** | 🛑 OPEN — BLOCKER | Third instance of the same class; see gap above. `candidates.py` was modified by 01-07/01-12/01-13, all after the prior `verified:` timestamp, so this is in-scope for this re-verification round regardless of the convergence-gate's evidence bar — and deterministic reproduction is provided regardless. |
-| WR-02 (MSO conditional comments unconditionally suppressed) | ⚠ OPEN — not blocking | Explicitly deferred by 01-13 as availability-only (fail-closed, no security exposure); consistent with the review's own severity assessment. |
-| WR-03/new (SafeFailure events never carry `order_id`/fingerprints) | ⚠ OPEN — not blocking | Explicitly deferred by 01-13; audit/operability concern only, no disclosure risk (errs toward under-sharing). |
-| IN-01 (duplicated provider-logger suppression lists) | ℹ OPEN — informational | No functional impact today; maintenance hazard only. |
-| IN-02 (`_fsync_directory` non-`OSError` exception assumption) | ℹ OPEN — informational | Not reachable with current call sites. |
+| Nested `<body>` inside `template`/`object`/`applet` (prior round's "third instance") | ✅ CLOSED, record corrected | The specific cited example was a false positive (html5lib genuinely renders that content); the broader structural claim (flat counter can't model HTML nesting) was true and is what this plan fixed via a full tree-based rewrite. |
+| **RED-evidence quantitative discrepancy**: `01-14-TASK3-RED.json` and `01-14-SUMMARY.md` claim 370/2000 leak-direction disagreements against the pre-01-14 implementation; independently reproduced (twice, two methods) as 24/2000 against the same seed/generator/oracle/commit | ⚠ OPEN — non-blocking | Does not change the goal-achievement verdict (the property proved — nonzero leaks pre-fix, zero post-fix — holds), but the specific number in the TDD evidence trail is materially wrong (~15x) and should not be relied upon uncorrected. Recorded here as the authoritative correction. Recommend the executor re-measure and correct `01-14-TASK3-RED.json`/`01-14-SUMMARY.md`, or record an explicit override if the discrepancy's origin is understood and accepted. |
+| CR-01, CR-02, WR-01 (all prior findings) | ✅ CLOSED | Unchanged from prior round; regression-checked via full suite. |
+| WR-02 (MSO conditional comments unconditionally suppressed) | ⚠ OPEN — not blocking | Unchanged, still explicitly deferred (availability-only, fail-closed). |
+| WR-03/new (SafeFailure events never carry `order_id`/fingerprints) | ⚠ OPEN — not blocking | Unchanged, still explicitly deferred. |
+| IN-01, IN-02 (informational) | ℹ OPEN | Unchanged. |
 
-No unreferenced `TBD`, `FIXME`, or `XXX` debt markers were found in any file modified across the gap-closure plans.
+No unreferenced `TBD`, `FIXME`, or `XXX` debt markers were found in any file modified by 01-14.
 
 ## Disconfirmation Pass
 
-- **The one thing that should have been re-tested most aggressively — HTML suppression — is exactly where a new defect was found.** Three separate, structurally distinct triggers (void elements in 01-12, self-closing spellings in CR-01, omitted `</head>` in CR-02, and now nested `<body>` in a non-raw-text container) have each defeated the same guarantee. This is not a coincidence of unlucky test selection; it is evidence that a flat integer depth counter cannot soundly model HTML's tree-construction rules, and each fix so far has narrowed the class of adversarial input rather than eliminating the structural cause.
-- **Everything downstream of "authentic origin" is now solid.** The DKIM/DMARC/compauth check, the bucket/path prefix constraint on every redirect hop, and the finalization commit point were all independently reproduced and hold up under direct scrutiny — this is genuine, substantial progress since the initial verification, not narrative dressing.
-- **The live record's redaction and provenance both hold up.** The 2026-09-14 edit to `01-LIVE-VERIFICATION.md` only touched attestation/disposition text (correcting a previously false tenant-scope claim), not the underlying transaction facts, confirmed by diffing the two committed versions.
+- **The false-positive correction was verified against html5lib's own parse tree, not accepted on narrative.** All four hidden-container variants (`template`, `object`, `applet`, `iframe`) were dumped directly; each relocates its content such that the trailing URL is genuinely part of `<body>`'s rendered flow.
+- **The "370/2000" claim did not survive independent reproduction.** This is exactly the kind of unverified quantitative claim the adversarial stance exists to catch — it was checked by execution, not by re-reading the SUMMARY, and found wrong by roughly an order of magnitude. The underlying qualitative claim (test has teeth) survived a stricter, independently-authored 15,000-document fuzz.
+- **Scope of change was verified structurally, not assumed.** `git diff --stat` between the last commit of 01-13 and the last commit of 01-14 confirms exactly three files changed in the trust path (`candidates.py`, `test_candidates.py`, the new differential test file); every other guarantee-bearing module was untouched, which is why their re-verification here is a regression check (full suite green) rather than a full re-derivation.
 
 ## Decision Coverage
 
-Not independently re-derived line-by-line in this pass (non-blocking gate); the initial verification's finding that all 20 trackable CONTEXT.md decisions were honored was not contradicted by anything found in this re-verification, and no new decision was introduced that appears abandoned.
+Not independently re-derived line-by-line in this pass (non-blocking gate, consistent with the prior round). Nothing found in this re-verification contradicts the prior finding that all trackable CONTEXT.md decisions were honored, and 01-14 introduced no new decision that appears abandoned; its own key-decisions (html5lib via pinned nixpkgs, flake.nix left untracked, RED evidence gathered empirically) are all confirmed above.
 
 ## Human Verification Required
 
-None beyond what the operator has already performed. No additional live mailbox run is recommended until the newly-found gap is closed — per PROHIB-05's own established discipline, do not relax any trust value to force a message through; fix the parser model, add the missing regression class, then perform (or reuse, since no policy value needs to change) a controlled proof.
+None. The live mailbox check was not re-run live in this verification pass (per the task's explicit instruction not to download an artifact); its "no new download" claim is corroborated indirectly but strongly: `01-LIVE-VERIFICATION.md` is untouched since 01-11, and `artifacts/Order_OK0VUZ.zip` on disk still carries its original 2026-09-09 timestamp. This is the same evidentiary posture the prior verification round accepted for this class of claim.
 
 ## Gaps Summary
 
-The phase has made genuine, substantial, independently-verified progress: five of six original gaps plus the extra-GET warning are closed with real fixes and real tests, not narrative. The authenticity chain the initial verification found completely absent is now real. The one remaining gap is a third instance of the exact defect class the phase has now produced three times (a production outage, two code-review Criticals, and now this): the HTML suppression model in `vicmap_acquire/candidates.py` is a flat counter that cannot express which non-rendered container is actually open, and each targeted fix has closed one specific trigger rather than the structural cause. This blocks the phase goal because it falsifies "only a genuinely displayed archive occurrence can qualify a candidate" (roadmap SC2 / MAIL-02) via a reproducible, deterministic exploit against the current code. `REQUIREMENTS.md` marking MAIL-02 Complete is not currently earned.
+None. The one blocking gap from the prior round is closed: the flat suppression-counter model that had been patched three times (01-12, CR-01/CR-02 via 01-13, and this round's reported fourth instance) is now replaced wholesale with a real html5lib parse-tree walk, backed by a permanent differential test against an independent oracle and corroborated by a much larger independent fuzz run for this verification. The specific example that triggered this round's gap-closure plan was a false positive, now corrected in the record; the structural defect class it stood in for was real and is now closed. One non-blocking evidentiary finding is recorded (an inflated RED-evidence figure) for the executor to correct going forward, but it does not reopen the gap.
 
 ---
 
-_Verified: 2026-09-14T12:00:00Z_
+_Verified: 2026-09-14T13:10:00Z_
 _Verifier: Claude (gsd-verifier)_

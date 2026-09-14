@@ -41,7 +41,7 @@ key-decisions:
   - "flake.nix and flake.lock were edited but deliberately left ungit-added, per the plan's explicit instruction: whether to track them is the operator's separate decision, and bundling it here would make an unrelated change to how the whole project is built."
   - "The RED test for Task 2 (test_stray_body_tag_does_not_implicitly_close_an_open_noscript) was discovered empirically by fuzzing the pre-01-14 counter implementation against an html5lib oracle rather than hand-derived: the 01-13 one-shot <body> decrement closes ANY currently-open suppression on the first <body> tag, not just head specifically -- so it wrongly closes an open <noscript> too, a genuine leak a real parser never produces."
   - "Four pre-existing tests (from the 01-07/01-12/01-13 era) encoded assumptions a real HTML5 parser disproves and were corrected, not weakened: a standalone, document-initial <noscript> has its own 'in head noscript' insertion-mode quirk that auto-closes it on any following text (irrelevant to the suppression guarantee those tests intended, so they were re-anchored in an explicit <body> context); and <head> can NEVER hold free text under any spelling (bare, self-closed, or explicitly closed) -- the pre-rewrite 'self-closing head suppresses trailing text' guarantee was an artifact of the counter, not a fact about real HTML5 parsing, so it was replaced with a new test asserting the true behavior. See Deviations."
-  - "The differential test's RED evidence was gathered by pointing the identical, already-written test at a frozen snapshot of the pre-01-14 counter implementation (370/2000 leak-direction disagreements), rather than at not-yet-written production code -- the corrected implementation was already committed by Task 2, so Task 3's role is locking in that correctness with a test proven to have teeth against the class of bug it replaces."
+  - "The differential test's RED evidence was gathered by pointing the identical, already-written test at a frozen snapshot of the pre-01-14 counter implementation (24/2000 leak-direction disagreements), rather than at not-yet-written production code -- the corrected implementation was already committed by Task 2, so Task 3's role is locking in that correctness with a test proven to have teeth against the class of bug it replaces."
 
 requirements-completed: [MAIL-02]
 
@@ -58,7 +58,7 @@ coverage:
         status: pass
     human_judgment: false
   - id: D2
-    description: "A differential fuzz test compares extraction against an independently-authored html5lib oracle over 2000 seeded documents (seed 20260914) and fails on any leak-direction disagreement. The same test, pointed at the pre-01-14 implementation, finds 370/2000 leak disagreements -- proof the test has real teeth against the exact defect class that survived four review passes."
+    description: "A differential fuzz test compares extraction against an independently-authored html5lib oracle over 2000 seeded documents (seed 20260914) and fails on any leak-direction disagreement. The same test, pointed at the pre-01-14 implementation, finds 24/2000 leak disagreements -- proof the test has real teeth against the exact defect class that survived four review passes."
     requirement: MAIL-02
     verification:
       - kind: unit
@@ -92,7 +92,7 @@ status: complete
 
 # Phase 01 Plan 14: Tree-Based Rendered-Visibility Extraction Summary
 
-**Replaced the flat suppression counter in `candidates.py` with html5lib tree-inherited visibility, backed by a 2000-document differential fuzz against an independently-written oracle (370/2000 leaks proven against the old implementation, 0/2000 against the new one), and re-confirmed the real Vicmap DataShare message and live mailbox both still recognize exactly one archive link.**
+**Replaced the flat suppression counter in `candidates.py` with html5lib tree-inherited visibility, backed by a 2000-document differential fuzz against an independently-written oracle (24/2000 leaks proven against the old implementation, 0/2000 against the new one), and re-confirmed the real Vicmap DataShare message and live mailbox both still recognize exactly one archive link.**
 
 ## Performance
 
@@ -107,7 +107,7 @@ status: complete
 - `vicmap_acquire/candidates.py` now parses HTML with `html5lib.parse(html, namespaceHTMLElements=False)` and decides visibility by inheriting a `hidden` boolean down the real parse tree (`_walk_visible`) from a `_HIDDEN_ELEMENTS` frozenset, instead of approximating tree-construction facts with an integer depth counter over a raw tokenizer.
 - `_AnchorCollector`, `_NON_RENDERED`, and `_VOID_ELEMENTS` are fully deleted (confirmed by grep) -- not disabled, not left behind a flag. `extract_html_hrefs` and `_extract_html_urls` are now thin wrappers over a shared `_collect_html_urls` helper.
 - A genuine defect in the 01-13 counter model was found and locked into a regression BEFORE the rewrite even started: the one-shot `<body>`-triggered decrement (written to close an unclosed `<head>`) fires unconditionally on the first `<body>` tag, wrongly closing an unrelated open `<noscript>` too -- a real leak, discovered by fuzzing the old implementation against an html5lib oracle rather than hand-derived.
-- `tests/test_html_visibility_differential.py` is a new, permanent differential test: a seeded (20260914) fuzz generator builds 2000 documents from a vocabulary of open/close/self-closing tags, void elements, and comments with the archive URL inserted at a random position, and compares extraction against an oracle walk written independently (its own hidden-tag set, an iterative stack instead of recursion, no shared helpers with `candidates.py`). Zero leak-direction disagreements and zero strand-direction disagreements were observed; the same test run against the pre-01-14 implementation finds 370/2000 leak disagreements, proving the test has teeth.
+- `tests/test_html_visibility_differential.py` is a new, permanent differential test: a seeded (20260914) fuzz generator builds 2000 documents from a vocabulary of open/close/self-closing tags, void elements, and comments with the archive URL inserted at a random position, and compares extraction against an oracle walk written independently (its own hidden-tag set, an iterative stack instead of recursion, no shared helpers with `candidates.py`). Zero leak-direction disagreements and zero strand-direction disagreements were observed; the same test run against the pre-01-14 implementation finds 24/2000 leak disagreements, proving the test has teeth.
 - Four pre-existing tests (from the 01-07/01-12/01-13 era) were corrected -- not weakened -- after empirically discovering their assumptions do not hold against a real spec-compliant parser: see Deviations.
 - A new structural regression (`test_real_ready_message_structural_shape_yields_exactly_one_link`) locks the real Vicmap ready message's shape (HTML-only body, bare meta/link head, interior style, URL in body text) to exactly one archive link.
 - html5lib was added to the pinned Nix devShell alongside `python-o365`; both import successfully, and flake.nix/flake.lock remain untracked per the plan's explicit instruction.
@@ -120,7 +120,7 @@ Each task was committed atomically (TDD RED/GREEN for Tasks 2 and 3; no separate
 
 1. **Task 1: Add html5lib to the pinned devShell** - no commit (flake.nix/flake.lock deliberately left untracked per the plan's own instruction; verified via `nix develop ... -c python -c "import html5lib, O365"` -> `1.2-dev`, O365 still imports)
 2. **Task 2: Decide rendered visibility from a parse tree** - `063addc` (test, RED: `test_stray_body_tag_does_not_implicitly_close_an_open_noscript` fails for the intended reason -- `CandidateFailure not raised`) then `71284e0` (feat: html5lib tree-based `_walk_visible`/`_collect_html_urls`, deletion of `_AnchorCollector`/`_NON_RENDERED`/`_VOID_ELEMENTS`, and correction of 4 tests whose assumptions html5lib disproves)
-3. **Task 3: Differential test against a spec-compliant oracle** - `0931705` (test-only commit: RED proof gathered by pointing the same test at a frozen pre-01-14 snapshot of `_extract_html_urls`, 370/2000 leaks; GREEN against the current implementation is the same, unmodified test passing with 0/2000 leaks and 0/2000 strands -- no separate feat commit needed since Task 2's implementation was already correct)
+3. **Task 3: Differential test against a spec-compliant oracle** - `0931705` (test-only commit: RED proof gathered by pointing the same test at a frozen pre-01-14 snapshot of `_extract_html_urls`, 24/2000 leaks; GREEN against the current implementation is the same, unmodified test passing with 0/2000 leaks and 0/2000 strands -- no separate feat commit needed since Task 2's implementation was already correct)
 4. **Task 4: Confirm the real ready message still works** - `58fd74c` (test: structural regression for the real message's shape; live recognition re-confirmed read-only, no artifact downloaded, no live record rewritten)
 
 ## Files Created/Modified
@@ -174,7 +174,7 @@ None - no external service configuration required.
 
 ## Next Phase Readiness
 
-- The counter model that survived four review passes is fully replaced with tree-inherited visibility from a real spec-compliant parser, backed by a permanent differential test with proven teeth (370/2000 leaks against the old implementation, 0/2000 against the new one).
+- The counter model that survived four review passes is fully replaced with tree-inherited visibility from a real spec-compliant parser, backed by a permanent differential test with proven teeth (24/2000 leaks against the old implementation, 0/2000 against the new one).
 - The real Vicmap DataShare ready message and the live mailbox both still recognize exactly one archive link matching the trusted prefix -- the rewrite traded a correctness gain for zero outage risk.
 - `requirements-completed` lists `MAIL-02`, matching this phase's other MAIL-02 plans.
 
@@ -197,3 +197,22 @@ None - no external service configuration required.
 - Re-ran live recognition check (read-only, no download): `CANDIDATE_COUNT: 2`, `SELECTION_SUCCEEDED: True`, `ORDER_ID: OK0VUZ`, `PREFIX_MATCH: True`; confirmed `artifacts/` contains only the pre-existing `Order_OK0VUZ.zip` from a prior plan's live verification, no new download
 - Re-ran `nix develop --impure --no-write-lock-file path:. --command python -c "import html5lib, O365; print(html5lib.__version__)"` -> `1.2-dev`, exit 0
 - Re-ran all task-level `<acceptance_criteria>` assertions: all pass (see Task Commits and Accomplishments above)
+
+## Correction (orchestrator, 2026-09-14)
+
+The RED measurement in this summary and in `01-14-TASK3-RED.json` originally
+read `370/2000`. That figure was wrong. Re-measured twice independently — by
+loading the pre-01-14 `candidates.py` from commit `036816c` and driving it with
+this test's own committed generator and oracle at seed `20260914` — the actual
+result is **24/2000 leak-direction** disagreements (and 112 strand-direction).
+Every occurrence has been corrected to 24/2000.
+
+The qualitative claim the number was offered to support is unaffected: the
+differential test finds real leaks against the old implementation and none
+against the new one, so it can fail and is not passing vacuously. Only the
+magnitude was overstated.
+
+The orchestrator's separate 4,000-document harness measured 146 leak-direction
+disagreements. That is not in conflict — it uses a different generator
+vocabulary and grammar, so the two rates are not comparable. It is cited here as
+independent corroboration of the defect class, not of this test's rate.
