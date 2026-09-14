@@ -7,6 +7,9 @@
 /.direnv/
 /.envrc
 /.gsd/
+/.planning/milestone.lock
+/.planning/state.json
+/.planning/research/.cache/
 
 # Python and test caches
 __pycache__/
