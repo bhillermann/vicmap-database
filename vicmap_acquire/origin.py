@@ -180,9 +180,15 @@ def verify_authenticated_origin(
 
             if "dmarc" in required_cf:
                 header_from = properties.get("header.from")
-                if header_from is not None and header_from != from_domain:
+                if not header_from or header_from != from_domain:
+                    # Symmetric with the dkim branch above: an absent,
+                    # blank, or unparseable header.from must fail the same
+                    # closed path as a present mismatched one. Treating
+                    # absence as "nothing to check" would make it more
+                    # permissive than a mismatch, which is the defect.
                     raise ValueError(
-                        "dmarc header.from disagrees with the From domain"
+                        "dmarc header.from is missing or disagrees with "
+                        "the From domain"
                     )
 
         return from_address
