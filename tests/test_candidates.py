@@ -647,6 +647,24 @@ class CandidateRecognitionTest(unittest.TestCase):
 
         self.assertEqual(0, parser.non_rendered_depth)
 
+    def test_stray_body_tag_does_not_implicitly_close_an_open_noscript(self):
+        # A flat depth counter cannot tell WHICH suppressing container is
+        # open. The one-shot <body>-triggered decrement (01-13) was written
+        # to close an unclosed <head>, but it fires on the first <body>
+        # start tag unconditionally -- so it also wrongly closes an open
+        # <noscript>, leaking content a real HTML5 parser never renders: a
+        # <body> element is inserted for a "before body content" <noscript>
+        # opened with self-closing syntax, and a second, later <body> start
+        # tag while one is already open is simply ignored (parse error,
+        # attributes-only merge) rather than closing anything. This is a
+        # tree-construction fact a flat counter cannot represent.
+        archive_url = _url()
+        html = f"<p>x</p><noscript/><body>{archive_url}</body>"
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(_metadata(), _mime(html=html))
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
 
 def _candidate(
     graph_message_id: str,

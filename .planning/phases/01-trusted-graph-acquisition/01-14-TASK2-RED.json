@@ -1,0 +1,9 @@
+{
+  "command": "OPNIX_ENV_DISABLE=1 nix develop --impure --no-write-lock-file path:. --command python -m unittest tests.test_candidates.CandidateRecognitionTest.test_stray_body_tag_does_not_implicitly_close_an_open_noscript -v",
+  "exitCode": 1,
+  "targetTest": "test_stray_body_tag_does_not_implicitly_close_an_open_noscript",
+  "targetFile": "tests/test_candidates.py",
+  "expected": "recognize_candidate raises CandidateAmbiguous (candidate_ambiguous) because the archive URL sits inside an open <noscript> a real HTML5 parser never closes on a stray second <body> tag",
+  "actual": "AssertionError: CandidateFailure not raised -- the flat depth counter's one-shot <body> decrement wrongly closed the open noscript, leaking the archive URL as a visible candidate",
+  "output": "TAP version 13\nnot ok 1 - test_stray_body_tag_does_not_implicitly_close_an_open_noscript\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n"
+}
