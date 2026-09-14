@@ -164,6 +164,65 @@ class HardenedOriginParserTest(unittest.TestCase):
         with self.assertRaises(OriginUnauthenticated):
             verify_authenticated_origin(_mime(auth_results=header), SENDER, _policy())
 
+    def test_dmarc_header_from_absent_entirely_is_rejected(self):
+        # Unlike the mismatched-value case above, this DMARC part carries
+        # no header.from property at all -- absence must fail the same
+        # closed path as a mismatch, not be skipped as "nothing to check".
+        header = (
+            "spf=pass smtp.mailfrom=maps.vic.gov.au;"
+            "dkim=pass (signature was verified) header.d=maps.vic.gov.au;"
+            "dmarc=pass action=none;"
+            "compauth=pass reason=100"
+        )
+        with self.assertRaises(OriginUnauthenticated) as caught:
+            verify_authenticated_origin(_mime(auth_results=header), SENDER, _policy())
+        self.assertEqual("origin_unauthenticated", caught.exception.code)
+
+    def test_dmarc_header_from_blank_or_whitespace_only_is_rejected(self):
+        # The tokenizer splits each Authentication-Results segment on
+        # whitespace before a token's value is ever inspected, so a value
+        # consisting purely of whitespace can never survive as non-empty
+        # token content -- it always resolves to the same reachable empty
+        # string as a quoted-empty value. Both spellings below exercise
+        # that same "blank" outcome through the two ways it is reachable:
+        # an explicit empty quoted value, and a bare trailing "=" with
+        # nothing after it.
+        blank_headers = (
+            _auth_header(header_from='""'),
+            (
+                "spf=pass smtp.mailfrom=maps.vic.gov.au;"
+                "dkim=pass header.d=maps.vic.gov.au;"
+                "dmarc=pass action=none header.from=;"
+                "compauth=pass reason=100"
+            ),
+        )
+        for header in blank_headers:
+            with self.subTest(header=header):
+                with self.assertRaises(OriginUnauthenticated) as caught:
+                    verify_authenticated_origin(
+                        _mime(auth_results=header), SENDER, _policy()
+                    )
+                self.assertEqual("origin_unauthenticated", caught.exception.code)
+
+    def test_dmarc_header_from_unparseable_as_a_domain_is_rejected(self):
+        header = _auth_header(header_from="not_a_domain###")
+        with self.assertRaises(OriginUnauthenticated) as caught:
+            verify_authenticated_origin(_mime(auth_results=header), SENDER, _policy())
+        self.assertEqual("origin_unauthenticated", caught.exception.code)
+
+    def test_dmarc_header_from_present_and_aligned_is_still_accepted(self):
+        # The real, live-observed verdict/property shape: dkim=pass,
+        # dmarc=pass, compauth=pass with header.d and header.from both
+        # naming the sending subdomain. The fix must not reject real mail.
+        header = _auth_header(
+            header_d="datashare.maps.vic.gov.au",
+            header_from="datashare.maps.vic.gov.au",
+        )
+        address = verify_authenticated_origin(
+            _mime(auth_results=header), SENDER, _policy()
+        )
+        self.assertEqual(SENDER, address)
+
     def test_from_header_cardinality_violations_are_rejected(self):
         subject = "Subject: Your DataShare Order OK0VUZ is ready to download\r\n"
         auth = f"Authentication-Results: {AUTH_RESULTS_PASS}\r\n"
