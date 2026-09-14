@@ -125,9 +125,21 @@ class _AnchorCollector(HTMLParser):
         self.urls: list[str] = []
         self.visible_urls: list[str] = []
         self.non_rendered_depth = 0
+        self._head_implicit_close_applied = False
 
     def handle_starttag(self, tag, attrs):
         casefolded = tag.casefold()
+        if casefolded == "body" and not self._head_implicit_close_applied:
+            # Every real HTML5 parser implicitly closes `head` the moment
+            # body content begins (the "in head" insertion mode's
+            # "anything else" clause), so an omitted `</head>` end tag can
+            # never permanently strand suppression for the rest of the
+            # document. This fires at most once, and only lowers the
+            # counter by the single level `head` itself could have raised
+            # -- it never fires again for a second `<body>` tag, so it
+            # cannot be used to repeatedly unwind suppression.
+            self._head_implicit_close_applied = True
+            self.non_rendered_depth = max(0, self.non_rendered_depth - 1)
         if casefolded in _NON_RENDERED:
             # A void element (meta, link) can never contain anything, so it
             # is neither a container to suppress nor an anchor to collect —
@@ -219,7 +231,9 @@ def extract_html_hrefs(html: str) -> list[str]:
     Hrefs on anchors nested inside non-rendered elements (script, style,
     template, noscript, head, title, meta, link, object, iframe, applet,
     xmp) or inside comments are excluded, without rendering or executing
-    HTML.
+    HTML. A `<body>` start tag implicitly closes an open `head` (matching
+    every real HTML5 parser), so an omitted `</head>` end tag can never
+    permanently strand suppression for the rest of the document.
     """
 
     parser = _AnchorCollector()
