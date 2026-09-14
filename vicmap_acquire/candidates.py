@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
-from html.parser import HTMLParser
 from typing import Callable, Iterable
 from urllib.parse import unquote, urlsplit
+
+import html5lib
 
 from vicmap_acquire.graph import MessageMetadata
 from vicmap_acquire.origin import OriginPolicy, verify_authenticated_origin
@@ -17,44 +18,36 @@ from vicmap_acquire.origin import OriginPolicy, verify_authenticated_origin
 
 _TEXT_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"']+")
 
-_NON_RENDERED = frozenset(
+# Elements whose entire subtree is never rendered to a reader. Visibility is
+# INHERITED down a real HTML5 parse tree from this set -- a node is hidden if
+# its own tag is here, or any ancestor's is -- rather than approximated by a
+# flat depth counter over a raw tokenizer. That inheritance is the whole
+# point of this rewrite: a real tree-construction algorithm (html5lib)
+# decides implicit closure, mis-nesting, and insertion-mode quirks (e.g. an
+# omitted `</head>`, a `<body>` start tag while one is already open, a
+# self-closing slash on a non-void element) exactly as a real browser would,
+# instead of a counter approximating them one patched shape at a time.
+#
+# `head` is included: html5lib's tree construction algorithm decides what is
+# actually inside `head` (including implicit closure the moment body content
+# begins), so no `01-13`-style one-shot decrement is needed here -- the real
+# parser already produces the correct tree.
+#
+# `meta` and `link` are deliberately NOT here: they are void elements with no
+# content model, so a real parser never nests anything inside them -- there
+# is nothing for them to suppress, and no special-casing is required the way
+# the old counter needed `_VOID_ELEMENTS` to avoid over-counting.
+_HIDDEN_ELEMENTS = frozenset(
     {
         "script",
         "style",
         "template",
         "noscript",
-        "head",
         "title",
-        "meta",
-        "link",
         "object",
-        "iframe",
         "applet",
-        "xmp",
-    }
-)
-
-# HTML void elements: elements that cannot contain anything (no end tag is
-# ever emitted for them in normal markup) and therefore can never suppress
-# content. `meta` and `link` are both non-rendered AND void: they remain in
-# `_NON_RENDERED` because that fact (they are never rendered) stays true, but
-# `_VOID_ELEMENTS` is what encodes that they have no contents to suppress.
-_VOID_ELEMENTS = frozenset(
-    {
-        "area",
-        "base",
-        "br",
-        "col",
-        "embed",
-        "hr",
-        "img",
-        "input",
-        "link",
-        "meta",
-        "param",
-        "source",
-        "track",
-        "wbr",
+        "iframe",
+        "head",
     }
 )
 
@@ -119,84 +112,60 @@ class Candidate:
             raise CandidateAmbiguous() from None
 
 
-class _AnchorCollector(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.urls: list[str] = []
-        self.visible_urls: list[str] = []
-        self.non_rendered_depth = 0
-        self._head_implicit_close_applied = False
+def _walk_visible(node, hidden: bool, urls: list[str], visible_urls: list[str]) -> None:
+    """Recurse a real html5lib parse tree, inheriting hidden-ness down it.
 
-    def handle_starttag(self, tag, attrs):
-        casefolded = tag.casefold()
-        if casefolded == "body" and not self._head_implicit_close_applied:
-            # Every real HTML5 parser implicitly closes `head` the moment
-            # body content begins (the "in head" insertion mode's
-            # "anything else" clause), so an omitted `</head>` end tag can
-            # never permanently strand suppression for the rest of the
-            # document. This fires at most once, and only lowers the
-            # counter by the single level `head` itself could have raised
-            # -- it never fires again for a second `<body>` tag, so it
-            # cannot be used to repeatedly unwind suppression.
-            self._head_implicit_close_applied = True
-            self.non_rendered_depth = max(0, self.non_rendered_depth - 1)
-        if casefolded in _NON_RENDERED:
-            # A void element (meta, link) can never contain anything, so it
-            # is neither a container to suppress nor an anchor to collect —
-            # it falls through untouched. A real non-rendered container
-            # raises the depth counter.
-            if casefolded not in _VOID_ELEMENTS:
-                self.non_rendered_depth += 1
-            return
-        if self.non_rendered_depth > 0:
-            return
-        if casefolded != "a":
-            return
-        for key, value in attrs:
-            if key.casefold() == "href" and isinstance(value, str):
-                self.urls.append(value)
+    `hidden` is the visibility state of NODE's own content: its `text` and
+    any `a` element's `href`. A child inherits `hidden` unless its own tag
+    is in `_HIDDEN_ELEMENTS` -- this inheritance down a real tree, decided
+    by html5lib's tree-construction algorithm, is what a flat depth counter
+    over a raw tokenizer could only approximate.
 
-    def handle_startendtag(self, tag, attrs):
-        casefolded = tag.casefold()
-        if casefolded in _VOID_ELEMENTS:
-            # A void element collects nothing and never touches the
-            # counter, whether written bare or with a trailing slash.
-            return
-        # HTML5 ignores a trailing "/" on any non-void, non-foreign
-        # element: the element is NOT closed by it and stays open exactly
-        # as an ordinary (unclosed) start tag would. Route through
-        # handle_starttag only -- never call handle_endtag here, or a
-        # self-closed non-rendered container (script/style/head/noscript/
-        # template/title) would net back to zero and let its "contents"
-        # leak into visible extraction, which is exactly what a mail
-        # reader never does.
-        self.handle_starttag(tag, attrs)
+    A comment node's `tag` is not a string (html5lib's etree treebuilder
+    represents it with a non-string sentinel). Its own content is always
+    skipped, but it does not change the hidden state its children or `tail`
+    inherit -- a comment is not a hiding container.
 
-    def handle_endtag(self, tag):
-        casefolded = tag.casefold()
-        if casefolded in _NON_RENDERED and casefolded not in _VOID_ELEMENTS:
-            # A stray `</meta>` or `</link>` must never lower the counter —
-            # a void element has no contents, so its end tag (bare markup
-            # never emits one, but malformed input might) cannot be the
-            # closing half of a suppression scope.
-            self.non_rendered_depth = max(0, self.non_rendered_depth - 1)
+    A node's `tail` -- the text between its end tag and the next sibling --
+    belongs to its PARENT's rendered flow, not its own: text after
+    `</script>` is rendered even though the script itself is not. That is
+    why `tail` is gated on `hidden` (this node's own state, i.e. the
+    context its children/tail inherit), not on the child's own hidden
+    state.
+    """
 
-    def handle_data(self, data):
-        if self.non_rendered_depth > 0:
-            return
-        self.visible_urls.extend(extract_text_urls(data))
+    tag = node.tag
+    if isinstance(tag, str):
+        own_hidden = hidden or tag.casefold() in _HIDDEN_ELEMENTS
+        if not own_hidden:
+            if tag.casefold() == "a":
+                href = node.get("href")
+                if href is not None:
+                    urls.append(href)
+            if node.text:
+                visible_urls.extend(extract_text_urls(node.text))
+    else:
+        # Comment (or other non-element) node: contributes no content of
+        # its own, and does not add hiddenness for its children/tail.
+        own_hidden = hidden
 
-    def handle_comment(self, data):
-        return
+    for child in node:
+        _walk_visible(child, own_hidden, urls, visible_urls)
+        if child.tail and not own_hidden:
+            visible_urls.extend(extract_text_urls(child.tail))
 
-    def handle_decl(self, decl):
-        return
 
-    def handle_pi(self, data):
-        return
+def _collect_html_urls(html: str) -> tuple[list[str], list[str]]:
+    """Parse `html` with a spec-compliant HTML5 parser and return
+    (anchor hrefs, rendered-text URL occurrences), both in document order,
+    from non-hidden context only.
+    """
 
-    def unknown_decl(self, data):
-        return
+    urls: list[str] = []
+    visible_urls: list[str] = []
+    root = html5lib.parse(html, namespaceHTMLElements=False)
+    _walk_visible(root, False, urls, visible_urls)
+    return urls, visible_urls
 
 
 def _subject_order_id(subject: str, allowed_order_ids: tuple[str, ...]) -> str | None:
@@ -228,23 +197,24 @@ def extract_text_urls(text: str) -> list[str]:
 def extract_html_hrefs(html: str) -> list[str]:
     """Return anchor href occurrences from rendered HTML context only.
 
-    Hrefs on anchors nested inside non-rendered elements (script, style,
-    template, noscript, head, title, meta, link, object, iframe, applet,
-    xmp) or inside comments are excluded, without rendering or executing
-    HTML. A `<body>` start tag implicitly closes an open `head` (matching
-    every real HTML5 parser), so an omitted `</head>` end tag can never
-    permanently strand suppression for the rest of the document.
+    Hrefs on anchors nested inside a hidden element (script, style,
+    template, noscript, head, title, object, iframe, applet) or inside a
+    comment are excluded. Visibility is decided by parsing `html` with a
+    real, spec-compliant HTML5 parser (html5lib) and inheriting hidden-ness
+    down the resulting tree, so implicit closure, mis-nesting, and
+    insertion-mode quirks (an omitted `</head>`, a stray `<body>` tag, a
+    self-closing slash on a non-void element) are resolved exactly as a
+    real browser resolves them, not approximated by a raw-tokenizer depth
+    counter.
     """
 
-    parser = _AnchorCollector()
-    parser.feed(html)
-    return parser.urls
+    urls, _visible_urls = _collect_html_urls(html)
+    return urls
 
 
 def _extract_html_urls(html: str) -> list[str]:
-    parser = _AnchorCollector()
-    parser.feed(html)
-    return parser.urls + parser.visible_urls
+    urls, visible_urls = _collect_html_urls(html)
+    return urls + visible_urls
 
 
 def _archive_links(urls: Iterable[str]) -> list[tuple[str, str]]:

@@ -11,7 +11,7 @@ from vicmap_acquire.candidates import (
     CandidateAmbiguous,
     CandidateError,
     CandidateNone,
-    _AnchorCollector,
+    _extract_html_urls,
     recognize_candidate,
     select_candidate,
 )
@@ -345,6 +345,18 @@ class CandidateRecognitionTest(unittest.TestCase):
         # text the way a real container can. See
         # test_void_elements_do_not_suppress_paired_content_even_when_explicitly_closed
         # for the corrected, void-element-specific behavior this replaces.
+        #
+        # Each shape is wrapped in an explicit <body> so the document has
+        # already established body content by the time the tag opens. This
+        # matters specifically for `noscript`: a real HTML5 parser gives a
+        # *standalone*, document-initial `<noscript>` its own "in head
+        # noscript" insertion mode, which closes noscript the instant any
+        # non-whitespace text follows and relocates that text into an
+        # implicitly-created <body> -- a genuine, spec-verified fact about
+        # *document position* (html5lib confirms it), not a suppression gap.
+        # An explicit `<body>` wrapper sidesteps that irrelevant quirk so
+        # this test proves what it says: the tag suppresses its sole
+        # archive URL.
         archive_url = _url()
         for tag in (
             "script",
@@ -356,10 +368,9 @@ class CandidateRecognitionTest(unittest.TestCase):
             "iframe",
         ):
             with self.subTest(tag=tag):
+                html = f"<body><{tag}>{archive_url}</{tag}></body>"
                 with self.assertRaises(CandidateError) as caught:
-                    _recognize(
-                        _metadata(), _mime(html=f"<{tag}>{archive_url}</{tag}>")
-                    )
+                    _recognize(_metadata(), _mime(html=html))
                 self.assertEqual("candidate_ambiguous", caught.exception.code)
 
     def test_void_elements_do_not_suppress_paired_content_even_when_explicitly_closed(
@@ -463,14 +474,24 @@ class CandidateRecognitionTest(unittest.TestCase):
 
         self.assertEqual(archive_url, candidate.artifact_url)
 
-    def test_suppression_counter_returns_to_zero_after_realistic_bare_head(self):
+    def test_hidden_state_does_not_leak_past_the_realistic_bare_head(self):
+        # There is no depth counter to inspect against a tree-based
+        # implementation, so this proves the equivalent guarantee
+        # behaviorally: visibility re-opens correctly after the bare head,
+        # and stays open for content that follows the archive URL too --
+        # nothing about the head's hidden state gets stuck applying to the
+        # rest of the document.
         archive_url = _url()
-        html = f"<html>{_bare_email_head()}<body><p>{archive_url}</p></body></html>"
+        trailing_marker = "https://example.invalid/still-visible-after"
+        html = (
+            f"<html>{_bare_email_head()}<body><p>{archive_url}</p>"
+            f"<p>{trailing_marker}</p></body></html>"
+        )
 
-        parser = _AnchorCollector()
-        parser.feed(html)
+        urls = _extract_html_urls(html)
 
-        self.assertEqual(0, parser.non_rendered_depth)
+        self.assertIn(archive_url, urls)
+        self.assertIn(trailing_marker, urls)
 
     def test_bare_and_self_closing_void_spellings_are_equivalent(self):
         archive_url = _url()
@@ -497,27 +518,25 @@ class CandidateRecognitionTest(unittest.TestCase):
                 self.assertEqual(archive_url, bare_candidate.artifact_url)
                 self.assertEqual(archive_url, self_closing_candidate.artifact_url)
 
-                bare_parser = _AnchorCollector()
-                bare_parser.feed(bare_html)
-                self_closing_parser = _AnchorCollector()
-                self_closing_parser.feed(self_closing_html)
                 self.assertEqual(
-                    bare_parser.non_rendered_depth,
-                    self_closing_parser.non_rendered_depth,
+                    _extract_html_urls(bare_html),
+                    _extract_html_urls(self_closing_html),
                 )
 
-    def test_stray_void_end_tag_does_not_lower_the_counter(self):
-        # A stray `</meta>` sits inside `<noscript>`, a genuine (non-CDATA)
-        # non-rendered container, so html.parser actually parses it as an
-        # end tag (unlike inside `<script>`/`<style>`, which html.parser
-        # scans as raw CDATA text and never calls handle_endtag at all).
-        # This is the shape that actually exercises handle_endtag's
-        # void-element test.
+    def test_stray_void_end_tag_does_not_re_enable_collection(self):
+        # A stray `</meta>` end tag inside an open `<noscript>` is a parse
+        # error a real HTML5 parser ignores outright (a void element's end
+        # tag never matches anything on the stack of open elements), so it
+        # must not re-open collection for what follows. Wrapped in an
+        # explicit <body> for the same document-position reason as
+        # test_every_non_rendered_container_tag_suppresses_its_sole_archive_url:
+        # a standalone, document-initial `<noscript>` has its own unrelated
+        # "in head noscript" auto-close quirk this test is not about.
         archive_url = _url()
         with self.assertRaises(CandidateError) as caught:
             _recognize(
                 _metadata(),
-                _mime(html=f"<noscript></meta>{archive_url}</noscript>"),
+                _mime(html=f"<body><noscript></meta>{archive_url}</noscript></body>"),
             )
 
         self.assertEqual("candidate_ambiguous", caught.exception.code)
@@ -541,12 +560,25 @@ class CandidateRecognitionTest(unittest.TestCase):
         # HTML5 ignores a trailing "/" on a non-void element: the element
         # stays open and swallows what follows, exactly like an ordinary
         # unclosed start tag. A mail reader would never display this text.
+        #
+        # `head` is deliberately excluded here and covered by its own test
+        # below (test_head_never_suppresses_trailing_text_regardless_of_spelling):
+        # unlike these elements, `head`'s content model has no place for
+        # free text AT ALL, self-closed or not -- a real HTML5 parser
+        # relocates ANY text encountered while parsing head straight into
+        # an implicitly-created <body>, so "self-closing doesn't close it"
+        # was never the operative fact for `head` to begin with.
+        #
+        # `noscript` is wrapped in an explicit <body>, for the same
+        # document-position reason given in
+        # test_every_non_rendered_container_tag_suppresses_its_sole_archive_url:
+        # a standalone, document-initial `<noscript>` has its own unrelated
+        # "in head noscript" auto-close quirk this test is not about.
         archive_url = _url()
         self_closing_shapes = {
             "script": f'<script src="x"/>{archive_url}',
             "style": f"<style/>{archive_url}",
-            "head": f"<head/>{archive_url}",
-            "noscript": f"<noscript/>{archive_url}",
+            "noscript": f"<body><noscript/>{archive_url}</body>",
             "template": f"<template/>{archive_url}",
             "title": f"<title/>{archive_url}",
         }
@@ -555,6 +587,29 @@ class CandidateRecognitionTest(unittest.TestCase):
                 with self.assertRaises(CandidateError) as caught:
                     _recognize(_metadata(), _mime(html=html))
                 self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_head_never_suppresses_trailing_text_regardless_of_spelling(self):
+        # `head`'s content model admits only a fixed whitelist of element
+        # children (title, style, script, meta, link, base, noscript,
+        # template) -- free text is never valid content of `head` under
+        # the HTML5 spec, so a real parser relocates ANY text encountered
+        # while "in head" into an implicitly-created <body> and renders it
+        # there. This holds for a self-closed `<head/>`, a bare unclosed
+        # `<head>`, and an explicitly closed `<head></head>` alike -- the
+        # spelling of the tag was never what mattered. (The pre-rewrite
+        # counter model treated self-closing `<head/>` as suppressing
+        # trailing text; that was an artifact of the counter, not a fact
+        # about real HTML5 parsing, and does not survive the move to a
+        # real parse tree.)
+        archive_url = _url()
+        for spelling, html in {
+            "self_closing": f"<head/>{archive_url}",
+            "bare_unclosed": f"<head>{archive_url}",
+            "explicitly_closed": f"<head>{archive_url}</head>",
+        }.items():
+            with self.subTest(spelling=spelling):
+                candidate = _recognize(_metadata(), _mime(html=html))
+                self.assertEqual(archive_url, candidate.artifact_url)
 
     def test_self_closing_script_with_src_and_real_end_tag_control_is_still_suppressed(
         self,
@@ -636,16 +691,17 @@ class CandidateRecognitionTest(unittest.TestCase):
 
         self.assertEqual("candidate_ambiguous", caught.exception.code)
 
-    def test_suppression_counter_returns_to_zero_after_well_formed_document(self):
+    def test_hidden_state_does_not_leak_past_a_well_formed_head(self):
+        # Equivalent guarantee to the retired counter-reset check, expressed
+        # behaviorally: a well-formed <head> (title + meta) does not leave
+        # any hidden state applying past its own close.
         archive_url = _url()
         html = (
             "<html><head><title>Hi</title><meta charset='utf-8'></head>"
             f"<body><p>{archive_url}</p></body></html>"
         )
-        parser = _AnchorCollector()
-        parser.feed(html)
 
-        self.assertEqual(0, parser.non_rendered_depth)
+        self.assertEqual([archive_url], _extract_html_urls(html))
 
     def test_stray_body_tag_does_not_implicitly_close_an_open_noscript(self):
         # A flat depth counter cannot tell WHICH suppressing container is
