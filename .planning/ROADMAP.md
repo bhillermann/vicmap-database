@@ -6,7 +6,7 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 
 ## Phases
 
-- [ ] **Phase 1: Trusted Graph Acquisition** — Select one trusted ready-order message and download its bounded, checksummed artifact.
+- [x] **Phase 1: Trusted Graph Acquisition** — Select one trusted ready-order message and download its bounded, checksummed artifact.
 - [ ] **Phase 2: Safe Geospatial Discovery** — Safely unpack the artifact and build a complete, collision-free layer manifest.
 - [ ] **Phase 3: Validated PostGIS Staging** — Preflight the live database and load every selected layer into validated isolated staging tables.
 - [ ] **Phase 4: Transactional Publication and Access** — Atomically publish the order into `vicmap` and prove non-owner access with redacted evidence.
@@ -27,7 +27,9 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 3. The selected message yields one artifact through an approved HTTPS host while redirect, timeout, and size limits are enforced.
 4. The completed download reports its byte count and checksum for downstream provenance.
 
-**Plans:** 14/14 plans executed (5 executed, 6 gap-closure pending)
+**Plans:** 14/14 plans complete (5 original, 9 gap-closure)
+
+**Status:** Complete — verified 2026-09-14, 21/21 must-haves (`01-VERIFICATION.md`)
 
 Plans:
 
