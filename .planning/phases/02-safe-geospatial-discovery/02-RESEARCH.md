@@ -500,16 +500,20 @@ Note: a file cannot embed its own hash, so D-29's "with its own SHA-256 recorded
 | A5 | `pyogrio`/`pyproj` `[SUS]` package-legitimacy verdicts are metadata-lookup artifacts rather than genuine slopsquat risk | Package Legitimacy Audit | If wrong, a supply-chain-compromised package could be added to `flake.nix`; this is exactly why the protocol still requires a `checkpoint:human-verify` regardless of this session's mitigating context — the assumption does not skip that gate. |
 | A6 | `pyogrio`'s `geometry_type` string for ZM-dimensioned geometries follows the same `'<Base> Z'`/`'<Base> M'`/`'<Base> ZM'` pattern verified for `'Point Z'` | Common Pitfalls (Pitfall 3) | Only the `Z` case was directly tested this session (no `M`- or `ZM`-dimensioned fixture was built); if the pattern differs for `M`/`ZM`, a D-38 string-based hard-stop check written from this pattern could either over- or under-match on an `M`-dimensioned delivery. Low real-world risk since Vicmap deliveries are XY/XYZ, not measured geometries, but flagged for completeness. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **How does the manifest obtain "the Phase 1 message fingerprint" (D-32)?**
+*Both questions were closed during the `/gsd-plan-phase 02` run that consumed this research. Markers below record how.*
+
+1. **RESOLVED — How does the manifest obtain "the Phase 1 message fingerprint" (D-32)?**
+   > **Resolution:** the operator chose option (a). Phase 1's artifact publication now writes a durable `artifacts/Order_{id}.provenance.json` sidecar (`order_id`, `message_fingerprint`, `sha256`, `byte_count`) using `download.py`'s existing atomic publish idiom, and Phase 2 reads it as required input. Implemented by `02-02-PLAN.md` Task 1 (sidecar write, plus a `--provenance-only` backfill mode) and wired as a precondition in `02-02` Task 2 / `02-06` Task 3.
    - What we know: verified this session that `run_acquisition` computes this fingerprint locally and only ever renders it to stdout; it is never returned or persisted to a file.
    - What's unclear: whether the intended fix is (a) a small Phase-2-scoped amendment to `read_mailbox.py`/`vicmap_acquire` that writes a durable sidecar (e.g. `artifacts/Order_{id}.provenance.json` containing `{order_id, message_fingerprint, sha256, byte_count}`) at the moment Phase 1 publishes the artifact, or (b) something else the operator intends that this research did not anticipate.
    - Recommendation: the plan should include an explicit task that either (a) extends `DownloadResult`/`run_acquisition` to persist this value durably (smallest, most consistent-with-existing-patterns fix — mirrors the same atomic-publish idiom `_publish_artifact` already uses), or confirms with the operator that D-32 should be read as "record it if available, omit if not" for this first delivery. Do not let a plan silently invent a fingerprint value or skip the field without flagging it.
 
-2. **Does `ogrinfo`'s JSON schema reliably include `"precision"` for every driver/type combination that matters, or only for DBF-backed (Shapefile) numeric fields?**
+2. **RESOLVED (for planning) — Does `ogrinfo`'s JSON schema reliably include `"precision"` for every driver/type combination that matters, or only for DBF-backed (Shapefile) numeric fields?**
    - What we know: verified this session that Shapefile's `Real` fields report both `width` and `precision`; OpenFileGDB's `Real`/`Integer` fields report neither, even when explicitly cast to a specific numeric(width,precision) during test-fixture creation.
    - What's unclear: whether this is because OpenFileGDB genuinely has no precision concept for these types (most likely, since it stores native IEEE-754 doubles/int32s) or because the specific `ogr2ogr -sql CAST(...)` test performed this session failed to apply the cast as intended.
+   - **Resolution:** accepted as resolved for planning purposes; Pitfall 4's guidance (do not require width/precision universally) is what the plans build against, with the re-check carried forward as a flagged follow-up for a future delivery rather than a blocker.
    - Recommendation: treat this as resolved for planning purposes (Pitfall 4 already captures the practical guidance: don't require width/precision universally), but flag it so the executor validates against a second real Vicmap delivery if/when one becomes available, in case a future dataset ships a driver/type combination not seen in this session's testing.
 
 ## Environment Availability
