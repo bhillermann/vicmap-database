@@ -7,11 +7,11 @@
 
 ### Mail Acquisition
 
-- [ ] **MAIL-01**: Operator can authenticate with Microsoft Graph and confirm access to the configured automation mailbox without exposing credentials or message bodies.
-- [ ] **MAIL-02**: Operator can retrieve a bounded set of Inbox messages and identify ready-order candidates using configured sender and message markers.
-- [ ] **MAIL-03**: Operator can deterministically select exactly one ready-order message and see its redacted identity.
-- [ ] **MAIL-04**: Operator can download one artifact only from an approved HTTPS host, with redirect, timeout, and size limits enforced.
-- [ ] **MAIL-05**: Operator can see the downloaded artifact's byte count and checksum.
+- [x] **MAIL-01**: Operator can authenticate with Microsoft Graph and confirm access to the configured automation mailbox without exposing credentials or message bodies.
+- [x] **MAIL-02**: Operator can retrieve a bounded set of Inbox messages and identify ready-order candidates using configured sender and message markers.
+- [x] **MAIL-03**: Operator can deterministically select exactly one ready-order message and see its redacted identity.
+- [x] **MAIL-04**: Operator can download one artifact only from an approved HTTPS host, with redirect, timeout, and size limits enforced.
+- [x] **MAIL-05**: Operator can see the downloaded artifact's byte count and checksum.
 
 ### Geospatial Discovery
 
@@ -83,11 +83,11 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MAIL-01 | Phase 1 | Gaps Found |
-| MAIL-02 | Phase 1 | Gaps Found |
-| MAIL-03 | Phase 1 | Gaps Found |
-| MAIL-04 | Phase 1 | Gaps Found |
-| MAIL-05 | Phase 1 | Gaps Found |
+| MAIL-01 | Phase 1 | Complete |
+| MAIL-02 | Phase 1 | Complete |
+| MAIL-03 | Phase 1 | Complete |
+| MAIL-04 | Phase 1 | Complete |
+| MAIL-05 | Phase 1 | Complete |
 | GEO-01 | Phase 2 | Pending |
 | GEO-02 | Phase 2 | Pending |
 | GEO-03 | Phase 2 | Pending |

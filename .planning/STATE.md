@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: executing
-stopped_at: Completed 01-12-PLAN.md
-last_updated: "2026-09-09T07:07:56.499Z"
-last_activity: 2026-09-09
+stopped_at: Completed 01-11-PLAN.md
+last_updated: "2026-09-14T00:17:10.033Z"
+last_activity: 2026-09-14
 last_activity_desc: Phase 01 execution started
-state_head: a9b97e27cf4ca31428a8bbaa4a3f00953161f763
+state_head: 425bc7579571f3c87181bf049fbcb40508032463
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 12
-  completed_plans: 11
+  completed_plans: 12
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -35,15 +35,15 @@ See: .planning/PROJECT.md
 
 ## Current Position
 
-Phase: 01 (Trusted Graph Acquisition) — EXECUTING
-Plan: 7 of 11
-Status: Ready to execute
-Last activity: 2026-09-09 — Phase 01 execution started
+Phase: 01 (Trusted Graph Acquisition) — ALL PLANS COMPLETE
+Plan: 12 of 12 (11-plan phase plus gap-closure plan 01-12)
+Status: Ready for phase re-verification
+Last activity: 2026-09-14 — Completed 01-11-PLAN.md
 
 ## Session
 
-**Last session:** 2026-09-09T06:58:36.602Z
-**Stopped at:** Completed 01-12-PLAN.md
+**Last session:** 2026-09-14T00:17:09.992Z
+**Stopped at:** Completed 01-11-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -61,6 +61,7 @@ Last activity: 2026-09-09 — Phase 01 execution started
 | Phase 01 P09 | 32min | 3 tasks | 6 files |
 | Phase 01 P10 | 11min | 2 tasks | 2 files |
 | Phase 01 P12 | 20min | 2 tasks | 2 files |
+| Phase 01 P11 | 90min | 3 tasks | 4 files |
 
 ## Decisions
 
@@ -96,6 +97,10 @@ Last activity: 2026-09-09 — Phase 01 execution started
 - [Phase 01]: Made get_message_mime issue exactly one connection-level GET to the Graph MIME value endpoint (/messages/{id}/$value), replacing the two-request path that fetched an ordinary message representation first.
 - [Phase 01]: Gave PROHIB-01 runtime enforcement evidence at the connection-request level (GET-only method set, no mutation path segments, no mutation-named public callables, non-Inbox rejection) instead of source-text inspection alone.
 - [Phase 01]: Added _VOID_ELEMENTS to _AnchorCollector so a void non-rendered tag (meta, link) never raises the suppression counter, closing the permanent-suppression defect 01-07 introduced. — Void elements have no content model and can never contain content to suppress; bare (unclosed) spellings in real email headers left the counter permanently raised after 01-07's fix, silently suppressing the entire message body.
+- [Phase 01]: Applied the operator's real trusted bucket/path prefix (cl-isd-prd-datashare-s3-delivery/) to vicmap.toml, replacing the fail-closed placeholder.
+- [Phase 01]: On the first live re-proof invocation closing candidate_ambiguous, halted and escalated rather than retrying with a relaxed policy; the void-element parser defect was fixed under its own gap-closure plan 01-12.
+- [Phase 01]: Corrected the tenant-scope and legacy-checkout-token records in 01-LIVE-VERIFICATION.md to state their true, code-verified conditions, recording the tenant-wide credential's residual risk openly as known and accepted.
+- [Phase 01]: Recorded the operator's explicit accepted disposition (bhillermann@vegetationlink.com.au, 2026-09-14) for all five declared prohibitions, with residual risk carried forward, closing verification gap G-06.
 
 ### Blockers
 
