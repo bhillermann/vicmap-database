@@ -721,6 +721,25 @@ class CandidateRecognitionTest(unittest.TestCase):
 
         self.assertEqual("candidate_ambiguous", caught.exception.code)
 
+    def test_real_ready_message_structural_shape_yields_exactly_one_link(self):
+        # Reproduces the genuine Vicmap DataShare ready message's structural
+        # shape ONLY -- no live message content -- so a future parser change
+        # that would break production fails the suite rather than the
+        # mailbox: an HTML-only body (no plain-text alternative part), a
+        # <head> carrying several bare (unclosed) <meta> and <link> tags and
+        # an interior <style> block, and the archive URL in ordinary
+        # visible body text.
+        archive_url = _url()
+        html = (
+            f"<html>{_bare_email_head()}"
+            f"<body><p>Your order is ready. Download it here: {archive_url}</p>"
+            "</body></html>"
+        )
+
+        candidate = _recognize(_metadata(), _mime(html=html))
+
+        self.assertEqual(archive_url, candidate.artifact_url)
+
 
 def _candidate(
     graph_message_id: str,
