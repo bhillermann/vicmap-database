@@ -146,16 +146,19 @@ class _AnchorCollector(HTMLParser):
 
     def handle_startendtag(self, tag, attrs):
         casefolded = tag.casefold()
-        if casefolded in _NON_RENDERED:
-            # Route both spellings of a void element through the same test
-            # so `<meta ...>` and `<meta ... />` behave identically: neither
-            # ever touches the counter.
-            if casefolded not in _VOID_ELEMENTS:
-                self.non_rendered_depth += 1
-                self.non_rendered_depth = max(0, self.non_rendered_depth - 1)
+        if casefolded in _VOID_ELEMENTS:
+            # A void element collects nothing and never touches the
+            # counter, whether written bare or with a trailing slash.
             return
+        # HTML5 ignores a trailing "/" on any non-void, non-foreign
+        # element: the element is NOT closed by it and stays open exactly
+        # as an ordinary (unclosed) start tag would. Route through
+        # handle_starttag only -- never call handle_endtag here, or a
+        # self-closed non-rendered container (script/style/head/noscript/
+        # template/title) would net back to zero and let its "contents"
+        # leak into visible extraction, which is exactly what a mail
+        # reader never does.
         self.handle_starttag(tag, attrs)
-        self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
         casefolded = tag.casefold()
