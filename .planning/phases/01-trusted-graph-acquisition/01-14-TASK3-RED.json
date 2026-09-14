@@ -1,0 +1,9 @@
+{
+  "command": "OPNIX_ENV_DISABLE=1 nix develop --impure --no-write-lock-file path:. --command python -m unittest tests.test_html_visibility_differential.HtmlVisibilityDifferentialTest.test_zero_leak_direction_disagreements_across_the_seeded_corpus -v (SUT monkeypatched to the pre-01-14 counter-based _extract_html_urls snapshot -- the production rewrite this test locks in was already committed by Task 2, so RED proof-of-teeth was gathered by pointing the identical test at the implementation it replaces)",
+  "exitCode": 1,
+  "targetTest": "test_zero_leak_direction_disagreements_across_the_seeded_corpus",
+  "targetFile": "tests/test_html_visibility_differential.py",
+  "expected": "Zero leak-direction disagreements across 2000 seeded documents (seed 20260914) between extraction and the independent html5lib oracle",
+  "actual": "AssertionError: 370 leak-direction disagreement(s) out of 2000 documents -- the pre-01-14 flat suppression counter collects archive URLs the oracle says are hidden, at real scale, proving this differential test has teeth (matches the class of bug the orchestrator's own 4000-document measurement found: 146/4000 leak-direction disagreements)",
+  "output": "TAP version 13\nnot ok 1 - test_zero_leak_direction_disagreements_across_the_seeded_corpus\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n"
+}
