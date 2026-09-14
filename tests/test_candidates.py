@@ -580,6 +580,73 @@ class CandidateRecognitionTest(unittest.TestCase):
         )
         self.assertEqual(archive_url, candidate.artifact_url)
 
+    def test_head_implicitly_closes_when_body_content_begins(self):
+        # A <head> with no </head> at all is still closed implicitly the
+        # moment body content begins, exactly as every real HTML5 parser
+        # does, so an omitted end tag cannot permanently strand
+        # suppression for the rest of the document.
+        archive_url = _url()
+        html = (
+            "<html><head><meta charset='utf-8'>"
+            f"<body><p>{archive_url}</p></body></html>"
+        )
+        candidate = _recognize(_metadata(), _mime(html=html))
+
+        self.assertEqual(archive_url, candidate.artifact_url)
+
+    def test_head_implicit_closure_control_with_explicit_head_end_tag(self):
+        archive_url = _url()
+        html = (
+            "<html><head><meta charset='utf-8'></head>"
+            f"<body><p>{archive_url}</p></body></html>"
+        )
+        candidate = _recognize(_metadata(), _mime(html=html))
+
+        self.assertEqual(archive_url, candidate.artifact_url)
+
+    def test_title_inside_unclosed_head_still_suppresses_its_own_content(self):
+        archive_url = _url()
+        html = (
+            f"<html><head><title>{archive_url}</title><meta charset='utf-8'>"
+            "<body><p>No link here.</p></body></html>"
+        )
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(_metadata(), _mime(html=html))
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_style_inside_unclosed_head_still_suppresses_its_own_content(self):
+        archive_url = _url()
+        html = (
+            f"<html><head><style>{archive_url}</style><meta charset='utf-8'>"
+            "<body><p>No link here.</p></body></html>"
+        )
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(_metadata(), _mime(html=html))
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_unclosed_mid_body_script_still_suppresses_the_remainder(self):
+        # The genuine swallowing strand must survive: a real mail reader
+        # swallows the rest of the document when <script> is never closed.
+        archive_url = _url()
+        html = f"<html><body><script>{archive_url}</body></html>"
+        with self.assertRaises(CandidateError) as caught:
+            _recognize(_metadata(), _mime(html=html))
+
+        self.assertEqual("candidate_ambiguous", caught.exception.code)
+
+    def test_suppression_counter_returns_to_zero_after_well_formed_document(self):
+        archive_url = _url()
+        html = (
+            "<html><head><title>Hi</title><meta charset='utf-8'></head>"
+            f"<body><p>{archive_url}</p></body></html>"
+        )
+        parser = _AnchorCollector()
+        parser.feed(html)
+
+        self.assertEqual(0, parser.non_rendered_depth)
+
 
 def _candidate(
     graph_message_id: str,
