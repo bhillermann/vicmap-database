@@ -47,6 +47,7 @@ Both `sha256sum` and an independent Python streaming calculation reproduced the 
 - System-level Vicmap/Vegetation Link scheduled units: absent
 - Artifact ignore policy: PASS (`artifacts/` is ignored; the finalized artifact does not appear in `git status`)
 - Tracked artifact/token runtime paths: absent
+- Legacy checkout token: VERIFIED (not an attestation) — the current code uses `MemoryTokenBackend` (`vicmap_acquire/graph.py:12` import, `:119` use), so no OAuth token is ever written to disk. The `token/` directory does not exist in the working tree, and `/token/` is gitignored (`.gitignore:3`), so the pre-phase-01 on-disk token cache (`token/my_token.txt`) cannot be reintroduced by this code path.
 - Redaction review: PASS (this file was grepped for message subject/body text, complete Graph message IDs, complete URLs/queries, credentials, tokens, cookies, and raw exception text before commit; none present)
 
 The deterministic suite completed without live network access and verifies the read-only Graph scan surface, full pagination, exact candidate policy (including the void-element suppression fix in Plan 01-12), one-call/no-fallback orchestration, approved-host and bucket/path-prefix download boundary, atomic finalization, closed reason vocabulary, and seeded sensitive-value exclusion.
@@ -62,11 +63,33 @@ Per Task 2's own instruction, the first invocation's failure was recorded and no
 
 ## Operator attestations
 
-These are operator-provided facts, not conclusions derived by the automated checks above.
+These are operator-provided facts, not conclusions derived by the automated checks above, except where a sub-bullet below is explicitly marked as code-verified.
 
-- Tenant scope: PASS — the operator attests that the Microsoft application has read-only `Mail.Read` application permission and is resource-scoped to `automations@vegetationlink.com.au`.
-- Legacy checkout token: PASS — the operator attests that the legacy checkout token was revoked and quarantined or removed under operator control.
+- **Tenant scope: MIXED (attested condition, verified code boundary, accepted residual risk).**
+  - Attested by operator: the application holds read-only `Mail.Read` application permission, but it is **tenant-wide, not scoped to** `automations@vegetationlink.com.au`. Per-mailbox scoping was attempted and is not available in this tenant/app configuration. The same credentials can also reach the MFA inbox and the receipt-tracking user inbox.
+  - Verified in code (not an attestation): the mailbox is pinned from `vicmap.toml` and never discovered at runtime (`vicmap_acquire/graph.py:146`, `self._account.mailbox(resource=self._mailbox_address)`), and any folder other than `Inbox` is rejected before any request is issued (`tests/test_graph.py::GraphReadOnlyEnforcementTest::test_prohib_01_non_inbox_folder_rejected_before_any_request`). This code path reads exactly one mailbox.
+  - Residual risk, recorded openly and accepted: the credential itself is broader than the code's use of it. Anyone holding it can read every mailbox in the tenant, read-only. This is a known and accepted condition, not an unresolved gap.
 - Trusted bucket/path prefix: PASS — the operator read the current ready notification and confirmed `https://s3.ap-southeast-2.amazonaws.com/cl-isd-prd-datashare-s3-delivery/` as the exact trusted authority now committed in `vicmap.toml`.
+
+## Prohibition Disposition
+
+Nothing below was inferred from a passing test. Each disposition is a statement the operator made explicitly, reviewing the statement, the requirement it protects, the named enforcement tests, and the stated residual risk.
+
+| Identifier | Statement | Enforcement evidence | Disposition | Accepted-by-and-date |
+|---|---|---|---|---|
+| PROHIB-01 | No mailbox mutation while scanning | `tests/test_graph.py::GraphReadOnlyEnforcementTest::test_prohib_01_complete_scan_and_mime_use_only_read_requests`, `::test_prohib_01_no_recorded_request_touches_a_mutation_endpoint`, `::test_prohib_01_public_surface_exposes_no_mutation_named_callable`, `::test_prohib_01_non_inbox_folder_rejected_before_any_request` | accepted | bhillermann@vegetationlink.com.au, 2026-09-14 |
+| PROHIB-02 | No Graph bearer, cookie, or ambient netrc authority reaching the artifact host | `tests/test_download.py::test_prohib_02_no_ambient_or_graph_authority_reaches_artifact_host`, `::test_clean_session_uses_manual_redirects_tls_and_timeout_tuple` | accepted | bhillermann@vegetationlink.com.au, 2026-09-14 |
+| PROHIB-03 | No publication or overwrite from an incomplete, failed, or over-limit stream | `tests/test_download.py::test_two_concurrent_finalizers_have_exactly_one_complete_winner`, `::test_post_link_cleanup_failure_still_reports_a_committed_success`, `::test_pre_commit_timeout_family_leaves_no_final_path`, `::test_pre_commit_over_limit_family_leaves_no_final_path`, `::test_pre_commit_short_write_family_leaves_no_final_path`, `::test_pre_commit_declared_length_mismatch_family_leaves_no_final_path`, `::test_pre_commit_existing_final_path_family_is_left_untouched`, `::test_keyboard_interrupt_cleans_private_state_and_reraises` | accepted | bhillermann@vegetationlink.com.au, 2026-09-14 |
+| PROHIB-04 | No substitution of an older or different order's artifact after the selected candidate fails | `tests/test_evidence.py::test_expired_newest_download_stops_after_one_attempt_without_fallback` | accepted | bhillermann@vegetationlink.com.au, 2026-09-14 |
+| PROHIB-05 | No automatic widening of the trust policy from a received message | `tests/test_download.py::test_prefix_authority_narrows_the_allowed_host`, `::test_redirect_leaving_the_configured_prefix_is_rejected_after_one_contact`, `::test_relative_redirect_leaving_the_configured_prefix_is_rejected_before_recontact`, `::test_allowed_url_prefixes_rejects_seven_invalid_shapes`; `tests/test_origin.py` unauthenticated-origin rejections; the operator-only prefix change made in Task 1 | accepted | bhillermann@vegetationlink.com.au, 2026-09-14 |
+
+Residual risk, recorded as known and accepted rather than unresolved, for each accepted row:
+
+- **PROHIB-01:** Concurrent server-side mutation by another principal is not audited by these tests.
+- **PROHIB-02:** A future change reusing the Graph connection would not necessarily be caught by these tests.
+- **PROHIB-03:** The link-to-fsync crash window is unsimulated.
+- **PROHIB-04:** None identified.
+- **PROHIB-05:** Operator broadening of the allowlist is a policy decision, not a code path, and is therefore outside what any test can enforce. This plan's own history provides live evidence of the boundary holding: when the ready message failed recognition (the first invocation recorded above), the defect was repaired under Plan 01-12 and no trust value — no allowlist, prefix, or authentication-verdict requirement — was relaxed to force the acquisition to pass.
 
 ## Disclosure boundary
 
