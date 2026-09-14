@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 01
 current_phase_name: Trusted Graph Acquisition
 status: verifying
-stopped_at: Completed 01-13-PLAN.md
-last_updated: "2026-09-14T00:45:56.670Z"
+stopped_at: Completed 01-14-PLAN.md
+last_updated: "2026-09-14T02:48:16.828Z"
 last_activity: 2026-09-14
 last_activity_desc: Phase 01 execution started
-state_head: c80dd0f207791da48124311a3bd6affc5e07c4f7
+state_head: 83aa882395e8aba5c7533b170a45a10da653cc08
 progress:
   total_phases: 5
   completed_phases: 0
-  total_plans: 13
-  completed_plans: 13
+  total_plans: 14
+  completed_plans: 14
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -42,8 +42,8 @@ Last activity: 2026-09-14 — Completed 01-11-PLAN.md
 
 ## Session
 
-**Last session:** 2026-09-14T00:45:56.633Z
-**Stopped at:** Completed 01-13-PLAN.md
+**Last session:** 2026-09-14T02:48:16.793Z
+**Stopped at:** Completed 01-14-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -63,6 +63,7 @@ Last activity: 2026-09-14 — Completed 01-11-PLAN.md
 | Phase 01 P12 | 20min | 2 tasks | 2 files |
 | Phase 01 P11 | 90min | 3 tasks | 4 files |
 | Phase 01 P13 | 13min | 3 tasks | 4 files |
+| Phase 01 P14 | 27min | 4 tasks | 4 files |
 
 ## Decisions
 
@@ -104,6 +105,8 @@ Last activity: 2026-09-14 — Completed 01-11-PLAN.md
 - [Phase 01]: Recorded the operator's explicit accepted disposition (bhillermann@vegetationlink.com.au, 2026-09-14) for all five declared prohibitions, with residual risk carried forward, closing verification gap G-06.
 - [Phase 01]: Task 2 tried removing head from _NON_RENDERED (approach a), found a regression that reopens the self-closing <head/> guarantee from CR-01, and switched to approach (b): a one-shot <body>-triggered decrement of head's depth contribution. — The plan explicitly pre-authorized this fallback: prefer (a) unless a regression shows it loses a guarantee.
 - [Phase 01]: DMARC header.from alignment now fails closed on absence, blank, or unparseable values, symmetric with the existing dkim check, closing WR-01. — Absence must never be more permissive than a present mismatch; a header shape nobody validates the opposite of previously let dmarc=pass sail through with no alignment check.
+- [Phase 01]: Replaced the flat suppression counter with html5lib tree-inherited visibility, locked in by a differential fuzz oracle proving zero leak-direction disagreements (370/2000 against the old implementation).
+- [Phase 01]: Corrected two 01-07/01-13-era tests whose assumptions a real HTML5 parser disproves (noscript document-position quirk; head cannot ever hold free text), rather than weakening the rewrite to match them.
 
 ### Blockers
 
