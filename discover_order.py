@@ -7,10 +7,15 @@ typed-failure calls where no stage swallows another stage's exception.
 ``DiscoveryConfig``'s ``extraction_policy``/``discovery_policy`` fields keep
 the shape 02-01's tracer fixed; ``main`` builds them from
 ``read_mailbox.load_discovery_config``'s ``vicmap.toml`` policy and reads the
-artifact's D-32/D-28 provenance sidecar rather than hardcoding either. The
-full ordered-composition/exit-code contract and multi-order CLI ergonomics
-are settled in a later plan (02-06); this CLI currently requires exactly one
-configured order id.
+artifact's D-32/D-28 provenance sidecar rather than hardcoding either.
+
+Every event ``run_discovery`` emits is routed through
+``read_mailbox._EmitOnce`` -- the same guard ``run_acquisition`` uses, reused
+rather than reimplemented -- so a faulty ``event_sink`` can never turn a
+closed failure into a raw exception and is never retried once it has
+failed. Automatic selection is unconditional: every discovered layer flows
+straight from ``discover_layers`` into ``assign_target_table_names`` with no
+filter, no prompt, and no allowlist between them (D-30).
 """
 
 from __future__ import annotations
@@ -79,15 +84,43 @@ def _is_dataset_member(relative_path: str) -> bool:
     return ".gdb/" in f"{relative_path}/"
 
 
+class RunDiscoveryReportingFailed(RuntimeError):
+    """The pipeline completed (manifest written) but the event sink itself failed.
+
+    Raised only when ``guard.failed`` is still true once every stage has
+    returned successfully -- the operator's evidence stream broke silently,
+    so a run that otherwise succeeded is reported as failed rather than
+    silently returning 0. Mirrors ``read_mailbox.run_acquisition``'s own
+    ``if guard.failed: raise AcquisitionFailure(...)`` check. Never raised
+    for, and never masks, an already-published manifest: the manifest and
+    its sidecar are already committed to disk by the time this is raised.
+    """
+
+    code = "internal_failure"
+
+
 def run_discovery(config: DiscoveryConfig, *, event_sink: EventSink) -> ImportManifest:
     """Compose verify -> extract -> discover -> name -> build -> write -> render.
 
     Each stage is an ordered typed-failure call; no stage swallows another
-    stage's exception. A failure at any stage emits one redacted
+    stage's exception, and no stage begins before the previous one has
+    returned successfully. Automatic selection is unconditional: every
+    profile ``discover_layers`` returns flows straight into
+    ``assign_target_table_names`` with no filter, no prompt, and no
+    allowlist between them (D-30).
+
+    Every event -- success and failure alike -- passes through a
+    ``read_mailbox._EmitOnce`` guard, so a faulty ``event_sink`` can never
+    turn a closed failure into a raw exception and is never retried once it
+    has failed. A failure at any stage emits at most one redacted
     ``SafeFailure`` event (order ID and stage/reason/hint only, never a raw
     filesystem path or source layer name) and then re-raises the original
-    typed exception unchanged.
+    typed exception unchanged. Reaching the end with a failed guard raises
+    ``RunDiscoveryReportingFailed`` without touching the already-written
+    manifest.
     """
+
+    guard = read_mailbox._EmitOnce(event_sink)
 
     try:
         verify_artifact(
@@ -95,7 +128,7 @@ def run_discovery(config: DiscoveryConfig, *, event_sink: EventSink) -> ImportMa
             expected_sha256=config.expected_sha256,
             expected_byte_count=config.expected_byte_count,
         )
-        event_sink(
+        guard.emit(
             SuccessEvent.artifact_verified(
                 order_id=config.order_id,
                 byte_count=config.expected_byte_count,
@@ -112,7 +145,7 @@ def run_discovery(config: DiscoveryConfig, *, event_sink: EventSink) -> ImportMa
         run_path_fingerprint = fingerprint(
             str(extraction_result.run_directory), config.fingerprint_hex_chars
         )
-        event_sink(
+        guard.emit(
             SuccessEvent.archive_extracted(
                 order_id=config.order_id,
                 member_count=len(extraction_result.members),
@@ -151,7 +184,7 @@ def run_discovery(config: DiscoveryConfig, *, event_sink: EventSink) -> ImportMa
         manifest_sha256 = write_manifest(manifest, extraction_result.run_directory)
 
         target_tables = tuple(layer.target_table for layer in layers)
-        event_sink(
+        guard.emit(
             SuccessEvent.manifest_completed(
                 order_id=config.order_id,
                 layer_count=len(layers),
@@ -162,9 +195,12 @@ def run_discovery(config: DiscoveryConfig, *, event_sink: EventSink) -> ImportMa
                 fingerprint_hex_chars=config.fingerprint_hex_chars,
             )
         )
+
+        if guard.failed:
+            raise RunDiscoveryReportingFailed()
         return manifest
     except (ArchiveFailure, DiscoveryFailure, NamingFailure, ManifestFailure) as error:
-        event_sink(
+        guard.emit_failure(
             SafeFailure(
                 _reason_for(error.code),
                 order_id=config.order_id,
@@ -173,7 +209,7 @@ def run_discovery(config: DiscoveryConfig, *, event_sink: EventSink) -> ImportMa
         )
         raise
     except Exception:
-        event_sink(
+        guard.emit_failure(
             SafeFailure(
                 ReasonCode.INTERNAL_FAILURE,
                 order_id=config.order_id,
@@ -191,10 +227,11 @@ def main(argv: list[str] | None = None) -> int:
     ``read_mailbox.load_config`` enforces), builds ``ExtractionPolicy`` and
     ``DiscoveryPolicy`` from it, reads the artifact's durable D-32/D-28
     provenance sidecar, and runs one ``run_discovery`` pass. No ceiling or
-    format value is ever written literally here. The complete ordered
-    ``run_discovery`` composition, its exit-code contract, and multi-order
-    CLI ergonomics are settled in a later plan; this CLI currently requires
-    ``vicmap.toml``'s ``allowed_order_ids`` to name exactly one order.
+    format value is ever written literally here. ``run_discovery``'s ordered
+    composition and exit-code contract are complete as of this plan (02-06);
+    multi-order CLI ergonomics remain out of scope -- this CLI still
+    requires ``vicmap.toml``'s ``allowed_order_ids`` to name exactly one
+    order.
     """
 
     parser = argparse.ArgumentParser(description="Discover a Vicmap order's geospatial layers")
@@ -202,19 +239,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     def render_event(event: object) -> None:
-        # A rendering fault must never escape main -- run_discovery's own
-        # event_sink calls are unguarded here, so this is the boundary.
-        try:
-            if isinstance(event, SuccessEvent):
-                render_success(event)
-            elif isinstance(event, SafeFailure):
-                render_failure(event)
-            else:
-                render_failure(SafeFailure(ReasonCode.INTERNAL_FAILURE))
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception:
-            pass
+        # Deliberately unguarded here: run_discovery wraps every call to
+        # this sink in its own read_mailbox._EmitOnce guard, which is the
+        # one emit-once isolation boundary (never retried once failed). A
+        # rendering fault must be visible to that guard -- swallowing it a
+        # second time here would hide it from guard.failed and let a broken
+        # render_success silently report a successful exit.
+        if isinstance(event, SuccessEvent):
+            render_success(event)
+        elif isinstance(event, SafeFailure):
+            render_failure(event)
+        else:
+            render_failure(SafeFailure(ReasonCode.INTERNAL_FAILURE))
 
     order_id: str | None = None
     try:
@@ -270,9 +306,15 @@ def main(argv: list[str] | None = None) -> int:
             pass
         return 1
     except (ArchiveFailure, DiscoveryFailure, NamingFailure, ManifestFailure):
-        # run_discovery already emitted exactly one redacted SafeFailure.
+        # run_discovery already emitted exactly one redacted SafeFailure
+        # through its own guard.
         return 1
     except Exception:
+        # Covers RunDiscoveryReportingFailed (the guard's own sink already
+        # failed exactly once and is never retried -- see run_discovery)
+        # and any other unexpected exception. This render_failure call is
+        # outside the guard entirely, so it still reaches the operator even
+        # when the guarded sink itself is what broke.
         try:
             render_failure(SafeFailure(ReasonCode.INTERNAL_FAILURE))
         except (KeyboardInterrupt, SystemExit):

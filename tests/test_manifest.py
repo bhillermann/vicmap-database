@@ -1,4 +1,5 @@
-"""GEO-02/GEO-03 regressions for the manifest contract (02-06 Task 1).
+"""GEO-02..GEO-05 regressions for the manifest contract and the ordered
+``discover_order.run_discovery`` composition (02-06 Tasks 1/2).
 
 ``ManifestRoundTripTest`` proves ``manifest.py``'s canonical, hashable
 persistence shape in isolation, using lightweight ``LayerProfile``/
@@ -8,8 +9,20 @@ non-spatial layer serialization, field-order preservation, byte-stability
 across two calls, sidecar digest equality, the existing-manifest guard, and
 the ``OSError`` translation.
 
-The composition suite proving the ordered ``discover_order.run_discovery``
-pipeline and every GEO-05 hard stop is added in a later commit (Task 2).
+The composition suite proves the *ordered* ``discover_order.run_discovery``
+pipeline: every GEO-05 hard stop leaves no ``manifest.json`` and no sidecar
+anywhere under the run root, stage ordering is real (instrumented call
+recording, never a timing assumption), a faulty event sink is isolated by
+the ``_EmitOnce`` guard, operator-facing output stays redacted, and the run
+opens no socket and imports no database driver. Real end-to-end runs reuse
+``tests/fixtures/Order_TRACER1.zip`` (the same fixture
+``tests/test_discovery_tracer.py`` uses); conditions the fixture cannot
+itself provoke (unsupported format, empty delivery, unreadable/empty layer,
+unresolved geometry/CRS, incomplete schema, table-name collision) are
+driven by monkeypatching the specific ``discover_order`` stage function to
+raise the real typed exception -- composition-level proof, not a re-test of
+what ``tests/test_extraction.py``/``test_discovery.py``/``test_naming.py``
+already cover at the unit level.
 """
 
 from __future__ import annotations
@@ -17,12 +30,21 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vicmap_acquire import discovery, manifest as manifest_module
+import discover_order
+import read_mailbox
+from vicmap_acquire import discovery, extraction, manifest as manifest_module, naming
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FIXTURE_ARCHIVE = REPO_ROOT / "tests" / "fixtures" / "Order_TRACER1.zip"
 
 
 def _sha256_and_size(path: Path) -> tuple[str, int]:
@@ -251,6 +273,438 @@ class ManifestRoundTripTest(_TempDirMixin, unittest.TestCase):
         self.assertEqual(
             provenance.message_fingerprint, payload["provenance"]["message_fingerprint"]
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 2: ordered run_discovery composition
+# ---------------------------------------------------------------------------
+
+
+class _DiscoveryConfigMixin(_TempDirMixin):
+    def setUp(self):
+        super().setUp()
+        self.scratch_dir = self.make_temp_dir("run-discovery-")
+        self.artifact_path = self.scratch_dir / "Order_TRACER1.zip"
+        shutil.copyfile(FIXTURE_ARCHIVE, self.artifact_path)
+        self.sha256, self.byte_count = _sha256_and_size(self.artifact_path)
+        self.run_root = self.scratch_dir / "runs"
+
+    def _config(self, **overrides):
+        defaults = dict(
+            artifact_path=self.artifact_path,
+            order_id="TRACER1",
+            run_timestamp="20260916T000000Z",
+            expected_sha256=self.sha256,
+            expected_byte_count=self.byte_count,
+            message_fingerprint="0123456789abcdef",
+            extraction_policy=extraction.ExtractionPolicy(
+                run_root=self.run_root,
+                max_total_bytes=5 * 1024 * 1024,
+                max_member_bytes=2 * 1024 * 1024,
+                max_member_count=64,
+                max_compression_ratio=200,
+            ),
+            discovery_policy=discovery.DiscoveryPolicy(
+                supported_formats=("OpenFileGDB",),
+                ogrinfo_timeout_seconds=60,
+            ),
+        )
+        defaults.update(overrides)
+        return discover_order.DiscoveryConfig(**defaults)
+
+    def _no_manifest_anywhere(self) -> bool:
+        manifests = list(self.scratch_dir.rglob("manifest.json"))
+        sidecars = list(self.scratch_dir.rglob("manifest.json.sha256"))
+        return not manifests and not sidecars
+
+
+class GeoO5HardStopTest(_DiscoveryConfigMixin, unittest.TestCase):
+    """Every GEO-05 condition must stop the run before any manifest exists."""
+
+    def _assert_hard_stop(self, config, expected_exception, expected_reason):
+        events = []
+        with self.assertRaises(expected_exception):
+            discover_order.run_discovery(config, event_sink=events.append)
+        self.assertTrue(self._no_manifest_anywhere())
+
+        failures = [event for event in events if dict(event).get("event") == "failure"]
+        self.assertEqual(1, len(failures))
+        self.assertEqual(expected_reason, failures[0]["reason"])
+
+    # -- checksum mismatch (before any run directory exists) --------------
+
+    def test_checksum_mismatch_stops_before_any_manifest(self):
+        config = self._config(expected_sha256="0" * 64)
+        self._assert_hard_stop(config, extraction.ArtifactChecksumMismatch, "artifact_checksum_mismatch")
+        self.assertFalse(self.run_root.exists())
+
+    # -- every archive guard (real extract_artifact, patched to fail) -----
+
+    def test_archive_traversal_rejected_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order, "extract_artifact", side_effect=extraction.ArchiveTraversalRejected()
+        ):
+            self._assert_hard_stop(
+                config, extraction.ArchiveTraversalRejected, "archive_traversal_rejected"
+            )
+
+    def test_archive_unsafe_member_rejected_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order,
+            "extract_artifact",
+            side_effect=extraction.ArchiveUnsafeMemberRejected(),
+        ):
+            self._assert_hard_stop(
+                config,
+                extraction.ArchiveUnsafeMemberRejected,
+                "archive_unsafe_member_rejected",
+            )
+
+    def test_archive_ceiling_exceeded_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order, "extract_artifact", side_effect=extraction.ArchiveCeilingExceeded()
+        ):
+            self._assert_hard_stop(
+                config, extraction.ArchiveCeilingExceeded, "archive_ceiling_exceeded"
+            )
+
+    # -- discovery-stage hard stops (patched discover_layers) -------------
+
+    def test_unsupported_format_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order, "discover_layers", side_effect=discovery.UnsupportedFormat()
+        ):
+            self._assert_hard_stop(config, discovery.UnsupportedFormat, "unsupported_format")
+
+    def test_delivery_empty_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order, "discover_layers", side_effect=discovery.DeliveryEmpty()
+        ):
+            self._assert_hard_stop(config, discovery.DeliveryEmpty, "delivery_empty")
+
+    def test_layer_unreadable_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order, "discover_layers", side_effect=discovery.LayerUnreadable()
+        ):
+            self._assert_hard_stop(config, discovery.LayerUnreadable, "layer_unreadable")
+
+    def test_layer_empty_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order, "discover_layers", side_effect=discovery.LayerEmpty()
+        ):
+            self._assert_hard_stop(config, discovery.LayerEmpty, "layer_empty")
+
+    def test_geometry_type_unresolved_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order,
+            "discover_layers",
+            side_effect=discovery.GeometryTypeUnresolved(),
+        ):
+            self._assert_hard_stop(
+                config, discovery.GeometryTypeUnresolved, "geometry_type_unresolved"
+            )
+
+    def test_crs_unresolved_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order, "discover_layers", side_effect=discovery.CrsUnresolved()
+        ):
+            self._assert_hard_stop(config, discovery.CrsUnresolved, "crs_unresolved")
+
+    def test_layer_schema_incomplete_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order,
+            "discover_layers",
+            side_effect=discovery.LayerSchemaIncomplete(),
+        ):
+            self._assert_hard_stop(
+                config, discovery.LayerSchemaIncomplete, "layer_schema_incomplete"
+            )
+
+    # -- naming-stage hard stops (real discover_layers, patched naming) ---
+
+    def test_table_name_invalid_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order,
+            "assign_target_table_names",
+            side_effect=naming.TableNameInvalid(),
+        ):
+            self._assert_hard_stop(config, naming.TableNameInvalid, "table_name_invalid")
+
+    def test_table_name_collision_stops_before_any_manifest(self):
+        config = self._config()
+        with patch.object(
+            discover_order,
+            "assign_target_table_names",
+            side_effect=naming.TableNameCollision(),
+        ):
+            self._assert_hard_stop(
+                config, naming.TableNameCollision, "table_name_collision"
+            )
+
+
+class StageOrderingTest(_DiscoveryConfigMixin, unittest.TestCase):
+    def test_extraction_never_attempted_before_verify_artifact_returns(self):
+        """Instrumented call recording, never a timing assumption (real stages)."""
+
+        call_order: list[str] = []
+        original_verify = discover_order.verify_artifact
+        original_extract = discover_order.extract_artifact
+        original_discover = discover_order.discover_layers
+        original_assign = discover_order.assign_target_table_names
+        original_build = discover_order.build_manifest
+        original_write = discover_order.write_manifest
+
+        def _recording(name, original):
+            def _wrapper(*args, **kwargs):
+                call_order.append(name)
+                return original(*args, **kwargs)
+
+            return _wrapper
+
+        with patch.object(
+            discover_order, "verify_artifact", _recording("verify_artifact", original_verify)
+        ), patch.object(
+            discover_order, "extract_artifact", _recording("extract_artifact", original_extract)
+        ), patch.object(
+            discover_order, "discover_layers", _recording("discover_layers", original_discover)
+        ), patch.object(
+            discover_order,
+            "assign_target_table_names",
+            _recording("assign_target_table_names", original_assign),
+        ), patch.object(
+            discover_order, "build_manifest", _recording("build_manifest", original_build)
+        ), patch.object(
+            discover_order, "write_manifest", _recording("write_manifest", original_write)
+        ):
+            config = self._config()
+            discover_order.run_discovery(config, event_sink=lambda event: None)
+
+        self.assertEqual(
+            [
+                "verify_artifact",
+                "extract_artifact",
+                "discover_layers",
+                "assign_target_table_names",
+                "build_manifest",
+                "write_manifest",
+            ],
+            call_order,
+        )
+
+
+class FaultySinkTest(_DiscoveryConfigMixin, unittest.TestCase):
+    def test_sink_that_raises_on_first_call_produces_exactly_one_attempt(self):
+        calls = []
+
+        def _raising_sink(event):
+            calls.append(event)
+            raise RuntimeError("sink is broken")
+
+        config = self._config()
+        with self.assertRaises(discover_order.RunDiscoveryReportingFailed) as ctx:
+            discover_order.run_discovery(config, event_sink=_raising_sink)
+
+        # Never the sink's own exception instance/message escaping
+        # run_discovery -- the _EmitOnce guard isolates it, and the
+        # pipeline's own internal signal is what propagates instead.
+        self.assertNotEqual("sink is broken", str(ctx.exception))
+        self.assertIs(discover_order.RunDiscoveryReportingFailed, type(ctx.exception))
+
+        # The sink was invoked exactly once total: the guard marks itself
+        # failed on that first attempt and every later emit() -- including
+        # the final SafeFailure -- becomes a silent no-op, never retried.
+        self.assertEqual(1, len(calls))
+
+
+class RedactionTest(_DiscoveryConfigMixin, unittest.TestCase):
+    def test_successful_run_output_is_redacted(self):
+        import io
+
+        from vicmap_acquire.evidence import SafeFailure, SuccessEvent, render_failure, render_success
+
+        events = []
+        config = self._config()
+        manifest = discover_order.run_discovery(config, event_sink=events.append)
+
+        # Literally captured stdout, via the real rendering functions main()
+        # uses -- not a re-derivation of what a renderer might produce.
+        stdout_buffer = io.StringIO()
+        buffer_lines = []
+        for event in events:
+            if isinstance(event, SuccessEvent):
+                render_success(event, stream=stdout_buffer)
+            elif isinstance(event, SafeFailure):
+                render_failure(event, stream=stdout_buffer)
+        captured_stdout = stdout_buffer.getvalue()
+        buffer_lines = [line for line in captured_stdout.splitlines() if line]
+
+        self.assertIn("TRACER1", captured_stdout)
+        self.assertIn("vmadd_address", captured_stdout)
+
+        manifest_sha256_entries = [
+            dict(event)["manifest_sha256"]
+            for event in events
+            if isinstance(event, SuccessEvent) and "manifest_sha256" in dict(event)
+        ]
+        self.assertEqual(1, len(manifest_sha256_entries))
+        self.assertIn(manifest_sha256_entries[0], captured_stdout)
+
+        path_fingerprints = [
+            dict(event)["run_path_fingerprint"]
+            for event in events
+            if isinstance(event, SuccessEvent) and "run_path_fingerprint" in dict(event)
+        ]
+        self.assertTrue(path_fingerprints)
+        self.assertIn(path_fingerprints[0], captured_stdout)
+
+        run_directory = Path(manifest.run_directory)
+        self.assertNotIn(str(run_directory), captured_stdout)
+        self.assertNotIn(str(self.run_root), captured_stdout)
+        self.assertNotIn("Creative Commons Licence.html", captured_stdout)
+
+        # No JSON string value may itself start with a filesystem-absolute
+        # path -- a stricter, structural version of the substring check
+        # above.
+        for line in buffer_lines:
+            parsed = json.loads(line)
+            for value in parsed.values():
+                if isinstance(value, str):
+                    self.assertFalse(value.startswith("/"), value)
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str):
+                            self.assertFalse(item.startswith("/"), item)
+
+
+class NoSocketNoDatabaseTest(_DiscoveryConfigMixin, unittest.TestCase):
+    def test_successful_run_completes_with_socket_socket_patched_to_raise(self):
+        config = self._config()
+        with patch.object(socket, "socket", side_effect=AssertionError("no network allowed")):
+            manifest = discover_order.run_discovery(config, event_sink=lambda event: None)
+        self.assertEqual(1, len(manifest.layers))
+
+    def test_no_database_driver_module_in_sys_modules_after_successful_run(self):
+        script = (
+            "import sys\n"
+            "import discover_order\n"
+            "from vicmap_acquire import discovery, extraction\n"
+            f"artifact_path = {str(self.artifact_path)!r}\n"
+            f"run_root = {str(self.run_root)!r}\n"
+            "config = discover_order.DiscoveryConfig(\n"
+            "    artifact_path=__import__('pathlib').Path(artifact_path),\n"
+            f"    order_id='TRACER1',\n"
+            f"    run_timestamp='20260916T010101Z',\n"
+            f"    expected_sha256={self.sha256!r},\n"
+            f"    expected_byte_count={self.byte_count!r},\n"
+            "    message_fingerprint='0123456789abcdef',\n"
+            "    extraction_policy=extraction.ExtractionPolicy(\n"
+            "        run_root=__import__('pathlib').Path(run_root),\n"
+            "        max_total_bytes=5 * 1024 * 1024,\n"
+            "        max_member_bytes=2 * 1024 * 1024,\n"
+            "        max_member_count=64,\n"
+            "        max_compression_ratio=200,\n"
+            "    ),\n"
+            "    discovery_policy=discovery.DiscoveryPolicy(\n"
+            "        supported_formats=('OpenFileGDB',),\n"
+            "        ogrinfo_timeout_seconds=60,\n"
+            "    ),\n"
+            ")\n"
+            "discover_order.run_discovery(config, event_sink=lambda event: None)\n"
+            "forbidden = ('psycopg', 'psycopg2', 'sqlalchemy', 'asyncpg', 'pg8000')\n"
+            "leaked = [name for name in sys.modules if name.split('.')[0] in forbidden]\n"
+            "assert not leaked, leaked\n"
+            "print('no database driver imported')\n"
+        )
+        env = __import__("os").environ.copy()
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("no database driver imported", result.stdout)
+
+
+class AutomaticSelectionTest(_DiscoveryConfigMixin, unittest.TestCase):
+    def test_two_layer_delivery_produces_two_layer_manifest_with_no_filtering(self):
+        real_profiles = discovery.discover_layers  # noqa: F841 (documents intent)
+        first = _layer_profile(layer_name="ADDRESS", dataset_stem="VMADD")
+        second = _layer_profile(
+            layer_name="PARCEL",
+            dataset_stem="VMADD",
+            feature_count=17,
+            fields=(_field("PID", "Integer"),),
+        )
+
+        config = self._config()
+        with patch.object(discover_order, "discover_layers", return_value=(first, second)):
+            manifest = discover_order.run_discovery(config, event_sink=lambda event: None)
+
+        self.assertEqual(2, len(manifest.layers))
+        target_tables = {layer.target_table for layer in manifest.layers}
+        self.assertEqual({"vmadd_address", "vmadd_parcel"}, target_tables)
+
+
+class MainFaultyRenderTest(_DiscoveryConfigMixin, unittest.TestCase):
+    """Drives the faulty-sink property through ``main()``'s real CLI path."""
+
+    def test_render_success_failure_yields_nonzero_exit_no_raw_exception(self):
+        from vicmap_acquire.download import write_provenance_sidecar
+
+        artifacts_dir = self.scratch_dir / "artifacts"
+        artifacts_dir.mkdir()
+        artifact_path = artifacts_dir / "Order_TRACER1.zip"
+        shutil.copyfile(FIXTURE_ARCHIVE, artifact_path)
+        write_provenance_sidecar(
+            artifact_path,
+            order_id="TRACER1",
+            message_fingerprint="0123456789abcdef",
+            sha256=self.sha256,
+            byte_count=self.byte_count,
+        )
+
+        fake_run_config = read_mailbox.DiscoveryRunConfig(
+            artifacts_dir=artifacts_dir,
+            run_root=self.run_root,
+            fingerprint_hex_chars=16,
+            allowed_order_ids=("TRACER1",),
+            max_total_bytes=5 * 1024 * 1024,
+            max_member_bytes=2 * 1024 * 1024,
+            max_member_count=64,
+            max_compression_ratio=200,
+            supported_formats=("OpenFileGDB",),
+            ogrinfo_timeout_seconds=60,
+        )
+
+        call_count = {"n": 0}
+        original_render_success = discover_order.render_success
+
+        def _raising_render_success(event, **kwargs):
+            call_count["n"] += 1
+            raise RuntimeError("render is broken")
+
+        with patch.object(
+            read_mailbox, "load_discovery_config", return_value=fake_run_config
+        ), patch.object(discover_order, "render_success", _raising_render_success):
+            exit_code = discover_order.main(["--config", str(self.scratch_dir / "vicmap.toml")])
+
+        self.assertEqual(1, exit_code)
+        self.assertGreaterEqual(call_count["n"], 1)
 
 
 if __name__ == "__main__":
