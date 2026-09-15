@@ -15,7 +15,7 @@
 
 ### Geospatial Discovery
 
-- [ ] **GEO-01**: Operator can unpack the order archive into an isolated run directory without permitting path traversal, unsafe links, or writes outside that directory.
+- [x] **GEO-01**: Operator can unpack the order archive into an isolated run directory without permitting path traversal, unsafe links, or writes outside that directory.
 - [ ] **GEO-02**: Operator can see every supported geospatial dataset and layer discovered in the unpacked order.
 - [ ] **GEO-03**: Operator can see each layer's fields, feature count, geometry type, and source CRS.
 - [ ] **GEO-04**: Operator can see the deterministic source-layer-to-table-name mapping before any database mutation.
@@ -88,7 +88,7 @@
 | MAIL-03 | Phase 1 | Complete |
 | MAIL-04 | Phase 1 | Complete |
 | MAIL-05 | Phase 1 | Complete |
-| GEO-01 | Phase 2 | Pending |
+| GEO-01 | Phase 2 | Complete |
 | GEO-02 | Phase 2 | Pending |
 | GEO-03 | Phase 2 | Pending |
 | GEO-04 | Phase 2 | Pending |
