@@ -259,6 +259,23 @@ class EvidenceContractTest(unittest.TestCase):
             "download_http_failed": "download",
             "artifact_write_failed": "artifact_write",
             "internal_failure": "internal",
+            "artifact_checksum_mismatch": "artifact_verify",
+            "provenance_unavailable": "artifact_verify",
+            "archive_traversal_rejected": "extraction",
+            "archive_unsafe_member_rejected": "extraction",
+            "archive_ceiling_exceeded": "extraction",
+            "archive_unreadable": "extraction",
+            "run_directory_write_failed": "extraction",
+            "unsupported_format": "discovery",
+            "delivery_empty": "discovery",
+            "layer_unreadable": "discovery",
+            "layer_empty": "discovery",
+            "geometry_type_unresolved": "discovery",
+            "crs_unresolved": "discovery",
+            "layer_schema_incomplete": "discovery",
+            "table_name_invalid": "naming",
+            "table_name_collision": "naming",
+            "manifest_write_failed": "manifest",
         }
         self.assertEqual(expected, evidence.reason_stage_vocabulary())
         self.assertEqual(set(expected.values()), {stage.value for stage in evidence.Stage})
@@ -431,6 +448,133 @@ class EvidenceContractTest(unittest.TestCase):
                 evidence.ReasonCode.DOWNLOAD_EXPIRED_OR_MISSING,
                 message_fingerprint="a" * 16,
                 fingerprint_hex_chars=8,
+            )
+
+    def test_phase_2_reason_codes_extend_the_closed_vocabulary(self):
+        expected_additions = {
+            "artifact_checksum_mismatch": "artifact_verify",
+            "provenance_unavailable": "artifact_verify",
+            "archive_traversal_rejected": "extraction",
+            "archive_unsafe_member_rejected": "extraction",
+            "archive_ceiling_exceeded": "extraction",
+            "archive_unreadable": "extraction",
+            "run_directory_write_failed": "extraction",
+            "unsupported_format": "discovery",
+            "delivery_empty": "discovery",
+            "layer_unreadable": "discovery",
+            "layer_empty": "discovery",
+            "geometry_type_unresolved": "discovery",
+            "crs_unresolved": "discovery",
+            "layer_schema_incomplete": "discovery",
+            "table_name_invalid": "naming",
+            "table_name_collision": "naming",
+            "manifest_write_failed": "manifest",
+        }
+        vocabulary = evidence.reason_stage_vocabulary()
+        for reason, stage in expected_additions.items():
+            with self.subTest(reason=reason):
+                self.assertEqual(stage, vocabulary.get(reason))
+        self.assertEqual(len(expected_additions), 17)
+        self.assertLessEqual(set(expected_additions), set(vocabulary))
+
+    def test_artifact_verified_rejects_unsafe_scalars(self):
+        valid_sha256 = hashlib.sha256(b"tracer").hexdigest()
+        event = evidence.SuccessEvent.artifact_verified(
+            order_id="TRACER1", byte_count=12345, sha256=valid_sha256
+        )
+        self.assertEqual(
+            {
+                "event": "artifact_verified",
+                "order_id": "TRACER1",
+                "byte_count": 12345,
+                "sha256": valid_sha256,
+            },
+            dict(event),
+        )
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.artifact_verified(
+                order_id="TRACER1", byte_count=12345, sha256="not-a-digest"
+            )
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.artifact_verified(
+                order_id="TRACER1", byte_count=-1, sha256=valid_sha256
+            )
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.artifact_verified(
+                order_id="not a safe order id!", byte_count=1, sha256=valid_sha256
+            )
+
+    def test_archive_extracted_rejects_unsafe_scalars(self):
+        event = evidence.SuccessEvent.archive_extracted(
+            order_id="TRACER1",
+            member_count=3,
+            total_byte_count=4096,
+            run_path_fingerprint="a" * 16,
+        )
+        self.assertEqual(
+            {
+                "event": "archive_extracted",
+                "order_id": "TRACER1",
+                "member_count": 3,
+                "total_byte_count": 4096,
+                "run_path_fingerprint": "a" * 16,
+            },
+            dict(event),
+        )
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.archive_extracted(
+                order_id="TRACER1",
+                member_count=-1,
+                total_byte_count=4096,
+                run_path_fingerprint="a" * 16,
+            )
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.archive_extracted(
+                order_id="TRACER1",
+                member_count=3,
+                total_byte_count=4096,
+                run_path_fingerprint="not-hex!!",
+            )
+
+    def test_manifest_completed_rejects_unsafe_scalars(self):
+        manifest_sha256 = hashlib.sha256(b"manifest").hexdigest()
+        event = evidence.SuccessEvent.manifest_completed(
+            order_id="TRACER1",
+            layer_count=1,
+            companion_count=2,
+            target_tables=("vmadd_address",),
+            manifest_sha256=manifest_sha256,
+            run_path_fingerprint="b" * 16,
+        )
+        self.assertEqual(
+            {
+                "event": "manifest_completed",
+                "order_id": "TRACER1",
+                "layer_count": 1,
+                "companion_count": 2,
+                "target_tables": ["vmadd_address"],
+                "manifest_sha256": manifest_sha256,
+                "run_path_fingerprint": "b" * 16,
+            },
+            dict(event),
+        )
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.manifest_completed(
+                order_id="TRACER1",
+                layer_count=1,
+                companion_count=2,
+                target_tables=("Not-Safe!",),
+                manifest_sha256=manifest_sha256,
+                run_path_fingerprint="b" * 16,
+            )
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.manifest_completed(
+                order_id="TRACER1",
+                layer_count=1,
+                companion_count=2,
+                target_tables=("vmadd_address",),
+                manifest_sha256="not-a-digest",
+                run_path_fingerprint="b" * 16,
             )
 
     def test_failure_optional_identifiers_are_allowlisted_and_redacted(self):
