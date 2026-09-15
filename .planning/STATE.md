@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.1
-current_phase: 01
+current_phase: 02
 current_phase_name: Safe Geospatial Discovery
 status: executing
-stopped_at: Phase 02 context gathered
-last_updated: "2026-09-14T07:37:12.966Z"
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-09-15T21:46:05.738Z"
 last_activity: 2026-09-14
-last_activity_desc: Phase 01 execution started
-state_head: 3603f5693ef8494aa4c91ffc2c0f32fdd2d6f3b6
+last_activity_desc: Phase 02 execution started
+state_head: 03554c2dda56f8666da597d5ffb25edf4d70fc7d
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 20
-  completed_plans: 14
+  completed_plans: 15
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md
 ## Position
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
-**Current phase:** 01
+**Current phase:** 02
 **Status:** Ready to execute
 
 ## Session Log
@@ -35,16 +35,16 @@ See: .planning/PROJECT.md
 
 ## Current Position
 
-Phase: 02 (Safe Geospatial Discovery) — READY TO EXECUTE
-Plan: 12 of 12 (11-plan phase plus gap-closure plan 01-12)
-Status: Ready for phase re-verification
-Last activity: 2026-09-14 — Completed 01-11-PLAN.md
+Phase: 02 (Safe Geospatial Discovery) — EXECUTING
+Plan: 2 of 6
+Status: Ready to execute
+Last activity: 2026-09-14 — Phase 02 execution started
 
 ## Session
 
-**Last session:** 2026-09-14T06:51:07.051Z
-**Stopped at:** Phase 02 context gathered
-**Resume file:** .planning/phases/02-safe-geospatial-discovery/02-CONTEXT.md
+**Last session:** 2026-09-15T21:46:05.699Z
+**Stopped at:** Completed 02-01-PLAN.md
+**Resume file:** None
 
 ## Performance Metrics
 
@@ -64,6 +64,7 @@ Last activity: 2026-09-14 — Completed 01-11-PLAN.md
 | Phase 01 P11 | 90min | 3 tasks | 4 files |
 | Phase 01 P13 | 13min | 3 tasks | 4 files |
 | Phase 01 P14 | 27min | 4 tasks | 4 files |
+| Phase 02 P01 | 55min | 3 tasks | 15 files |
 
 ## Decisions
 
@@ -107,6 +108,9 @@ Last activity: 2026-09-14 — Completed 01-11-PLAN.md
 - [Phase 01]: DMARC header.from alignment now fails closed on absence, blank, or unparseable values, symmetric with the existing dkim check, closing WR-01. — Absence must never be more permissive than a present mismatch; a header shape nobody validates the opposite of previously let dmarc=pass sail through with no alignment check.
 - [Phase 01]: Replaced the flat suppression counter with html5lib tree-inherited visibility, locked in by a differential fuzz oracle proving zero leak-direction disagreements (370/2000 against the old implementation).
 - [Phase 01]: Corrected two 01-07/01-13-era tests whose assumptions a real HTML5 parser disproves (noscript document-position quirk; head cannot ever hold free text), rather than weakening the rewrite to match them.
+- [Phase 02]: D-21 confirmed locked (operator, Task 2 checkpoint): target table name is {gdb_stem}_{layer} normalized, no configurable prefix.
+- [Phase 02]: Added ProvenanceUnavailable exception to extraction.py to make PROVENANCE_UNAVAILABLE reachable, distinct from ArtifactChecksumMismatch.
+- [Phase 02]: run_discovery re-raises the original typed exception after emitting a redacted failure event, rather than wrapping it in a new orchestration failure type.
 
 ### Blockers
 

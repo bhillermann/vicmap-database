@@ -85,13 +85,13 @@ Plans:
 3. Every source layer has a deterministic target table name visible before loading begins.
 4. An unreadable dataset or normalized-name collision stops the run before any database object is changed.
 
-**Plans:** 6 plans
+**Plans:** 1/6 plans executed
 
 Plans:
 
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Make the geospatial toolchain reproducible and prove one artifact-to-manifest path end to end.
+- [x] 02-01-PLAN.md — Make the geospatial toolchain reproducible and prove one artifact-to-manifest path end to end.
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -162,7 +162,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Trusted Graph Acquisition | 14/14 | In Progress|  |
-| 2. Safe Geospatial Discovery | 0/6 | Planned | — |
+| 2. Safe Geospatial Discovery | 1/6 | In Progress|  |
 | 3. Validated PostGIS Staging | 0/TBD | Not started | — |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
 | 5. Approved Legacy Cleanup | 0/TBD | Not started | — |
