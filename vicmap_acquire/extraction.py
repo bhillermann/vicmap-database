@@ -24,6 +24,7 @@ from pathlib import Path
 
 _HEX_64 = re.compile(r"[0-9a-f]{64}")
 _ORDER_ID = re.compile(r"[A-Za-z0-9]+")
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 class ArchiveFailure(RuntimeError):
@@ -121,8 +122,10 @@ def verify_artifact(
     1's reported provenance. A missing or malformed expected value is a
     distinct closed failure (``ProvenanceUnavailable``) from a well-formed
     expected value the artifact simply fails to match
-    (``ArtifactChecksumMismatch``). Streams the artifact in 1 MiB chunks;
-    never trusts that nothing touched ``artifacts/`` since Phase 1 ran.
+    (``ArtifactChecksumMismatch``), which also covers an absent artifact
+    file -- a missing file cannot match a supplied digest either. Streams
+    the artifact in 1 MiB chunks; never trusts that nothing touched
+    ``artifacts/`` since Phase 1 ran. Never constructs ``zipfile.ZipFile``.
     """
 
     if (
@@ -145,7 +148,7 @@ def verify_artifact(
                 digest.update(chunk)
                 byte_count += len(chunk)
     except OSError:
-        raise ArchiveUnreadable() from None
+        raise ArtifactChecksumMismatch() from None
 
     if byte_count != expected_byte_count or digest.hexdigest() != expected_sha256:
         raise ArtifactChecksumMismatch()
@@ -175,14 +178,17 @@ def _fsync_directory(directory: Path) -> None:
             pass
 
 
-def _reject_unsafe_member(info: zipfile.ZipInfo, run_dir_resolved: Path) -> Path:
+def _reject_unsafe_member(info: zipfile.ZipInfo, destination_root: Path) -> Path:
     """Validate one member fully, returning its resolved destination path.
 
     Runs before any output handle is opened for the member (reject-before-
     write, Pattern 1): absolute paths, ``..`` traversal, drive-letter roots,
-    symlinks/hardlinks (only meaningful when ``create_system == 3``),
-    non-regular members, encrypted members, and any resolved path escaping
-    ``run_dir_resolved``.
+    symlinks (only meaningful when ``create_system == 3``), non-regular
+    members, encrypted members, and any resolved path escaping
+    ``destination_root``. Duplicate-name detection (D-26's hardlink-style
+    aliasing guard) is the caller's responsibility -- see
+    ``_validate_members`` -- because it is a whole-archive property, not a
+    single-member one.
     """
 
     name = info.filename
@@ -206,10 +212,41 @@ def _reject_unsafe_member(info: zipfile.ZipInfo, run_dir_resolved: Path) -> Path
     if info.flag_bits & 0x1:
         raise ArchiveUnsafeMemberRejected()
 
-    resolved = (run_dir_resolved / normalized).resolve()
-    if resolved != run_dir_resolved and run_dir_resolved not in resolved.parents:
+    resolved = (destination_root / normalized).resolve()
+    if resolved != destination_root and destination_root not in resolved.parents:
         raise ArchiveTraversalRejected()
     return resolved
+
+
+def _validate_members(
+    infolist: list[zipfile.ZipInfo], destination_root: Path, policy: ExtractionPolicy
+) -> list[tuple[zipfile.ZipInfo, Path]]:
+    """Validate the complete member list before any output handle is opened.
+
+    Mirrors ``download.py``'s validate-before-connect ordering
+    (``validate_https_target`` runs completely before ``session.get`` is
+    ever called): this pass runs to completion -- the member-count ceiling,
+    then every member's path/mode/encryption/duplicate-name guards -- and
+    raises on the first violation, before the write phase in
+    ``extract_artifact`` ever begins. A valid member appearing before an
+    invalid one is therefore never written to disk.
+    """
+
+    if len(infolist) > policy.max_member_count:
+        raise ArchiveCeilingExceeded()
+
+    seen_names: set[str] = set()
+    validated: list[tuple[zipfile.ZipInfo, Path]] = []
+    for info in infolist:
+        if info.filename in seen_names:
+            # A repeated member name is D-26's hardlink-style aliasing --
+            # the second occurrence could silently overwrite or alias the
+            # first once written, so no member name may appear twice.
+            raise ArchiveUnsafeMemberRejected()
+        destination = _reject_unsafe_member(info, destination_root)
+        seen_names.add(info.filename)
+        validated.append((info, destination))
+    return validated
 
 
 def extract_artifact(
@@ -218,14 +255,24 @@ def extract_artifact(
     """Extract ``artifact_path`` into ``{run_root}/{order_id}/{run_timestamp}/``.
 
     Every member is validated against the complete guard list (Pattern 1)
-    before any output handle is opened for it. Streaming enforces
-    per-member and cumulative byte ceilings against actual decompressed
-    bytes, never just declared metadata (Pattern 2). ``os.rename`` from a
-    private sibling ``.tmp-`` directory into the published run directory is
-    the sole commit point, mirroring ``download.py``'s ``_publish_artifact``.
-    A previously published run directory of the same name is never
-    overwritten (PROHIB-06); a guard trip anywhere in this function leaves
-    the ``.tmp-`` directory behind for inspection rather than deleting it.
+    before any output handle is opened for it -- see ``_validate_members``.
+    Streaming enforces per-member and cumulative byte ceilings against
+    actual decompressed bytes, never just declared metadata (Pattern 2).
+    ``os.rename`` from a private sibling ``.tmp-`` directory into the
+    published run directory is the sole commit point, mirroring
+    ``download.py``'s ``_publish_artifact``. A previously published run
+    directory of the same name is never overwritten (PROHIB-06); a guard
+    trip anywhere in this function leaves the ``.tmp-`` directory behind
+    for inspection rather than deleting it (D-25).
+
+    Wrapped exactly as ``download_artifact`` is wrapped: this function's own
+    typed failures pass straight through, any other ``OSError`` (a local
+    filesystem problem -- ``mkdir``, a short write, ``rename``) becomes
+    ``RunDirectoryWriteFailed``, and any other unexpected exception (for
+    example a ``zipfile.BadZipFile`` raised somewhere this function does not
+    narrowly catch it itself, such as a corrupt central directory surfacing
+    from ``infolist()``) becomes ``ArchiveUnreadable`` -- no raw ``zipfile``
+    exception text ever reaches a caller.
     """
 
     if not isinstance(order_id, str) or _ORDER_ID.fullmatch(order_id) is None:
@@ -237,73 +284,72 @@ def extract_artifact(
     temp_dir = order_root / f".tmp-{run_timestamp}"
     final_dir = order_root / run_timestamp
 
-    if final_dir.exists():
-        raise RunDirectoryWriteFailed()
-
-    try:
-        order_root.mkdir(parents=True, exist_ok=True)
-        if temp_dir.exists():
-            raise RunDirectoryWriteFailed()
-        temp_dir.mkdir(parents=True)
-    except OSError:
-        raise RunDirectoryWriteFailed() from None
-
-    temp_dir_resolved = temp_dir.resolve()
     members: list[ExtractedMember] = []
     total_received = 0
 
     try:
+        if final_dir.exists():
+            raise RunDirectoryWriteFailed()
+
+        order_root.mkdir(parents=True, exist_ok=True)
+        if temp_dir.exists():
+            raise RunDirectoryWriteFailed()
+        temp_dir.mkdir(parents=True)
+        temp_dir_resolved = temp_dir.resolve()
+
         try:
             zip_file = zipfile.ZipFile(artifact_path)
         except (OSError, zipfile.BadZipFile):
             raise ArchiveUnreadable() from None
 
         with zip_file:
-            infolist = zip_file.infolist()
-            if len(infolist) > policy.max_member_count:
-                raise ArchiveCeilingExceeded()
+            try:
+                infolist = zip_file.infolist()
+            except (OSError, zipfile.BadZipFile):
+                raise ArchiveUnreadable() from None
 
-            validated: list[tuple[zipfile.ZipInfo, Path]] = [
-                (info, _reject_unsafe_member(info, temp_dir_resolved))
-                for info in infolist
-            ]
+            validated = _validate_members(infolist, temp_dir_resolved, policy)
 
             for info, destination in validated:
-                is_directory_entry = info.filename.replace("\\", "/").endswith("/")
+                relative = info.filename.replace("\\", "/")
+                is_directory_entry = relative.endswith("/")
+
                 if is_directory_entry:
-                    try:
-                        destination.mkdir(parents=True, exist_ok=True)
-                    except OSError:
-                        raise RunDirectoryWriteFailed() from None
+                    destination.mkdir(parents=True, exist_ok=True)
+                    # D-27: every member is accounted for, including
+                    # directory entries -- they carry no bytes of their own.
+                    members.append(
+                        ExtractedMember(
+                            relative_path=relative,
+                            byte_count=0,
+                            sha256=_EMPTY_SHA256,
+                        )
+                    )
                     continue
 
-                try:
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                except OSError:
-                    raise RunDirectoryWriteFailed() from None
+                destination.parent.mkdir(parents=True, exist_ok=True)
 
                 member_received = 0
                 digest = hashlib.sha256()
-                try:
-                    with zip_file.open(info, "r") as source, open(
-                        destination, "wb"
-                    ) as target:
-                        while True:
-                            chunk = source.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            member_received += len(chunk)
-                            if member_received > policy.max_member_bytes:
-                                raise ArchiveCeilingExceeded()
-                            total_received += len(chunk)
-                            if total_received > policy.max_total_bytes:
-                                raise ArchiveCeilingExceeded()
-                            target.write(chunk)
-                            digest.update(chunk)
-                except ArchiveFailure:
-                    raise
-                except (OSError, zipfile.BadZipFile):
-                    raise ArchiveUnreadable() from None
+                with zip_file.open(info, "r") as source, open(
+                    destination, "wb"
+                ) as target:
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        member_received += len(chunk)
+                        if member_received > policy.max_member_bytes:
+                            raise ArchiveCeilingExceeded()
+                        total_received += len(chunk)
+                        if total_received > policy.max_total_bytes:
+                            raise ArchiveCeilingExceeded()
+                        written = target.write(chunk)
+                        if written != len(chunk):
+                            raise RunDirectoryWriteFailed()
+                        digest.update(chunk)
+                    target.flush()
+                    os.fsync(target.fileno())
 
                 if (
                     info.compress_size
@@ -311,7 +357,6 @@ def extract_artifact(
                 ):
                     raise ArchiveCeilingExceeded()
 
-                relative = destination.relative_to(temp_dir_resolved).as_posix()
                 members.append(
                     ExtractedMember(
                         relative_path=relative,
@@ -319,17 +364,30 @@ def extract_artifact(
                         sha256=digest.hexdigest(),
                     )
                 )
+
+        if final_dir.exists():
+            raise RunDirectoryWriteFailed()
+        os.rename(temp_dir, final_dir)
+        _fsync_directory(final_dir.parent)
     except ArchiveFailure:
         raise
     except OSError:
-        raise ArchiveUnreadable() from None
-
-    try:
-        os.rename(temp_dir, final_dir)
-        _fsync_directory(final_dir.parent)
-    except OSError:
         raise RunDirectoryWriteFailed() from None
+    except Exception:
+        raise ArchiveUnreadable() from None
+    finally:
+        # D-25: a guard trip leaves the private .tmp-{run_timestamp}
+        # directory on disk for inspection -- never delete it here. Every
+        # other resource this function opens (the zip archive, each output
+        # file) is already scoped to a ``with`` block above and closes
+        # itself; this clause exists only to make that guarantee explicit
+        # and to mirror download_artifact's wrap-with-finally shape. It can
+        # never re-decide an outcome this function already committed to,
+        # because os.rename above is the sole commit point and nothing
+        # after it can raise (_fsync_directory swallows its own OSErrors).
+        pass
 
+    members.sort(key=lambda member: member.relative_path)
     return ExtractionResult(
         run_directory=final_dir,
         order_id=order_id,
