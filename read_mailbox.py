@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import re
@@ -18,11 +19,13 @@ import requests
 
 from vicmap_acquire.candidates import CandidateError, recognize_candidate, select_candidate
 from vicmap_acquire.download import (
+    ArtifactProvenance,
     DownloadError,
     DownloadPolicy,
     DownloadResult,
     _normalize_url_prefix,
     download_artifact,
+    write_provenance_sidecar,
 )
 from vicmap_acquire.graph import GraphError, GraphMailbox
 from vicmap_acquire.origin import _AUTH_METHODS, OriginUnauthenticated
@@ -31,6 +34,7 @@ from vicmap_acquire.evidence import (
     ReasonCode,
     SafeFailure,
     SuccessEvent,
+    fingerprint,
     render_failure,
     render_progress,
     render_success,
@@ -359,6 +363,9 @@ def run_acquisition(
             if candidate is not None:
                 candidates.append(candidate)
         selected = select_candidate(candidates)
+        message_fingerprint = fingerprint(
+            selected.graph_message_id, config.fingerprint_hex_chars
+        )
         guard.emit(
             SuccessEvent.candidate_selected(
                 order_id=selected.order_id,
@@ -388,6 +395,20 @@ def run_acquisition(
                 ProgressEvent.from_download_event(progress)
             ),
         )
+        write_provenance_sidecar(
+            result.path,
+            order_id=selected.order_id,
+            message_fingerprint=message_fingerprint,
+            sha256=result.sha256,
+            byte_count=result.byte_count,
+        )
+        guard.emit(
+            SuccessEvent.artifact_verified(
+                order_id=selected.order_id,
+                byte_count=result.byte_count,
+                sha256=result.sha256,
+            )
+        )
         guard.emit(
             SuccessEvent.download_target(
                 approved_hostname=result.approved_hostname,
@@ -404,6 +425,126 @@ def run_acquisition(
         if guard.failed:
             raise AcquisitionFailure(ReasonCode.INTERNAL_FAILURE)
         return result
+    except AcquisitionFailure as error:
+        if error.reported:
+            raise
+        failure = _emit_failure(
+            guard,
+            error.failure.reason,
+            fingerprint_hex_chars=getattr(config, "fingerprint_hex_chars", 16),
+        )
+        raise AcquisitionFailure(failure.reason, reported=True) from None
+    except (GraphError, CandidateError, DownloadError, OriginUnauthenticated) as error:
+        failure = _emit_failure(
+            guard,
+            error.code,
+            fingerprint_hex_chars=getattr(config, "fingerprint_hex_chars", 16),
+        )
+        raise AcquisitionFailure(failure.reason, reported=True) from None
+    except Exception:
+        failure = _emit_failure(
+            guard,
+            ReasonCode.INTERNAL_FAILURE,
+            fingerprint_hex_chars=getattr(config, "fingerprint_hex_chars", 16),
+        )
+        raise AcquisitionFailure(failure.reason, reported=True) from None
+
+
+def run_provenance(
+    config: AcquisitionConfig,
+    credentials: Mapping[str, str],
+    graph_factory=None,
+    event_sink: EventSink = lambda event: None,
+) -> ArtifactProvenance:
+    """Backfill a durable provenance sidecar for an artifact already on disk.
+
+    Selects exactly as ``run_acquisition`` does -- identical authentication,
+    bounded mailbox scan, candidate recognition, and exactly-one selection --
+    but never constructs a ``DownloadPolicy`` and never calls
+    ``download_artifact``. The artifact named by the selected order must
+    already exist at ``config.output_dir / f"Order_{selected.order_id}.zip"``;
+    this streams it in 1 MiB chunks to derive the true digest and byte count
+    before writing the sidecar, so an operator holding an artifact acquired
+    before this existed can produce one without re-downloading it.
+    """
+
+    guard = _EmitOnce(event_sink)
+
+    try:
+        validate_acquisition_policy(config)
+        _require_credentials(credentials)
+        _suppress_dependency_logs()
+        graph_factory = GraphMailbox if graph_factory is None else graph_factory
+        graph = graph_factory(config=config, credentials=credentials)
+        cutoff_utc = datetime.now(timezone.utc) - timedelta(days=config.lookback_days)
+        candidates = []
+        for metadata in graph.iter_metadata(cutoff_utc):
+            candidate = recognize_candidate(
+                metadata,
+                lambda message_id=metadata.graph_message_id: graph.get_mime_content(
+                    message_id
+                ),
+                allowed_senders=config.allowed_senders,
+                allowed_order_ids=config.allowed_order_ids,
+                allow_order_id_mismatch=config.allow_order_id_mismatch,
+                required_authentication_results=config.required_authentication_results,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+        selected = select_candidate(candidates)
+        message_fingerprint = fingerprint(
+            selected.graph_message_id, config.fingerprint_hex_chars
+        )
+        guard.emit(
+            SuccessEvent.candidate_selected(
+                order_id=selected.order_id,
+                received_at=selected.received_datetime_utc,
+                sender=selected.sender,
+                graph_message_id=selected.graph_message_id,
+                fingerprint_hex_chars=config.fingerprint_hex_chars,
+            )
+        )
+
+        artifact_path = config.output_dir / f"Order_{selected.order_id}.zip"
+        if not artifact_path.is_file():
+            raise AcquisitionFailure(ReasonCode.PROVENANCE_UNAVAILABLE)
+
+        digest = hashlib.sha256()
+        byte_count = 0
+        try:
+            with open(artifact_path, "rb") as source:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    byte_count += len(chunk)
+        except OSError:
+            raise AcquisitionFailure(ReasonCode.PROVENANCE_UNAVAILABLE) from None
+
+        provenance = ArtifactProvenance(
+            order_id=selected.order_id,
+            message_fingerprint=message_fingerprint,
+            sha256=digest.hexdigest(),
+            byte_count=byte_count,
+        )
+        write_provenance_sidecar(
+            artifact_path,
+            order_id=provenance.order_id,
+            message_fingerprint=provenance.message_fingerprint,
+            sha256=provenance.sha256,
+            byte_count=provenance.byte_count,
+        )
+        guard.emit(
+            SuccessEvent.artifact_verified(
+                order_id=provenance.order_id,
+                byte_count=provenance.byte_count,
+                sha256=provenance.sha256,
+            )
+        )
+        if guard.failed:
+            raise AcquisitionFailure(ReasonCode.INTERNAL_FAILURE)
+        return provenance
     except AcquisitionFailure as error:
         if error.reported:
             raise
@@ -508,6 +649,14 @@ def load_config(path: Path) -> AcquisitionConfig:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Acquire one trusted Vicmap artifact")
     parser.add_argument("--config", type=Path, default=Path("vicmap.toml"))
+    parser.add_argument(
+        "--provenance-only",
+        action="store_true",
+        help=(
+            "Backfill the provenance sidecar for an artifact already on disk "
+            "instead of downloading a new one."
+        ),
+    )
     args = parser.parse_args(argv)
 
     def render_event(event: object) -> None:
@@ -530,7 +679,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_config(args.config)
-        run_acquisition(config, os.environ, event_sink=render_event)
+        if args.provenance_only:
+            run_provenance(config, os.environ, event_sink=render_event)
+        else:
+            run_acquisition(config, os.environ, event_sink=render_event)
     except AcquisitionFailure as error:
         if not error.reported:
             try:

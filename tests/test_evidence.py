@@ -759,7 +759,12 @@ class ControllerCompositionTest(unittest.TestCase):
         self.assertEqual(len(payload), result.byte_count)
         self.assertEqual(hashlib.sha256(payload).hexdigest(), result.sha256)
         self.assertEqual(
-            ["candidate_selected", "download_target", "artifact_finalized"],
+            [
+                "candidate_selected",
+                "artifact_verified",
+                "download_target",
+                "artifact_finalized",
+            ],
             [event["event"] for event in events],
         )
         self.assertEqual(1, len(session.calls))
@@ -1029,6 +1034,11 @@ class ControllerCompositionTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory) / "artifacts"
+            # download_artifact is fully mocked below (no real file write), but
+            # 02-02's run_acquisition now writes a provenance sidecar beside the
+            # published artifact after download_artifact returns, so the
+            # directory must exist for that write to land.
+            output_dir.mkdir(parents=True, exist_ok=True)
             config = self._config(output_dir)
             final_path = output_dir / "Order_OK0VUZ.zip"
             result = DownloadResult(

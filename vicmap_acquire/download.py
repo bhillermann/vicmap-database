@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass
@@ -16,6 +18,16 @@ import requests
 
 _REDIRECTS = frozenset({301, 302, 303, 307, 308})
 _NO_PROGRESS: Callable[[dict[str, object]], None] = lambda event: None
+
+PROVENANCE_SIDECAR_SUFFIX = ".provenance.json"
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_LOWER_HEX = re.compile(r"[0-9a-f]+")
+# Mirrors vicmap_acquire.evidence's fingerprint length bounds -- a
+# provenance sidecar's message_fingerprint must be a hex string that some
+# valid fingerprint_hex_chars configuration could have produced.
+_FINGERPRINT_MIN_HEX_CHARS = 8
+_FINGERPRINT_MAX_HEX_CHARS = 64
+_PROVENANCE_KEYS = frozenset({"order_id", "message_fingerprint", "sha256", "byte_count"})
 
 
 class DownloadFailure(RuntimeError):
@@ -53,6 +65,12 @@ class DownloadHttpFailed(DownloadFailure):
 
 class ArtifactWriteFailed(DownloadFailure):
     code = "artifact_write_failed"
+
+
+class ProvenanceUnavailable(DownloadFailure):
+    """A missing, unreadable, malformed, or mismatched provenance sidecar."""
+
+    code = "provenance_unavailable"
 
 
 # Plan 01 compatibility: existing callers catch this name and inspect only ``code``.
@@ -192,6 +210,16 @@ class DownloadResult:
     temp_cleanup_deferred: bool = False
 
 
+@dataclass(frozen=True)
+class ArtifactProvenance:
+    """D-32/D-28's durable record: message fingerprint, digest, and size."""
+
+    order_id: str
+    message_fingerprint: str
+    sha256: str
+    byte_count: int
+
+
 def _nonnegative_integer(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
@@ -303,6 +331,127 @@ def _publish_artifact(temp_path: Path, final_path: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+def _provenance_sidecar_path(final_path: Path, order_id: str) -> Path:
+    # Derived from order_id, not by string-replacing the artifact filename --
+    # the artifact's own filename shape is not this function's contract.
+    return final_path.parent / f"Order_{order_id}{PROVENANCE_SIDECAR_SUFFIX}"
+
+
+def write_provenance_sidecar(
+    final_path: Path,
+    *,
+    order_id: str,
+    message_fingerprint: str,
+    sha256: str,
+    byte_count: int,
+) -> Path:
+    """Durably publish the D-32/D-28 provenance sidecar beside ``final_path``.
+
+    Mirrors ``_publish_artifact``'s exact atomic idiom: a private temporary
+    name in the artifact's own directory, flushed and fsynced, then
+    ``os.link`` to the sidecar path as the sole commit point. A
+    ``FileExistsError`` from ``os.link`` propagates as ``ArtifactWriteFailed``
+    exactly as artifact publication does -- an existing sidecar is never
+    silently replaced. This call never re-decides an already-committed
+    artifact publication: it is only ever invoked after ``final_path`` exists.
+    """
+
+    sidecar_path = _provenance_sidecar_path(final_path, order_id)
+    output_dir = sidecar_path.parent
+    payload = {
+        "order_id": order_id,
+        "message_fingerprint": message_fingerprint,
+        "sha256": sha256,
+        "byte_count": byte_count,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+
+    try:
+        descriptor, raw_temp_path = tempfile.mkstemp(
+            prefix=".vicmap-download-", suffix=".part", dir=output_dir
+        )
+    except OSError:
+        raise ArtifactWriteFailed() from None
+    temp_path = Path(raw_temp_path)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(canonical.encode("utf-8"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temp_path, sidecar_path)
+        _fsync_directory(sidecar_path.parent)
+    except FileExistsError:
+        raise ArtifactWriteFailed() from None
+    except OSError:
+        raise ArtifactWriteFailed() from None
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+    return sidecar_path
+
+
+def read_provenance_sidecar(artifact_path: Path, *, order_id: str) -> ArtifactProvenance:
+    """Read and strictly validate the provenance sidecar for ``artifact_path``.
+
+    Any deviation from a fully well-formed record raises
+    ``ProvenanceUnavailable`` -- a missing file, malformed JSON, an
+    unexpected key set, an unsafe scalar, or an ``order_id`` mismatch.
+    ``None`` stays reserved for ordinary non-matches elsewhere in this
+    codebase; a malformed provenance record is never partially returned.
+    """
+
+    sidecar_path = _provenance_sidecar_path(artifact_path, order_id)
+    try:
+        raw_text = sidecar_path.read_text(encoding="utf-8")
+    except OSError:
+        raise ProvenanceUnavailable() from None
+    except UnicodeDecodeError:
+        raise ProvenanceUnavailable() from None
+
+    try:
+        payload = json.loads(raw_text)
+    except ValueError:
+        raise ProvenanceUnavailable() from None
+
+    if not isinstance(payload, dict) or set(payload) != _PROVENANCE_KEYS:
+        raise ProvenanceUnavailable()
+
+    payload_order_id = payload["order_id"]
+    payload_message_fingerprint = payload["message_fingerprint"]
+    payload_sha256 = payload["sha256"]
+    payload_byte_count = payload["byte_count"]
+
+    if not isinstance(payload_order_id, str) or payload_order_id != order_id:
+        raise ProvenanceUnavailable()
+    if not isinstance(payload_sha256, str) or _SHA256_HEX.fullmatch(payload_sha256) is None:
+        raise ProvenanceUnavailable()
+    if (
+        isinstance(payload_byte_count, bool)
+        or not isinstance(payload_byte_count, int)
+        or payload_byte_count < 0
+    ):
+        raise ProvenanceUnavailable()
+    if (
+        not isinstance(payload_message_fingerprint, str)
+        or not (
+            _FINGERPRINT_MIN_HEX_CHARS
+            <= len(payload_message_fingerprint)
+            <= _FINGERPRINT_MAX_HEX_CHARS
+        )
+        or _LOWER_HEX.fullmatch(payload_message_fingerprint) is None
+    ):
+        raise ProvenanceUnavailable()
+
+    return ArtifactProvenance(
+        order_id=payload_order_id,
+        message_fingerprint=payload_message_fingerprint,
+        sha256=payload_sha256,
+        byte_count=payload_byte_count,
+    )
 
 
 def _clean_session(session: object) -> None:

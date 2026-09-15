@@ -938,5 +938,39 @@ class DownloadCommitPointTest(unittest.TestCase):
             self.assertEqual(b"existing", final_path.read_bytes())
 
 
+class ProvenanceSidecarPostCommitTest(unittest.TestCase):
+    """A sidecar write failure after publication never re-decides the artifact."""
+
+    def test_post_commit_sidecar_failure_never_undoes_the_published_artifact(self):
+        payload = b"published despite a post-commit sidecar failure"
+        response = _response(payload)
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            result, _ = _download_new(response, output_dir)
+            self.assertTrue(result.path.exists())
+
+            def failing_mkstemp(*args, **kwargs):
+                raise OSError("simulated sidecar temp-file failure")
+
+            with (
+                patch.object(download.tempfile, "mkstemp", side_effect=failing_mkstemp),
+                self.assertRaises(download.ArtifactWriteFailed),
+            ):
+                download.write_provenance_sidecar(
+                    result.path,
+                    order_id="OK0VUZ",
+                    message_fingerprint="0123456789abcdef",
+                    sha256=result.sha256,
+                    byte_count=result.byte_count,
+                )
+
+            # The already-committed artifact publication is never re-decided
+            # by a post-commit sidecar failure.
+            self.assertTrue(result.path.exists())
+            self.assertEqual(payload, result.path.read_bytes())
+            sidecar_path = output_dir / "Order_OK0VUZ.provenance.json"
+            self.assertFalse(sidecar_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
