@@ -4,11 +4,11 @@ milestone: v0.1
 current_phase: 02
 current_phase_name: Safe Geospatial Discovery
 status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-09-15T22:31:08.750Z"
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-09-15T22:46:16.746Z"
 last_activity: 2026-09-14
 last_activity_desc: Phase 02 execution started
-state_head: f6431102d0c06525264175cf3f437310042b84cc
+state_head: 803cfecb4bdb110d96578bbaeea158dd1ea8ba64
 progress:
   total_phases: 5
   completed_phases: 0
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 02 (Safe Geospatial Discovery) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-09-14 — Phase 02 execution started
 
 ## Session
 
-**Last session:** 2026-09-15T22:31:08.708Z
-**Stopped at:** Completed 02-03-PLAN.md
+**Last session:** 2026-09-15T22:46:16.707Z
+**Stopped at:** Completed 02-04-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -67,6 +67,7 @@ Last activity: 2026-09-14 — Phase 02 execution started
 | Phase 02 P01 | 55min | 3 tasks | 15 files |
 | Phase 02 P02 | 55min | 2 tasks | 9 files |
 | Phase 02 P03 | 50min | 2 tasks | 2 files |
+| Phase 02 P04 | 40min | 3 tasks | 3 files |
 
 ## Decisions
 
@@ -119,6 +120,9 @@ Last activity: 2026-09-14 — Phase 02 execution started
 - [Phase 02]: Task 1 and Task 2 for extraction hardening committed together (same function body, shared exception wrap).
 - [Phase 02]: Fixed verify_artifact to raise ArtifactChecksumMismatch (not ArchiveUnreadable) for an absent artifact file.
 - [Phase 02]: Documented that zipfile.ZipExtFile caps decompressed output at declared file_size; adapted the per-member-ceiling test to an equivalent constructible fixture.
+- [Phase 02]: Combined Task 1 and Task 2 into one commit for discovery.py since both rewrite the same enumeration/profiling call chain 02-01 had already left substantially complete.
+- [Phase 02]: find_datasets re-checks pyogrio.read_info's own reported driver against the allowlist (not just the extension-mapped driver), closing the extension-lies-about-format gap.
+- [Phase 02]: test_discovery_differential.py imports exactly discover_layers and DiscoveryPolicy from vicmap_acquire.discovery; DiscoveryPolicy is a required config container, not a parsing helper, so it is exempted from the single-entry-point independence rule and enforced via an ast self-check.
 
 ### Blockers
 
