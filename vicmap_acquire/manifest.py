@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -125,19 +126,46 @@ def _companion_payload(companion: CompanionFile) -> dict:
 
 
 def manifest_payload(manifest: ImportManifest) -> dict:
-    """Return the complete, full-detail JSON-serializable manifest payload."""
+    """Return the complete, full-detail JSON-serializable manifest payload.
+
+    ``provenance`` nests every run-identity field (D-32) in one object --
+    settled Task 1 contract -- distinct from the ``layers``/``companions``
+    arrays, which never sort their own element order (only JSON object keys
+    are canonically sorted by ``write_manifest``'s ``sort_keys=True``).
+    """
 
     return {
         "schema_version": manifest.schema_version,
-        "order_id": manifest.order_id,
-        "run_timestamp": manifest.run_timestamp,
-        "run_directory": manifest.run_directory,
-        "artifact_sha256": manifest.artifact_sha256,
-        "artifact_byte_count": manifest.artifact_byte_count,
-        "message_fingerprint": manifest.message_fingerprint,
+        "provenance": {
+            "order_id": manifest.order_id,
+            "run_timestamp": manifest.run_timestamp,
+            "run_directory": manifest.run_directory,
+            "artifact_sha256": manifest.artifact_sha256,
+            "artifact_byte_count": manifest.artifact_byte_count,
+            "message_fingerprint": manifest.message_fingerprint,
+        },
         "layers": [_layer_payload(layer) for layer in manifest.layers],
         "companions": [_companion_payload(companion) for companion in manifest.companions],
     }
+
+
+def _write_new_file_fsync(path: Path, content: str) -> None:
+    """Write ``content`` to a brand-new file only, fsyncing before close.
+
+    ``O_EXCL`` makes "does this file already exist" and "create it" one
+    atomic kernel operation -- no separate existence check that a second
+    concurrent run could race between checking and creating. A
+    ``FileExistsError`` (an ``OSError`` subclass) and any other ``OSError``
+    both propagate to the caller, which maps every one of them to
+    ``ManifestWriteFailed``; the existing file is never opened, truncated,
+    or otherwise touched.
+    """
+
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(content.encode("utf-8"))
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def write_manifest(manifest: ImportManifest, run_directory: Path) -> str:
@@ -146,8 +174,11 @@ def write_manifest(manifest: ImportManifest, run_directory: Path) -> str:
     Reuses the repository's one existing deterministic-JSON idiom
     (``evidence.py``'s ``json.dumps(..., sort_keys=True, separators=(",", ":"))``).
     A file cannot embed its own hash, so the digest lives in the sidecar,
-    computed over the canonical bytes without the trailing newline. Returns
-    the digest.
+    computed over the canonical bytes without the trailing newline. Both
+    files are created exclusively (never overwritten) and fsynced before
+    close, so a second run into the same run directory can never silently
+    replace the first manifest -- it raises ``ManifestWriteFailed`` instead,
+    leaving the existing file byte-identical. Returns the digest.
     """
 
     try:
@@ -157,8 +188,9 @@ def write_manifest(manifest: ImportManifest, run_directory: Path) -> str:
 
         manifest_path = run_directory / "manifest.json"
         sidecar_path = run_directory / "manifest.json.sha256"
-        manifest_path.write_text(canonical + "\n", encoding="utf-8")
-        sidecar_path.write_text(digest + "\n", encoding="utf-8")
+
+        _write_new_file_fsync(manifest_path, canonical + "\n")
+        _write_new_file_fsync(sidecar_path, digest + "\n")
         return digest
     except OSError:
         raise ManifestWriteFailed() from None
