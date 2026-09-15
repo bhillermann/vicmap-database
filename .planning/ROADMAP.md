@@ -85,7 +85,7 @@ Plans:
 3. Every source layer has a deterministic target table name visible before loading begins.
 4. An unreadable dataset or normalized-name collision stops the run before any database object is changed.
 
-**Plans:** 1/6 plans executed
+**Plans:** 2/6 plans executed
 
 Plans:
 
@@ -95,7 +95,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 02-02-PLAN.md — Persist the Phase 1 provenance sidecar and make Phase 2 policy reviewable in `vicmap.toml`.
+- [x] 02-02-PLAN.md — Persist the Phase 1 provenance sidecar and make Phase 2 policy reviewable in `vicmap.toml`.
 - [ ] 02-03-PLAN.md — Make archive extraction fail closed on every guard and ceiling.
 - [ ] 02-04-PLAN.md — Profile every layer completely and confirm it against an independent `ogrinfo` oracle.
 - [ ] 02-05-PLAN.md — Make every target table name deterministic and same-delivery collisions a hard stop.
@@ -162,7 +162,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Trusted Graph Acquisition | 14/14 | In Progress|  |
-| 2. Safe Geospatial Discovery | 1/6 | In Progress|  |
+| 2. Safe Geospatial Discovery | 2/6 | In Progress|  |
 | 3. Validated PostGIS Staging | 0/TBD | Not started | — |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
 | 5. Approved Legacy Cleanup | 0/TBD | Not started | — |

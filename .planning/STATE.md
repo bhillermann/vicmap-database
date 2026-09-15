@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 02
 current_phase_name: Safe Geospatial Discovery
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-09-15T21:46:05.738Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-09-15T22:09:47.015Z"
 last_activity: 2026-09-14
 last_activity_desc: Phase 02 execution started
-state_head: 03554c2dda56f8666da597d5ffb25edf4d70fc7d
+state_head: 9218c707c9444f67fa6a3376b44cc638bc0cf268
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 20
-  completed_plans: 15
+  completed_plans: 16
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 02 (Safe Geospatial Discovery) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 Status: Ready to execute
 Last activity: 2026-09-14 — Phase 02 execution started
 
 ## Session
 
-**Last session:** 2026-09-15T21:46:05.699Z
-**Stopped at:** Completed 02-01-PLAN.md
+**Last session:** 2026-09-15T22:09:46.974Z
+**Stopped at:** Completed 02-02-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -65,6 +65,7 @@ Last activity: 2026-09-14 — Phase 02 execution started
 | Phase 01 P13 | 13min | 3 tasks | 4 files |
 | Phase 01 P14 | 27min | 4 tasks | 4 files |
 | Phase 02 P01 | 55min | 3 tasks | 15 files |
+| Phase 02 P02 | 55min | 2 tasks | 9 files |
 
 ## Decisions
 
@@ -111,6 +112,9 @@ Last activity: 2026-09-14 — Phase 02 execution started
 - [Phase 02]: D-21 confirmed locked (operator, Task 2 checkpoint): target table name is {gdb_stem}_{layer} normalized, no configurable prefix.
 - [Phase 02]: Added ProvenanceUnavailable exception to extraction.py to make PROVENANCE_UNAVAILABLE reachable, distinct from ArtifactChecksumMismatch.
 - [Phase 02]: run_discovery re-raises the original typed exception after emitting a redacted failure event, rather than wrapping it in a new orchestration failure type.
+- [Phase 02]: Persisted D-32's Phase 1 message fingerprint as a durable artifacts/Order_{id}.provenance.json sidecar, closing the Phase 1-to-Phase 2 provenance handoff gap. — Phase 1's run_acquisition only ever rendered the fingerprint to stdout; Phase 2 needs it after Phase 1's process has exited.
+- [Phase 02]: vicmap.toml's load_config now requires the complete four-section {mailbox, download, extraction, discovery} key set; one file is the whole non-secret policy. — A file missing the Phase 2 sections must fail closed rather than half-loading.
+- [Phase 02]: discover_order.py's main() requires vicmap.toml's allowed_order_ids to name exactly one order for now; the complete ordered run_discovery composition and CLI exit contract are deferred to 02-06. — 02-06 is the plan explicitly scoped to settle the immutable manifest contract and multi-order CLI ergonomics per ROADMAP.md.
 
 ### Blockers
 
