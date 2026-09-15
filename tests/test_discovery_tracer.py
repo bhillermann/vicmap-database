@@ -73,7 +73,7 @@ class OrderManifestTracerTest(unittest.TestCase):
                 max_total_bytes=5 * 1024 * 1024,
                 max_member_bytes=2 * 1024 * 1024,
                 max_member_count=64,
-                max_compression_ratio=100,
+                max_compression_ratio=200,
             ),
             discovery_policy=discovery.DiscoveryPolicy(
                 supported_formats=("OpenFileGDB",),

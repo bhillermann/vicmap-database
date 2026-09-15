@@ -43,6 +43,11 @@ class Stage(str, Enum):
     DOWNLOAD = "download"
     ARTIFACT_WRITE = "artifact_write"
     INTERNAL = "internal"
+    ARTIFACT_VERIFY = "artifact_verify"
+    EXTRACTION = "extraction"
+    DISCOVERY = "discovery"
+    NAMING = "naming"
+    MANIFEST = "manifest"
 
 
 class ReasonCode(str, Enum):
@@ -62,6 +67,23 @@ class ReasonCode(str, Enum):
     DOWNLOAD_HTTP_FAILED = "download_http_failed"
     ARTIFACT_WRITE_FAILED = "artifact_write_failed"
     INTERNAL_FAILURE = "internal_failure"
+    ARTIFACT_CHECKSUM_MISMATCH = "artifact_checksum_mismatch"
+    PROVENANCE_UNAVAILABLE = "provenance_unavailable"
+    ARCHIVE_TRAVERSAL_REJECTED = "archive_traversal_rejected"
+    ARCHIVE_UNSAFE_MEMBER_REJECTED = "archive_unsafe_member_rejected"
+    ARCHIVE_CEILING_EXCEEDED = "archive_ceiling_exceeded"
+    ARCHIVE_UNREADABLE = "archive_unreadable"
+    RUN_DIRECTORY_WRITE_FAILED = "run_directory_write_failed"
+    UNSUPPORTED_FORMAT = "unsupported_format"
+    DELIVERY_EMPTY = "delivery_empty"
+    LAYER_UNREADABLE = "layer_unreadable"
+    LAYER_EMPTY = "layer_empty"
+    GEOMETRY_TYPE_UNRESOLVED = "geometry_type_unresolved"
+    CRS_UNRESOLVED = "crs_unresolved"
+    LAYER_SCHEMA_INCOMPLETE = "layer_schema_incomplete"
+    TABLE_NAME_INVALID = "table_name_invalid"
+    TABLE_NAME_COLLISION = "table_name_collision"
+    MANIFEST_WRITE_FAILED = "manifest_write_failed"
 
 
 _FAILURE_POLICY = MappingProxyType(
@@ -130,6 +152,74 @@ _FAILURE_POLICY = MappingProxyType(
             Stage.INTERNAL,
             "review_safe_diagnostics_and_retry",
         ),
+        ReasonCode.ARTIFACT_CHECKSUM_MISMATCH: (
+            Stage.ARTIFACT_VERIFY,
+            "request_a_fresh_delivery",
+        ),
+        ReasonCode.PROVENANCE_UNAVAILABLE: (
+            Stage.ARTIFACT_VERIFY,
+            "supply_phase_one_provenance_before_retrying",
+        ),
+        ReasonCode.ARCHIVE_TRAVERSAL_REJECTED: (
+            Stage.EXTRACTION,
+            "review_delivery_without_bypassing_extraction_guards",
+        ),
+        ReasonCode.ARCHIVE_UNSAFE_MEMBER_REJECTED: (
+            Stage.EXTRACTION,
+            "review_delivery_without_bypassing_extraction_guards",
+        ),
+        ReasonCode.ARCHIVE_CEILING_EXCEEDED: (
+            Stage.EXTRACTION,
+            "review_extraction_ceiling_policy",
+        ),
+        ReasonCode.ARCHIVE_UNREADABLE: (
+            Stage.EXTRACTION,
+            "request_a_fresh_delivery",
+        ),
+        ReasonCode.RUN_DIRECTORY_WRITE_FAILED: (
+            Stage.EXTRACTION,
+            "review_run_root_and_preserve_existing_runs",
+        ),
+        ReasonCode.UNSUPPORTED_FORMAT: (
+            Stage.DISCOVERY,
+            "review_supported_formats_without_broadening_allowlist",
+        ),
+        ReasonCode.DELIVERY_EMPTY: (
+            Stage.DISCOVERY,
+            "request_a_fresh_delivery",
+        ),
+        ReasonCode.LAYER_UNREADABLE: (
+            Stage.DISCOVERY,
+            "request_a_fresh_delivery",
+        ),
+        ReasonCode.LAYER_EMPTY: (
+            Stage.DISCOVERY,
+            "request_a_fresh_delivery",
+        ),
+        ReasonCode.GEOMETRY_TYPE_UNRESOLVED: (
+            Stage.DISCOVERY,
+            "request_a_fresh_delivery",
+        ),
+        ReasonCode.CRS_UNRESOLVED: (
+            Stage.DISCOVERY,
+            "request_a_fresh_delivery",
+        ),
+        ReasonCode.LAYER_SCHEMA_INCOMPLETE: (
+            Stage.DISCOVERY,
+            "request_a_fresh_delivery",
+        ),
+        ReasonCode.TABLE_NAME_INVALID: (
+            Stage.NAMING,
+            "review_layer_and_dataset_names_without_bypassing_normalization",
+        ),
+        ReasonCode.TABLE_NAME_COLLISION: (
+            Stage.NAMING,
+            "narrow_the_order_or_configure_a_crs_format_preference",
+        ),
+        ReasonCode.MANIFEST_WRITE_FAILED: (
+            Stage.MANIFEST,
+            "review_run_directory_permissions_and_retry",
+        ),
     }
 )
 
@@ -192,6 +282,15 @@ def _require_fingerprint(value: str, expected_length: int = 16) -> str:
 def _require_count(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError("byte_count must be a non-negative integer")
+    return value
+
+
+_TARGET_TABLE = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def _require_target_table(value: str) -> str:
+    if not isinstance(value, str) or _TARGET_TABLE.fullmatch(value) is None:
+        raise ValueError("target table name is not a safe scalar")
     return value
 
 
@@ -277,6 +376,76 @@ class SuccessEvent(_SafeEvent):
                 "event": "artifact_finalized",
                 "byte_count": _require_count(byte_count),
                 "sha256": sha256,
+            }
+        )
+
+    @classmethod
+    def artifact_verified(
+        cls, *, order_id: str, byte_count: int, sha256: str
+    ) -> "SuccessEvent":
+        if not isinstance(sha256, str) or _HEX_64.fullmatch(sha256) is None:
+            raise ValueError("sha256 is not a complete lowercase SHA-256 value")
+        return cls(
+            {
+                "event": "artifact_verified",
+                "order_id": _require_order_id(order_id),
+                "byte_count": _require_count(byte_count),
+                "sha256": sha256,
+            }
+        )
+
+    @classmethod
+    def archive_extracted(
+        cls,
+        *,
+        order_id: str,
+        member_count: int,
+        total_byte_count: int,
+        run_path_fingerprint: str,
+        fingerprint_hex_chars: int = 16,
+    ) -> "SuccessEvent":
+        return cls(
+            {
+                "event": "archive_extracted",
+                "order_id": _require_order_id(order_id),
+                "member_count": _require_count(member_count),
+                "total_byte_count": _require_count(total_byte_count),
+                "run_path_fingerprint": _require_fingerprint(
+                    run_path_fingerprint, fingerprint_hex_chars
+                ),
+            }
+        )
+
+    @classmethod
+    def manifest_completed(
+        cls,
+        *,
+        order_id: str,
+        layer_count: int,
+        companion_count: int,
+        target_tables: tuple[str, ...],
+        manifest_sha256: str,
+        run_path_fingerprint: str,
+        fingerprint_hex_chars: int = 16,
+    ) -> "SuccessEvent":
+        if not isinstance(target_tables, tuple) or not all(
+            isinstance(table, str) for table in target_tables
+        ):
+            raise ValueError("target_tables must be a tuple of strings")
+        validated_tables = [_require_target_table(table) for table in target_tables]
+        if not isinstance(manifest_sha256, str) or _HEX_64.fullmatch(manifest_sha256) is None:
+            raise ValueError("manifest_sha256 is not a complete lowercase SHA-256 value")
+        return cls(
+            {
+                "event": "manifest_completed",
+                "order_id": _require_order_id(order_id),
+                "layer_count": _require_count(layer_count),
+                "companion_count": _require_count(companion_count),
+                "target_tables": validated_tables,
+                "manifest_sha256": manifest_sha256,
+                "run_path_fingerprint": _require_fingerprint(
+                    run_path_fingerprint, fingerprint_hex_chars
+                ),
             }
         )
 
