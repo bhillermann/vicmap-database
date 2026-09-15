@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 02
 current_phase_name: Safe Geospatial Discovery
 status: executing
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-09-15T22:46:16.746Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-09-15T23:00:17.204Z"
 last_activity: 2026-09-14
 last_activity_desc: Phase 02 execution started
-state_head: 803cfecb4bdb110d96578bbaeea158dd1ea8ba64
+state_head: f71a892ef49d3b8966e5d4968d6e90d619770595
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 20
-  completed_plans: 17
+  completed_plans: 19
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 02 (Safe Geospatial Discovery) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
 Last activity: 2026-09-14 — Phase 02 execution started
 
 ## Session
 
-**Last session:** 2026-09-15T22:46:16.707Z
-**Stopped at:** Completed 02-04-PLAN.md
+**Last session:** 2026-09-15T22:59:59.683Z
+**Stopped at:** Completed 02-05-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -68,6 +68,7 @@ Last activity: 2026-09-14 — Phase 02 execution started
 | Phase 02 P02 | 55min | 2 tasks | 9 files |
 | Phase 02 P03 | 50min | 2 tasks | 2 files |
 | Phase 02 P04 | 40min | 3 tasks | 3 files |
+| Phase 02 P05 | 25min | 2 tasks | 2 files |
 
 ## Decisions
 
@@ -123,6 +124,8 @@ Last activity: 2026-09-14 — Phase 02 execution started
 - [Phase 02]: Combined Task 1 and Task 2 into one commit for discovery.py since both rewrite the same enumeration/profiling call chain 02-01 had already left substantially complete.
 - [Phase 02]: find_datasets re-checks pyogrio.read_info's own reported driver against the allowlist (not just the extension-mapped driver), closing the extension-lies-about-format gap.
 - [Phase 02]: test_discovery_differential.py imports exactly discover_layers and DiscoveryPolicy from vicmap_acquire.discovery; DiscoveryPolicy is a required config container, not a parsing helper, so it is exempted from the single-entry-point independence rule and enforced via an ast self-check.
+- [Phase 02]: Reserved-keyword list fetched from live PostgreSQL 18.6 Appendix C docs (101 words, both blocking categories) rather than a hand-typed shortlist. — Matches the plan's explicit warning that a hand-typed shortlist misses the second blocking category (e.g. binary, concurrently, current_schema).
+- [Phase 02]: assign_target_table_names normalizes all profiles first, before any collision comparison, so an invalid name always beats a collision regardless of input order. — Matches the plan's explicit ordering requirement and the total-function-with-catch-all pattern used elsewhere in the codebase.
 
 ### Blockers
 

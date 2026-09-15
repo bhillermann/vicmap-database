@@ -162,3 +162,10 @@ None - no external service configuration required.
 ---
 *Phase: 02-safe-geospatial-discovery*
 *Completed: 2026-09-16*
+
+## Self-Check: PASSED
+
+Both key files found on disk (`vicmap_acquire/naming.py`, `tests/test_naming.py`),
+plus the SUMMARY.md itself. All 3 referenced commits (`3e59423`, `be7d96d`,
+`f71a892`) found in `git log`. `tests.test_naming` re-run: 40 tests, `OK`.
+Full suite re-run: 343 tests, `OK` (303 baseline + 40 new, zero regressions).
