@@ -7,6 +7,12 @@ does not expose field width/precision/nullability, so a single
 gap (verified in 02-RESEARCH.md's Pattern 3). Every public entry point is
 total with respect to its inputs: an unexpected exception collapses to one
 typed closed failure, never raw driver or subprocess text.
+
+Enumeration (``find_datasets``) is driven by a closed extension-to-driver
+map (D-34): a recognized-but-unlisted format is a named ``UnsupportedFormat``
+failure, never a silent skip, and the driver ``pyogrio.read_info()`` itself
+reports is re-checked against the allowlist so an extension that lies about
+its format is still rejected.
 """
 
 from __future__ import annotations
@@ -15,9 +21,26 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 import pyogrio
 import pyproj
+
+
+# D-34: a static, closed extension-to-driver map. Widening the set of
+# recognized extensions -- as distinct from widening the allowlist a
+# recognized extension must still pass -- is a code change by design; only
+# ``DiscoveryPolicy.supported_formats`` is meant to be a one-line
+# ``vicmap.toml`` edit.
+_EXTENSION_DRIVERS = MappingProxyType(
+    {
+        ".gdb": "OpenFileGDB",
+        ".shp": "ESRI Shapefile",
+        ".gpkg": "GPKG",
+        ".tab": "MapInfo File",
+        ".dxf": "DXF",
+    }
+)
 
 
 class DiscoveryFailure(RuntimeError):
@@ -105,10 +128,87 @@ class LayerProfile:
     fields: tuple[FieldProfile, ...]
 
 
-def find_datasets(run_directory: Path) -> tuple[Path, ...]:
-    """Return every ``.gdb`` dataset directory beneath ``run_directory``, sorted."""
+def find_datasets(
+    run_directory: Path, policy: DiscoveryPolicy
+) -> tuple[tuple[Path, str], ...]:
+    """Return every recognized dataset beneath ``run_directory``, paired with
+    its actual driver, ordered by relative path under plain code-point
+    comparison (D-34).
 
-    return tuple(sorted(path for path in run_directory.rglob("*.gdb") if path.is_dir()))
+    A path is a *candidate* only when its suffix is in ``_EXTENSION_DRIVERS``
+    -- anything else (including the two unclassified companion files) is
+    left alone, never touched. A recognized directory (an ``.gdb``) is never
+    descended into looking for further datasets. A candidate whose
+    extension-mapped driver is not in ``policy.supported_formats`` is
+    rejected without ever opening it. A candidate that passes that cheap
+    check is opened once to confirm it has at least one layer (D-36) and to
+    re-check the driver GDAL itself reports against the allowlist, so a file
+    whose extension lies about its format is still rejected. A run
+    directory yielding zero allowlisted datasets is ``DeliveryEmpty``.
+    """
+
+    try:
+        raw_paths = sorted(
+            run_directory.rglob("*"),
+            key=lambda path: path.relative_to(run_directory).as_posix(),
+        )
+
+        recognized_dirs: list[Path] = []
+        candidates: list[tuple[Path, str]] = []
+
+        for path in raw_paths:
+            if any(
+                path == recognized or recognized in path.parents
+                for recognized in recognized_dirs
+            ):
+                # Never descend into an already-recognized dataset directory
+                # looking for further datasets.
+                continue
+
+            mapped_driver = _EXTENSION_DRIVERS.get(path.suffix)
+            if mapped_driver is None:
+                continue
+
+            if path.is_dir():
+                recognized_dirs.append(path)
+            elif not path.is_file():
+                continue
+
+            candidates.append((path, mapped_driver))
+
+        datasets: list[tuple[Path, str]] = []
+        for path, mapped_driver in candidates:
+            if mapped_driver not in policy.supported_formats:
+                raise UnsupportedFormat()
+
+            try:
+                layer_rows = pyogrio.list_layers(str(path))
+            except Exception:
+                raise LayerUnreadable() from None
+
+            if len(layer_rows) == 0:
+                raise DeliveryEmpty()
+
+            try:
+                actual_driver = pyogrio.read_info(
+                    str(path), layer=str(layer_rows[0][0])
+                ).get("driver")
+            except Exception:
+                raise LayerUnreadable() from None
+
+            if actual_driver not in policy.supported_formats:
+                raise UnsupportedFormat()
+
+            datasets.append((path, actual_driver))
+
+        if not datasets:
+            raise DeliveryEmpty()
+
+        return tuple(datasets)
+    except DiscoveryFailure:
+        raise
+    except Exception:
+        raise LayerUnreadable() from None
 
 
 def read_field_schema(
@@ -118,44 +218,71 @@ def read_field_schema(
 
     ``-so`` (summary-only) avoids a full geometry scan; ``-al`` enumerates
     every layer's fields in the one subprocess invocation, so this runs
-    once per dataset, not once per layer.
+    once per dataset, not once per layer. A field entry missing ``name``,
+    ``type``, or ``nullable`` is ``LayerSchemaIncomplete`` -- those are
+    always required. An absent ``width``/``precision`` is normal (OpenFileGDB
+    numeric/datetime fields never carry them) and is recorded as ``None``,
+    never a failure. A layer with an empty field list is also
+    ``LayerSchemaIncomplete``. A subprocess failure, timeout, or invalid JSON
+    is ``LayerUnreadable`` -- never raw subprocess output.
     """
 
     try:
-        result = subprocess.run(
-            ["ogrinfo", "-json", "-al", "-so", str(dataset_path)],
-            capture_output=True,
-            text=True,
-            timeout=policy.ogrinfo_timeout_seconds,
-            check=True,
-        )
-        payload = json.loads(result.stdout)
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        json.JSONDecodeError,
-        OSError,
-    ):
-        raise LayerUnreadable() from None
+        try:
+            result = subprocess.run(
+                ["ogrinfo", "-json", "-al", "-so", str(dataset_path)],
+                capture_output=True,
+                text=True,
+                timeout=policy.ogrinfo_timeout_seconds,
+                check=True,
+            )
+            payload = json.loads(result.stdout)
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            json.JSONDecodeError,
+            OSError,
+        ):
+            raise LayerUnreadable() from None
 
-    schema: dict[str, tuple[FieldProfile, ...]] = {}
-    try:
+        if not isinstance(payload, dict) or not isinstance(payload.get("layers"), list):
+            raise LayerUnreadable()
+
+        schema: dict[str, tuple[FieldProfile, ...]] = {}
         for layer in payload["layers"]:
-            fields = []
-            for field in layer.get("fields", []):
+            if not isinstance(layer, dict) or not isinstance(layer.get("name"), str):
+                raise LayerUnreadable()
+            raw_fields = layer.get("fields")
+            if not isinstance(raw_fields, list):
+                raise LayerUnreadable()
+
+            fields: list[FieldProfile] = []
+            for field in raw_fields:
+                if (
+                    not isinstance(field, dict)
+                    or "name" not in field
+                    or "type" not in field
+                    or "nullable" not in field
+                ):
+                    raise LayerSchemaIncomplete()
                 fields.append(
                     FieldProfile(
                         name=field["name"],
                         ogr_type=field["type"],
                         width=field.get("width"),
                         precision=field.get("precision"),
-                        nullable=bool(field.get("nullable", True)),
+                        nullable=bool(field["nullable"]),
                     )
                 )
+            if not fields:
+                raise LayerSchemaIncomplete()
             schema[layer["name"]] = tuple(fields)
-    except (KeyError, TypeError):
+
+        return schema
+    except DiscoveryFailure:
+        raise
+    except Exception:
         raise LayerUnreadable() from None
-    return schema
 
 
 def _resolve_epsg(crs_field: str | None) -> int:
@@ -176,45 +303,56 @@ def profile_layer(
     dataset_path: Path,
     layer_name: str,
     *,
+    driver: str,
     dataset_relative_path: str,
     field_schema: tuple[FieldProfile, ...],
     policy: DiscoveryPolicy,
 ) -> LayerProfile:
     """Profile one layer via ``pyogrio.read_info()``, total w.r.t. its inputs.
 
-    ``geometry_type is None`` is D-35's legitimate non-spatial layer, never
-    conflated with the exact string ``"Unknown"`` (D-38's hard stop) -- two
-    genuinely distinct pyogrio return values.
+    Checks are ordered so each hard stop fires before any work that depends
+    on it: schema completeness, then feature count, then geometry type, then
+    CRS. ``geometry_type is None`` is D-35's legitimate non-spatial layer,
+    never conflated with the exact string ``"Unknown"`` (D-38's hard stop) --
+    two genuinely distinct pyogrio return values. The CRS resolver is never
+    invoked for a non-spatial layer.
     """
 
     try:
+        if not field_schema:
+            raise LayerSchemaIncomplete()
+
         info = pyogrio.read_info(str(dataset_path), layer=layer_name)
 
-        driver = info.get("driver")
-        if driver not in policy.supported_formats:
-            raise UnsupportedFormat()
-
-        geometry_type = info.get("geometry_type")
-        spatial = geometry_type is not None
-        if spatial and geometry_type == "Unknown":
-            raise GeometryTypeUnresolved()
+        fid_column = info.get("fid_column")
+        if not fid_column:
+            raise LayerSchemaIncomplete()
 
         feature_count = info.get("features")
-        if not isinstance(feature_count, int) or feature_count < 0:
+        if (
+            isinstance(feature_count, bool)
+            or not isinstance(feature_count, int)
+            or feature_count < 0
+        ):
             raise LayerUnreadable()
         if feature_count == 0:
             raise LayerEmpty()
 
-        fid_column = info.get("fid_column")
+        geometry_type = info.get("geometry_type")
+        if geometry_type == "Unknown":
+            raise GeometryTypeUnresolved()
+        spatial = geometry_type is not None
+
         geometry_column = info.get("geometry_name") if spatial else None
-        if not fid_column:
-            raise LayerSchemaIncomplete()
         if spatial and not geometry_column:
             raise LayerSchemaIncomplete()
-        if not field_schema:
-            raise LayerSchemaIncomplete()
 
-        epsg = _resolve_epsg(info.get("crs")) if spatial else None
+        if spatial:
+            source_wkt = info.get("crs")
+            epsg = _resolve_epsg(source_wkt)
+        else:
+            source_wkt = None
+            epsg = None
 
         total_bounds = info.get("total_bounds")
         extent = (
@@ -233,7 +371,7 @@ def profile_layer(
             geometry_column=geometry_column,
             fid_column=fid_column,
             feature_count=feature_count,
-            source_wkt=info.get("crs") if spatial else None,
+            source_wkt=source_wkt,
             epsg=epsg,
             extent=extent,
             fields=field_schema,
@@ -249,15 +387,18 @@ def discover_layers(run_directory: Path, policy: DiscoveryPolicy) -> tuple[Layer
 
     Total with respect to its inputs: any stray exception collapses to
     ``LayerUnreadable`` rather than leaking driver or subprocess text.
+    Profiles are always returned ordered by ``(dataset_relative_path,
+    layer_name)`` under plain code-point comparison, regardless of the order
+    the driver itself reports layers in, so two discoveries of the same
+    delivery produce the same order. Two layers with byte-identical profiles
+    remain two distinct entries -- nothing here merges or deduplicates.
     """
 
     try:
-        datasets = find_datasets(run_directory)
-        if not datasets:
-            raise DeliveryEmpty()
+        datasets = find_datasets(run_directory, policy)
 
         profiles: list[LayerProfile] = []
-        for dataset_path in datasets:
+        for dataset_path, driver in datasets:
             try:
                 layer_rows = pyogrio.list_layers(str(dataset_path))
             except Exception:
@@ -275,6 +416,7 @@ def discover_layers(run_directory: Path, policy: DiscoveryPolicy) -> tuple[Layer
                     profile_layer(
                         dataset_path,
                         layer_name,
+                        driver=driver,
                         dataset_relative_path=dataset_relative_path,
                         field_schema=field_schema,
                         policy=policy,
@@ -284,6 +426,7 @@ def discover_layers(run_directory: Path, policy: DiscoveryPolicy) -> tuple[Layer
         if not profiles:
             raise DeliveryEmpty()
 
+        profiles.sort(key=lambda profile: (profile.dataset_relative_path, profile.layer_name))
         return tuple(profiles)
     except DiscoveryFailure:
         raise
