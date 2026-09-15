@@ -313,6 +313,17 @@ max_redirects = 5
 fingerprint_hex_chars = 16
 output_dir = "artifacts"
 allowed_url_prefixes = ["https://s3.ap-southeast-2.amazonaws.com/private/"]
+
+[extraction]
+run_dir = "runs"
+max_total_bytes = 10737418240
+max_member_bytes = 4294967296
+max_member_count = 4096
+max_compression_ratio = 20
+
+[discovery]
+supported_formats = ["OpenFileGDB"]
+ogrinfo_timeout_seconds = 60
 """
 
 
@@ -361,7 +372,7 @@ class ConfigurationTest(unittest.TestCase):
         import read_mailbox
 
         cases = {
-            "unknown top-level": VALID_TOML + "\nextra = true\n",
+            "unknown top-level": VALID_TOML + "\n[extra]\n",
             "unknown nested": VALID_TOML.replace(
                 "folder = \"Inbox\"", 'folder = "Inbox"\nextra = true'
             ),

@@ -63,12 +63,26 @@ _DOWNLOAD_KEYS = {
     "output_dir",
     "allowed_url_prefixes",
 }
+_EXTRACTION_KEYS = {
+    "run_dir",
+    "max_total_bytes",
+    "max_member_bytes",
+    "max_member_count",
+    "max_compression_ratio",
+}
+_DISCOVERY_KEYS = {
+    "supported_formats",
+    "ogrinfo_timeout_seconds",
+}
 _ORDER_ID = re.compile(r"[A-Za-z0-9]+")
 _HOSTNAME = re.compile(
     r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 )
 _ALLOWED_OUTPUT_NAMES = frozenset({"artifacts"})
+_ALLOWED_RUN_DIR_NAMES = frozenset({"runs"})
+# D-34's initial single-entry format allowlist. Widening is a one-line change.
+_RECOGNIZED_DISCOVERY_FORMATS = frozenset({"OpenFileGDB"})
 
 
 @dataclass(frozen=True)
@@ -89,6 +103,22 @@ class AcquisitionConfig:
     output_dir: Path
     required_authentication_results: tuple[str, ...]
     allowed_url_prefixes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DiscoveryRunConfig:
+    """Complete non-secret Phase 2 policy, reviewable in ``vicmap.toml``."""
+
+    artifacts_dir: Path
+    run_root: Path
+    fingerprint_hex_chars: int
+    allowed_order_ids: tuple[str, ...]
+    max_total_bytes: int
+    max_member_bytes: int
+    max_member_count: int
+    max_compression_ratio: int
+    supported_formats: tuple[str, ...]
+    ogrinfo_timeout_seconds: int
 
 
 class AcquisitionFailure(RuntimeError):
@@ -318,6 +348,59 @@ def validate_acquisition_policy(config: AcquisitionConfig) -> None:
         or (config.output_dir.exists() and not config.output_dir.is_dir())
     ):
         raise AcquisitionFailure("config_invalid")
+
+
+def _positive_bounded_integer(value: object, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AcquisitionFailure("config_invalid")
+    if value < minimum or value > maximum:
+        raise AcquisitionFailure("config_invalid")
+    return value
+
+
+def validate_discovery_policy(config: DiscoveryRunConfig) -> None:
+    """The one semantic contract for Phase 2's ceilings and format allowlist.
+
+    Mirrors ``validate_acquisition_policy``: every check here runs before any
+    archive is opened or any subprocess is spawned, so a directly constructed
+    ``DiscoveryRunConfig`` cannot bypass a rule the TOML loader would have
+    enforced.
+    """
+
+    if not isinstance(config.artifacts_dir, Path) or not config.artifacts_dir.is_absolute():
+        raise AcquisitionFailure("config_invalid")
+
+    if (
+        not isinstance(config.run_root, Path)
+        or not config.run_root.is_absolute()
+        or config.run_root.name not in _ALLOWED_RUN_DIR_NAMES
+    ):
+        raise AcquisitionFailure("config_invalid")
+
+    _positive_bounded_integer(config.fingerprint_hex_chars, 8, 64)
+
+    if not isinstance(config.allowed_order_ids, tuple) or not config.allowed_order_ids:
+        raise AcquisitionFailure("config_invalid")
+
+    _positive_bounded_integer(config.max_total_bytes, 1, 10 * 1024**4)
+    _positive_bounded_integer(config.max_member_bytes, 1, 10 * 1024**4)
+    if config.max_member_bytes > config.max_total_bytes:
+        raise AcquisitionFailure("config_invalid")
+    _positive_bounded_integer(config.max_member_count, 1, 10_000_000)
+    _positive_bounded_integer(config.max_compression_ratio, 1, 10_000)
+
+    if (
+        not isinstance(config.supported_formats, tuple)
+        or not config.supported_formats
+    ):
+        raise AcquisitionFailure("config_invalid")
+    for fmt in config.supported_formats:
+        if not isinstance(fmt, str) or fmt not in _RECOGNIZED_DISCOVERY_FORMATS:
+            raise AcquisitionFailure("config_invalid")
+    if len(set(config.supported_formats)) != len(config.supported_formats):
+        raise AcquisitionFailure("config_invalid")
+
+    _positive_bounded_integer(config.ogrinfo_timeout_seconds, 1, 3600)
 
 
 def run_acquisition(
@@ -577,12 +660,15 @@ def load_config(path: Path) -> AcquisitionConfig:
     extraction, ``Path`` construction, and output-root resolution. Every
     semantic check (format, closed sets, duplicates, bounds) is delegated to
     ``validate_acquisition_policy`` so there is exactly one place those rules
-    exist.
+    exist. The complete four-section key set -- ``mailbox``, ``download``,
+    ``extraction``, ``discovery`` -- must be present so one ``vicmap.toml`` is
+    the project's whole non-secret policy; a file missing the Phase 2
+    sections fails closed rather than half-loading.
     """
 
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
-        if set(raw) != {"mailbox", "download"}:
+        if set(raw) != {"mailbox", "download", "extraction", "discovery"}:
             raise AcquisitionFailure("config_invalid")
         mailbox = raw["mailbox"]
         download = raw["download"]
@@ -639,6 +725,71 @@ def load_config(path: Path) -> AcquisitionConfig:
             allowed_url_prefixes=allowed_url_prefixes,
         )
         validate_acquisition_policy(config)
+        return config
+    except AcquisitionFailure:
+        raise
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+        raise AcquisitionFailure("config_invalid") from None
+
+
+def load_discovery_config(path: Path) -> DiscoveryRunConfig:
+    """Load Phase 2's complete non-secret policy, then apply its contract.
+
+    Reuses ``load_config`` for the shared TOML shape work and mailbox/download
+    semantics (including the complete four-section key-set check), then
+    performs only TOML shape work for ``[extraction]``/``[discovery]`` --
+    key-set equality, type extraction, ``Path`` construction, and run-root
+    resolution against the config file's parent -- before delegating every
+    semantic check to ``validate_discovery_policy``, exactly as ``load_config``
+    delegates to ``validate_acquisition_policy``.
+    """
+
+    acquisition_config = load_config(path)
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        extraction = raw["extraction"]
+        discovery = raw["discovery"]
+        if not isinstance(extraction, dict) or set(extraction) != _EXTRACTION_KEYS:
+            raise AcquisitionFailure("config_invalid")
+        if not isinstance(discovery, dict) or set(discovery) != _DISCOVERY_KEYS:
+            raise AcquisitionFailure("config_invalid")
+
+        run_dir_value = _strict_string(extraction["run_dir"])
+        configured_run_dir = Path(run_dir_value)
+        if configured_run_dir.is_absolute() or any(
+            part in {"", ".", ".."} for part in configured_run_dir.parts
+        ):
+            raise AcquisitionFailure("config_invalid")
+        config_root = path.parent.resolve()
+        run_root = (config_root / configured_run_dir).resolve()
+        if run_root != config_root and config_root not in run_root.parents:
+            raise AcquisitionFailure("config_invalid")
+
+        supported_formats = _string_list(discovery["supported_formats"])
+
+        config = DiscoveryRunConfig(
+            artifacts_dir=acquisition_config.output_dir,
+            run_root=run_root,
+            fingerprint_hex_chars=acquisition_config.fingerprint_hex_chars,
+            allowed_order_ids=acquisition_config.allowed_order_ids,
+            max_total_bytes=_bounded_integer(
+                extraction["max_total_bytes"], 1, 10 * 1024**4
+            ),
+            max_member_bytes=_bounded_integer(
+                extraction["max_member_bytes"], 1, 10 * 1024**4
+            ),
+            max_member_count=_bounded_integer(
+                extraction["max_member_count"], 1, 10_000_000
+            ),
+            max_compression_ratio=_bounded_integer(
+                extraction["max_compression_ratio"], 1, 10_000
+            ),
+            supported_formats=supported_formats,
+            ogrinfo_timeout_seconds=_bounded_integer(
+                discovery["ogrinfo_timeout_seconds"], 1, 3600
+            ),
+        )
+        validate_discovery_policy(config)
         return config
     except AcquisitionFailure:
         raise

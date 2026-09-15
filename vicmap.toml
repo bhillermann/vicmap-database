@@ -17,3 +17,14 @@ max_redirects = 5
 fingerprint_hex_chars = 16
 output_dir = "artifacts"
 allowed_url_prefixes = ["https://s3.ap-southeast-2.amazonaws.com/cl-isd-prd-datashare-s3-delivery/"]
+
+[extraction]
+run_dir = "runs"
+max_total_bytes = 10737418240
+max_member_bytes = 4294967296
+max_member_count = 4096
+max_compression_ratio = 20
+
+[discovery]
+supported_formats = ["OpenFileGDB"]
+ogrinfo_timeout_seconds = 60
