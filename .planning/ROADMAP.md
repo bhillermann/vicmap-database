@@ -108,7 +108,7 @@ Plans:
 
 **Gap-closure Wave 1**
 
-- [ ] 02-07-PLAN.md — Make the shipped `vicmap.toml` able to process the real delivery, proven end to end, and recognize dataset extensions in any letter case.
+- [x] 02-07-PLAN.md — Make the shipped `vicmap.toml` able to process the real delivery, proven end to end, and recognize dataset extensions in any letter case.
 - [ ] 02-08-PLAN.md — Key the extraction aliasing guard on destination identity so recorded provenance can never describe a file that is not on disk.
 
 **Gap-closure Wave 2** *(blocked on Gap-closure Wave 1)*

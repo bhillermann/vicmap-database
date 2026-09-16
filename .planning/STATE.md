@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 02
 current_phase_name: Safe Geospatial Discovery
 status: executing
-stopped_at: Completed 02-06-PLAN.md (Phase 02 complete)
-last_updated: "2026-09-16T11:24:10.034Z"
-last_activity: 2026-09-14
+stopped_at: Completed 02-07-PLAN.md
+last_updated: "2026-09-16T20:51:14.559Z"
+last_activity: 2026-09-17
 last_activity_desc: Phase 02 execution started
-state_head: 004d312bcbdb9f6efa73eee5b5ed91fb0dd587f8
+state_head: 64226ea23061c781730f1c0aeba14e2b35177e1b
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 23
-  completed_plans: 20
+  completed_plans: 21
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -35,15 +35,15 @@ See: .planning/PROJECT.md
 
 ## Current Position
 
-Phase: 02 (Safe Geospatial Discovery) — READY TO EXECUTE
-Plan: 6 of 6
+Phase: 02 (Safe Geospatial Discovery) — EXECUTING
+Plan: 2 of 9
 Status: Ready to execute
-Last activity: 2026-09-14 — Phase 02 execution started
+Last activity: 2026-09-17 — Phase 02 execution started
 
 ## Session
 
-**Last session:** 2026-09-16T10:51:02.517Z
-**Stopped at:** Completed 02-06-PLAN.md (Phase 02 complete)
+**Last session:** 2026-09-16T20:51:14.521Z
+**Stopped at:** Completed 02-07-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -70,6 +70,7 @@ Last activity: 2026-09-14 — Phase 02 execution started
 | Phase 02 P04 | 40min | 3 tasks | 3 files |
 | Phase 02 P05 | 25min | 2 tasks | 2 files |
 | Phase 02 P06 | ~20min (Task 3) | 3 tasks | 3 files |
+| Phase 02-safe-geospatial-discovery P07 | ~15min | 3 tasks | 5 files |
 
 ## Decisions
 
@@ -130,6 +131,9 @@ Last activity: 2026-09-14 — Phase 02 execution started
 - [Phase 02]: [Phase 02] D-21 confirmed locked end-to-end by the live regression: VMADD.gdb/ADDRESS publishes as vicmap.vmadd_address against the real 233 MB delivery.
 - [Phase 02]: [Phase 02] Corrected 02-RESEARCH.md's stated 40-field ADDRESS schema to the live-verified 61 fields (independent ogrinfo oracle); PFI/EZI_ADDRESS/UFI widths reconfirmed correct.
 - [Phase 02]: [Phase 02] Flagged: vicmap.toml's production max_compression_ratio=20 will hard-stop discover_order.py against the real delivery (small OpenFileGDB index files compress up to ~139x); test used a local override of 200, config itself left unchanged (owned by 02-02).
+- [Phase 02-safe-geospatial-discovery]: [Phase 02]: Recalibrated vicmap.toml's max_compression_ratio 20->200, evidence-justified against both the real delivery (139.2432x) and the tracer fixture (122.6667x) measured worst-case per-member ratios. — The byte ceilings (max_total_bytes/max_member_bytes) are the binding resource guard, enforced per 1 MiB chunk during streaming; the ratio check runs after a member is fully written and is an anomaly detector, so raising it does not change worst-case bytes written.
+- [Phase 02-safe-geospatial-discovery]: [Phase 02]: LiveDeliveryRegressionTest now sources its extraction ceilings from read_mailbox.load_discovery_config against the repository's own shipped vicmap.toml instead of a hardcoded test-local override. — Proves the shipped policy processes the real delivery end to end rather than proving a private copy of it; run_root stays test-local since it must never point at the repository's own runs/ directory.
+- [Phase 02-safe-geospatial-discovery]: [Phase 02]: find_datasets' _EXTENSION_DRIVERS lookup now normalizes via path.suffix.casefold() at the call site, closing WR-01 case-sensitive extension recognition. — Keeps the recognized extension set closed and unchanged (exactly five lowercase keys) while widening only which paths get examined; the downstream pyogrio.read_info driver re-check against supported_formats still gates admission.
 
 ### Blockers
 
