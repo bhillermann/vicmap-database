@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 02
 current_phase_name: Safe Geospatial Discovery
 status: executing
-stopped_at: Completed 02-07-PLAN.md
-last_updated: "2026-09-16T20:51:14.559Z"
+stopped_at: Completed 02-08-PLAN.md
+last_updated: "2026-09-16T21:04:15.969Z"
 last_activity: 2026-09-17
 last_activity_desc: Phase 02 execution started
-state_head: 64226ea23061c781730f1c0aeba14e2b35177e1b
+state_head: 7f9321391974c00c221905861401494b0885278f
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 23
-  completed_plans: 21
+  completed_plans: 22
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 02 (Safe Geospatial Discovery) — EXECUTING
-Plan: 2 of 9
+Plan: 3 of 9
 Status: Ready to execute
 Last activity: 2026-09-17 — Phase 02 execution started
 
 ## Session
 
-**Last session:** 2026-09-16T20:51:14.521Z
-**Stopped at:** Completed 02-07-PLAN.md
+**Last session:** 2026-09-16T21:03:57.665Z
+**Stopped at:** Completed 02-08-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -71,6 +71,7 @@ Last activity: 2026-09-17 — Phase 02 execution started
 | Phase 02 P05 | 25min | 2 tasks | 2 files |
 | Phase 02 P06 | ~20min (Task 3) | 3 tasks | 3 files |
 | Phase 02-safe-geospatial-discovery P07 | ~15min | 3 tasks | 5 files |
+| Phase 02-safe-geospatial-discovery P08 | 12min | 2 tasks | 2 files |
 
 ## Decisions
 
@@ -134,6 +135,8 @@ Last activity: 2026-09-17 — Phase 02 execution started
 - [Phase 02-safe-geospatial-discovery]: [Phase 02]: Recalibrated vicmap.toml's max_compression_ratio 20->200, evidence-justified against both the real delivery (139.2432x) and the tracer fixture (122.6667x) measured worst-case per-member ratios. — The byte ceilings (max_total_bytes/max_member_bytes) are the binding resource guard, enforced per 1 MiB chunk during streaming; the ratio check runs after a member is fully written and is an anomaly detector, so raising it does not change worst-case bytes written.
 - [Phase 02-safe-geospatial-discovery]: [Phase 02]: LiveDeliveryRegressionTest now sources its extraction ceilings from read_mailbox.load_discovery_config against the repository's own shipped vicmap.toml instead of a hardcoded test-local override. — Proves the shipped policy processes the real delivery end to end rather than proving a private copy of it; run_root stays test-local since it must never point at the repository's own runs/ directory.
 - [Phase 02-safe-geospatial-discovery]: [Phase 02]: find_datasets' _EXTENSION_DRIVERS lookup now normalizes via path.suffix.casefold() at the call site, closing WR-01 case-sensitive extension recognition. — Keeps the recognized extension set closed and unchanged (exactly five lowercase keys) while widening only which paths get examined; the downstream pyogrio.read_info driver re-check against supported_formats still gates admission.
+- [Phase 02]: Rejected destination.exists() as the aliasing check; _validate_members runs before temp_dir exists, so it would catch nothing. — 02-REVIEW.md's diagnosis was correct but its proposed mechanism was not; resolved-Path and case-folded keys compare members against each other instead.
+- [Phase 02]: Kept the pre-pass identity key (Task 1) and the write-time exclusive create (Task 2) as two separate, complementary guards. — The pre-pass is order-independent and catches nearly everything before any write; the exclusive create is the filesystem's own truth against any identity-key edge case.
 
 ### Blockers
 
