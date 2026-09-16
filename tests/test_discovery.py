@@ -115,6 +115,29 @@ class FindDatasetsTest(_TempDirMixin, unittest.TestCase):
         self.assertNotIn("diagnostic", str(ctx.exception))
         self.assertEqual("layer_unreadable", str(ctx.exception))
 
+    def test_uppercase_geodatabase_extension_is_recognized(self):
+        # At HEAD (pre-02-07) this ends in DeliveryEmpty: the uppercase
+        # directory is never examined because the extension lookup is
+        # case-sensitive (WR-01).
+        gdb_dir = self.run_dir / (
+            "gda2020_vicgrid/filegdb/whole_of_dataset/victoria/VMADD.gdb"
+        )
+        gdb_dir.rename(gdb_dir.with_name("VMADD.GDB"))
+        datasets = discovery.find_datasets(self.run_dir, DEFAULT_POLICY)
+        self.assertEqual(1, len(datasets))
+        path, driver = datasets[0]
+        self.assertTrue(str(path).endswith("VMADD.GDB"))
+        self.assertEqual("OpenFileGDB", driver)
+
+    def test_uppercase_unsupported_extension_raises_unsupported_format(self):
+        # At HEAD (pre-02-07) this also ends in DeliveryEmpty instead of
+        # naming the unsupported format, for the same case-sensitivity
+        # reason (WR-01) -- mirrors test_unsupported_shp_format_raises.
+        empty_dir = self.make_temp_dir("uppercase-unsupported-")
+        (empty_dir / "layer.SHP").write_bytes(b"")
+        with self.assertRaises(discovery.UnsupportedFormat):
+            discovery.find_datasets(empty_dir, DEFAULT_POLICY)
+
     def test_does_not_descend_into_a_recognized_dataset_directory(self):
         nested_dir = self.make_temp_dir("nested-")
         gdb_dir = nested_dir / "OUTER.gdb"

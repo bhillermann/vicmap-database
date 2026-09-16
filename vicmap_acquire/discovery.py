@@ -27,9 +27,10 @@ import pyogrio
 import pyproj
 
 
-# D-34: a static, closed extension-to-driver map. Widening the set of
-# recognized extensions -- as distinct from widening the allowlist a
-# recognized extension must still pass -- is a code change by design; only
+# D-34: a static, closed extension-to-driver map. Matching is
+# case-insensitive (the probe is ``casefold``ed, not this table -- see
+# ``find_datasets``): the set of recognized extensions itself remains
+# closed and only widens by code change; only
 # ``DiscoveryPolicy.supported_formats`` is meant to be a one-line
 # ``vicmap.toml`` edit.
 _EXTENSION_DRIVERS = MappingProxyType(
@@ -165,7 +166,7 @@ def find_datasets(
                 # looking for further datasets.
                 continue
 
-            mapped_driver = _EXTENSION_DRIVERS.get(path.suffix)
+            mapped_driver = _EXTENSION_DRIVERS.get(path.suffix.casefold())
             if mapped_driver is None:
                 continue
 
