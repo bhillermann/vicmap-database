@@ -168,15 +168,48 @@ def _write_new_file_fsync(path: Path, content: str) -> None:
         os.fsync(handle.fileno())
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Fsync a directory entry so a completed publish is durably recorded.
+
+    Mirrors ``extraction.py``'s and ``download.py``'s ``_fsync_directory``
+    exactly: any ``OSError`` from opening, syncing, or closing the directory
+    descriptor is swallowed, because the publish itself has already
+    committed and this call only strengthens durability, never correctness.
+    Kept as a private per-module copy rather than imported from either --
+    each of those two modules already carries its own private copy, so a
+    third follows the established convention, and ``manifest.py`` otherwise
+    depends only on ``discovery``; importing from ``extraction`` here would
+    couple the manifest contract to the extraction module for no contract
+    reason.
+    """
+
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
 def write_manifest(manifest: ImportManifest, run_directory: Path) -> str:
     """Write ``manifest.json`` + ``manifest.json.sha256`` into ``run_directory``.
 
     Reuses the repository's one existing deterministic-JSON idiom
-    (``evidence.py``'s ``json.dumps(..., sort_keys=True, separators=(",", ":"))``).
-    A file cannot embed its own hash, so the digest lives in the sidecar,
-    computed over the canonical bytes without the trailing newline. Both
-    files are created exclusively (never overwritten) and fsynced before
-    close.
+    (``evidence.py``'s ``json.dumps(..., sort_keys=True, separators=(",", ":"))``),
+    except ``ensure_ascii=False``: the digest and the file must be over the
+    manifest's actual UTF-8 bytes, not an ASCII-escaped ``\\uXXXX``
+    representation of non-ASCII layer/dataset names, so byte identity holds
+    for every delivery regardless of naming. A file cannot embed its own
+    hash, so the digest lives in the sidecar, computed over the canonical
+    bytes without the trailing newline. Both files are created exclusively
+    (never overwritten) and fsynced before close.
 
     Publication is atomic: if the sidecar write fails after ``manifest.json``
     was already created, that ``manifest.json`` is rolled back (best-effort
@@ -185,12 +218,17 @@ def write_manifest(manifest: ImportManifest, run_directory: Path) -> str:
     the same directory. A run directory that already holds a complete
     ``manifest.json`` is still never overwritten or unlinked -- the first
     create raises before the sidecar write, or any rollback, is ever
-    attempted. Returns the digest.
+    attempted. Once both files exist, ``run_directory``'s own entry is
+    fsynced exactly once so the publication survives a crash; a call that
+    rolls back never reaches this step, since it has nothing durable to
+    record. Returns the digest.
     """
 
     try:
         payload = manifest_payload(manifest)
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
         manifest_path = run_directory / "manifest.json"
@@ -212,6 +250,7 @@ def write_manifest(manifest: ImportManifest, run_directory: Path) -> str:
                 pass
             raise
 
+        _fsync_directory(run_directory)
         return digest
     except OSError:
         raise ManifestWriteFailed() from None
