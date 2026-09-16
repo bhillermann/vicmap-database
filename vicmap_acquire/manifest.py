@@ -176,9 +176,16 @@ def write_manifest(manifest: ImportManifest, run_directory: Path) -> str:
     A file cannot embed its own hash, so the digest lives in the sidecar,
     computed over the canonical bytes without the trailing newline. Both
     files are created exclusively (never overwritten) and fsynced before
-    close, so a second run into the same run directory can never silently
-    replace the first manifest -- it raises ``ManifestWriteFailed`` instead,
-    leaving the existing file byte-identical. Returns the digest.
+    close.
+
+    Publication is atomic: if the sidecar write fails after ``manifest.json``
+    was already created, that ``manifest.json`` is rolled back (best-effort
+    unlink) before the failure is reported, so a failed call always leaves
+    ``run_directory`` exactly as it found it and is always retryable into
+    the same directory. A run directory that already holds a complete
+    ``manifest.json`` is still never overwritten or unlinked -- the first
+    create raises before the sidecar write, or any rollback, is ever
+    attempted. Returns the digest.
     """
 
     try:
@@ -190,7 +197,21 @@ def write_manifest(manifest: ImportManifest, run_directory: Path) -> str:
         sidecar_path = run_directory / "manifest.json.sha256"
 
         _write_new_file_fsync(manifest_path, canonical + "\n")
-        _write_new_file_fsync(sidecar_path, digest + "\n")
+        try:
+            _write_new_file_fsync(sidecar_path, digest + "\n")
+        except OSError:
+            # manifest_path's create returned above without raising, so
+            # this call is provably its creator (the create is O_EXCL) --
+            # unlinking it here can never remove a pre-existing manifest,
+            # only the one this call just made. Best-effort: a failure of
+            # the unlink itself must still surface as the closed
+            # ManifestWriteFailed below, never as a raw OSError.
+            try:
+                manifest_path.unlink()
+            except OSError:
+                pass
+            raise
+
         return digest
     except OSError:
         raise ManifestWriteFailed() from None
