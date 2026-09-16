@@ -3,16 +3,35 @@
 Covers ``read_mailbox.load_discovery_config`` and
 ``read_mailbox.validate_discovery_policy`` -- the single reviewable,
 fail-closed contract for Phase 2's ceilings, run root, and format allowlist.
+
+``ShippedCeilingCalibrationTest`` and ``CompressionRatioThresholdDirectionTest``
+(02-07 gap closure) additionally pin the shipped ``[extraction].
+max_compression_ratio`` value itself: the former derives each archive's real
+worst-case per-member ratio independently with a bare ``zipfile`` walk (never
+through ``vicmap_acquire.extraction``) and asserts the shipped ceiling
+strictly exceeds it, so the regression goes red both if the ceiling is
+lowered and if a future delivery ships a more compressible member; the
+latter fixes the ratio comparison's accept/reject boundary in both
+directions using ``tests/test_extraction.py``'s explicit-``ZipInfo``
+fixture-builder style.
 """
 
 from __future__ import annotations
 
+import io
 import subprocess
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
+
+from vicmap_acquire import extraction
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FIXTURE_ARCHIVE = REPO_ROOT / "tests" / "fixtures" / "Order_TRACER1.zip"
+REAL_ARTIFACT = REPO_ROOT / "artifacts" / "Order_OK0VUZ.zip"
 
 
 VALID_TOML = """\
@@ -331,6 +350,134 @@ class DirectlyConstructedDiscoveryRunConfigTest(unittest.TestCase):
             with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
                 read_mailbox.validate_discovery_policy(config)
             self.assertEqual("config_invalid", caught.exception.code)
+
+
+class ShippedCeilingCalibrationTest(unittest.TestCase):
+    """Derives each archive's real worst-case per-member compression ratio
+    independently and asserts the shipped ``vicmap.toml`` ceiling strictly
+    exceeds it -- a regression, not a restatement: it goes red both if
+    someone lowers the ceiling and if a future delivery ships a more
+    compressible member, which is the actual failure this gap is about
+    (02-07 Task 2).
+    """
+
+    def _worst_case_ratio(self, archive_path: Path) -> float:
+        with zipfile.ZipFile(archive_path) as archive:
+            infolist = archive.infolist()
+        return max(
+            info.file_size / info.compress_size
+            for info in infolist
+            if info.compress_size
+        )
+
+    def test_shipped_ceiling_exceeds_the_tracer_fixtures_worst_case_ratio(self):
+        import read_mailbox
+
+        worst_case = self._worst_case_ratio(FIXTURE_ARCHIVE)
+        shipped_ceiling = read_mailbox.load_discovery_config(
+            REPO_ROOT / "vicmap.toml"
+        ).max_compression_ratio
+        self.assertGreater(
+            shipped_ceiling,
+            worst_case,
+            f"shipped max_compression_ratio ({shipped_ceiling}) must strictly "
+            f"exceed tests/fixtures/Order_TRACER1.zip's measured worst-case "
+            f"per-member ratio ({worst_case!r})",
+        )
+
+    @unittest.skipUnless(
+        REAL_ARTIFACT.is_file(),
+        "requires artifacts/Order_OK0VUZ.zip on disk",
+    )
+    def test_shipped_ceiling_exceeds_the_real_deliverys_worst_case_ratio(self):
+        import read_mailbox
+
+        worst_case = self._worst_case_ratio(REAL_ARTIFACT)
+        shipped_ceiling = read_mailbox.load_discovery_config(
+            REPO_ROOT / "vicmap.toml"
+        ).max_compression_ratio
+        self.assertGreater(
+            shipped_ceiling,
+            worst_case,
+            f"shipped max_compression_ratio ({shipped_ceiling}) must strictly "
+            f"exceed artifacts/Order_OK0VUZ.zip's measured worst-case "
+            f"per-member ratio ({worst_case!r})",
+        )
+
+
+class CompressionRatioThresholdDirectionTest(unittest.TestCase):
+    """Pins ``extract_artifact``'s ratio-check accept/reject boundary in both
+    directions -- today that boundary (``>`` accepts equality, rejects
+    anything above) is an implementation detail no test would notice
+    changing (02-07 Task 2).
+
+    Uses ``tests/test_extraction.py``'s explicit-``ZipInfo`` fixture-builder
+    style, kept local here so this module never imports
+    ``vicmap_acquire.extraction``'s internals -- only the public
+    ``ExtractionPolicy``, ``extract_artifact``, and ``ArchiveCeilingExceeded``.
+    """
+
+    def _policy(self, run_root: Path, *, max_compression_ratio: int) -> extraction.ExtractionPolicy:
+        return extraction.ExtractionPolicy(
+            run_root=run_root,
+            max_total_bytes=10_000_000,
+            max_member_bytes=10_000_000,
+            max_member_count=10,
+            max_compression_ratio=max_compression_ratio,
+        )
+
+    def _build_single_member_archive(
+        self, name: str, data: bytes, *, compress_type: int
+    ) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            info = zipfile.ZipInfo(name)
+            info.compress_type = compress_type
+            archive.writestr(info, data)
+        return buffer.getvalue()
+
+    def test_ratio_exactly_at_ceiling_extracts_successfully(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            # ZIP_STORED: compress_size == file_size, so the realized ratio
+            # is exactly 1.0, deterministically -- not approximate.
+            archive_path = directory_path / "archive.zip"
+            archive_path.write_bytes(
+                self._build_single_member_archive(
+                    "stored.bin", b"A" * 500, compress_type=zipfile.ZIP_STORED
+                )
+            )
+
+            policy = self._policy(directory_path / "runs", max_compression_ratio=1)
+            result = extraction.extract_artifact(
+                archive_path,
+                order_id="ORD1",
+                run_timestamp="20260101T000000Z",
+                policy=policy,
+            )
+        self.assertEqual(1, len(result.members))
+
+    def test_ratio_one_step_above_ceiling_raises_archive_ceiling_exceeded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            # A highly compressible deflated payload: compress_size
+            # collapses far below file_size, so the realized ratio lands
+            # well above the ceiling of 1.
+            archive_path = directory_path / "archive.zip"
+            archive_path.write_bytes(
+                self._build_single_member_archive(
+                    "deflated.bin", b"A" * 100_000, compress_type=zipfile.ZIP_DEFLATED
+                )
+            )
+
+            policy = self._policy(directory_path / "runs", max_compression_ratio=1)
+            with self.assertRaises(extraction.ArchiveCeilingExceeded):
+                extraction.extract_artifact(
+                    archive_path,
+                    order_id="ORD1",
+                    run_timestamp="20260101T000000Z",
+                    policy=policy,
+                )
 
 
 if __name__ == "__main__":
