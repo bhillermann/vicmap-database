@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.1
 current_phase: 02
 current_phase_name: Safe Geospatial Discovery
-status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-09-15T23:00:17.204Z"
+status: verifying
+stopped_at: Completed 02-06-PLAN.md (Phase 02 complete)
+last_updated: "2026-09-16T10:51:09.384Z"
 last_activity: 2026-09-14
 last_activity_desc: Phase 02 execution started
-state_head: f71a892ef49d3b8966e5d4968d6e90d619770595
+state_head: 11b2be85218494fe99c914d09cf42f6608dab518
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 20
-  completed_plans: 19
+  completed_plans: 20
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
 **Current phase:** 02
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 
 ## Session Log
 
@@ -37,13 +37,13 @@ See: .planning/PROJECT.md
 
 Phase: 02 (Safe Geospatial Discovery) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-14 — Phase 02 execution started
 
 ## Session
 
-**Last session:** 2026-09-15T22:59:59.683Z
-**Stopped at:** Completed 02-05-PLAN.md
+**Last session:** 2026-09-16T10:51:02.517Z
+**Stopped at:** Completed 02-06-PLAN.md (Phase 02 complete)
 **Resume file:** None
 
 ## Performance Metrics
@@ -69,6 +69,7 @@ Last activity: 2026-09-14 — Phase 02 execution started
 | Phase 02 P03 | 50min | 2 tasks | 2 files |
 | Phase 02 P04 | 40min | 3 tasks | 3 files |
 | Phase 02 P05 | 25min | 2 tasks | 2 files |
+| Phase 02 P06 | ~20min (Task 3) | 3 tasks | 3 files |
 
 ## Decisions
 
@@ -126,7 +127,10 @@ Last activity: 2026-09-14 — Phase 02 execution started
 - [Phase 02]: test_discovery_differential.py imports exactly discover_layers and DiscoveryPolicy from vicmap_acquire.discovery; DiscoveryPolicy is a required config container, not a parsing helper, so it is exempted from the single-entry-point independence rule and enforced via an ast self-check.
 - [Phase 02]: Reserved-keyword list fetched from live PostgreSQL 18.6 Appendix C docs (101 words, both blocking categories) rather than a hand-typed shortlist. — Matches the plan's explicit warning that a hand-typed shortlist misses the second blocking category (e.g. binary, concurrently, current_schema).
 - [Phase 02]: assign_target_table_names normalizes all profiles first, before any collision comparison, so an invalid name always beats a collision regardless of input order. — Matches the plan's explicit ordering requirement and the total-function-with-catch-all pattern used elsewhere in the codebase.
+- [Phase 02]: [Phase 02] D-21 confirmed locked end-to-end by the live regression: VMADD.gdb/ADDRESS publishes as vicmap.vmadd_address against the real 233 MB delivery.
+- [Phase 02]: [Phase 02] Corrected 02-RESEARCH.md's stated 40-field ADDRESS schema to the live-verified 61 fields (independent ogrinfo oracle); PFI/EZI_ADDRESS/UFI widths reconfirmed correct.
+- [Phase 02]: [Phase 02] Flagged: vicmap.toml's production max_compression_ratio=20 will hard-stop discover_order.py against the real delivery (small OpenFileGDB index files compress up to ~139x); test used a local override of 200, config itself left unchanged (owned by 02-02).
 
 ### Blockers
 
-None
+- vicmap.toml's [extraction].max_compression_ratio=20 will hard-stop a real discover_order.py run against Order_OK0VUZ.zip (small OpenFileGDB index files compress up to ~139x); raise to 200+ before running discovery for real.
