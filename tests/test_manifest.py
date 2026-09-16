@@ -707,5 +707,193 @@ class MainFaultyRenderTest(_DiscoveryConfigMixin, unittest.TestCase):
         self.assertGreaterEqual(call_count["n"], 1)
 
 
+# ---------------------------------------------------------------------------
+# Task 3: opt-in live regression against the real Vicmap delivery
+# ---------------------------------------------------------------------------
+
+REAL_ORDER_ID = "OK0VUZ"
+REAL_ARTIFACT = REPO_ROOT / "artifacts" / f"Order_{REAL_ORDER_ID}.zip"
+REAL_PROVENANCE_SIDECAR = REPO_ROOT / "artifacts" / f"Order_{REAL_ORDER_ID}.provenance.json"
+
+
+class LiveDeliveryRegressionTest(unittest.TestCase):
+    """Opt-in regression against the real ``artifacts/Order_OK0VUZ.zip``.
+
+    Skipped unless both the real artifact and its provenance sidecar are
+    present on disk (produced by a fresh acquisition run or
+    ``python read_mailbox.py --provenance-only``), so the deterministic
+    suite stays portable -- mirrors Phase 1's opt-in live-check pattern
+    (01-11/01-13/01-14, ``01-LIVE-VERIFICATION.md``). When present, this
+    test drives the complete ``run_discovery`` path against the real
+    233 MB delivery into a temporary run root outside the repository
+    working tree, and asserts the exact values research verified this
+    session (``02-RESEARCH.md``) -- doubling as a regression for a future
+    ``pyogrio``/GDAL upgrade silently changing an answer.
+    """
+
+    @unittest.skipUnless(
+        REAL_ARTIFACT.is_file() and REAL_PROVENANCE_SIDECAR.is_file(),
+        "requires artifacts/Order_OK0VUZ.zip and its provenance sidecar on disk",
+    )
+    def test_real_delivery_produces_the_pinned_manifest(self):
+        import time
+        import zipfile as zipfile_module
+
+        import pyogrio
+
+        from vicmap_acquire.download import read_provenance_sidecar
+
+        # Independent proof the test never mutates the real artifact --
+        # measured before and after (see the end of this test).
+        sha256_before, byte_count_before = _sha256_and_size(REAL_ARTIFACT)
+
+        provenance = read_provenance_sidecar(REAL_ARTIFACT, order_id=REAL_ORDER_ID)
+
+        # A throwaway system temp directory, entirely outside the
+        # repository working tree and never the permitted runs/ root --
+        # removed in the finally block below.
+        run_root = Path(tempfile.mkdtemp(prefix="live-delivery-run-root-"))
+        self.assertFalse(str(run_root).startswith(str(REPO_ROOT)))
+        repo_runs_dir = REPO_ROOT / "runs"
+        repo_runs_existed_before = repo_runs_dir.exists()
+
+        try:
+            config = discover_order.DiscoveryConfig(
+                artifact_path=REAL_ARTIFACT,
+                order_id=REAL_ORDER_ID,
+                run_timestamp="20260916T000000Z",
+                expected_sha256=provenance.sha256,
+                expected_byte_count=provenance.byte_count,
+                message_fingerprint=provenance.message_fingerprint,
+                extraction_policy=extraction.ExtractionPolicy(
+                    run_root=run_root,
+                    max_total_bytes=10_737_418_240,
+                    max_member_bytes=4_294_967_296,
+                    max_member_count=4096,
+                    # NOT vicmap.toml's production default (20): the real
+                    # delivery's tiny .gdbtablx/.atx index members compress
+                    # up to ~139x (verified this session), the same shape
+                    # 02-01's tracer fixture hit and worked around the same
+                    # way -- test-local only, see this plan's SUMMARY.
+                    max_compression_ratio=200,
+                ),
+                discovery_policy=discovery.DiscoveryPolicy(
+                    supported_formats=("OpenFileGDB",),
+                    ogrinfo_timeout_seconds=60,
+                ),
+            )
+
+            events = []
+            started = time.monotonic()
+            manifest = discover_order.run_discovery(config, event_sink=events.append)
+            elapsed_seconds = time.monotonic() - started
+            print(
+                f"\n[live-delivery] run_discovery elapsed: {elapsed_seconds:.1f}s",
+                flush=True,
+            )
+
+            run_directory = Path(manifest.run_directory)
+
+            # -- archive shape: 46 members total (an independent zipfile
+            # oracle, never vicmap_acquire.extraction's own accounting);
+            # every non-directory member's exact relative path was
+            # extracted somewhere under the run directory.
+            with zipfile_module.ZipFile(REAL_ARTIFACT) as archive:
+                infolist = archive.infolist()
+                zip_file_names = {
+                    info.filename for info in infolist if not info.filename.endswith("/")
+                }
+            self.assertEqual(46, len(infolist))
+
+            extracted_file_names = set()
+            for path in run_directory.rglob("*"):
+                if path.is_dir():
+                    continue
+                relative = path.relative_to(run_directory).as_posix()
+                if relative in ("manifest.json", "manifest.json.sha256"):
+                    continue
+                extracted_file_names.add(relative)
+            self.assertEqual(zip_file_names, extracted_file_names)
+
+            # -- companions: the two non-geospatial files, never datasets --
+            companion_paths = {c.relative_path for c in manifest.companions}
+            self.assertEqual(
+                {
+                    "Creative Commons Licence.html",
+                    "VICMAP_ADDRESS_b9e9146d-8378-5c37-b6cd-63e3a8d05d02.pdf",
+                },
+                companion_paths,
+            )
+            for companion in manifest.companions:
+                self.assertNotIn(".gdb/", companion.relative_path)
+
+            # -- exactly one dataset, one layer -----------------------------
+            self.assertEqual(1, len(manifest.layers))
+            layer = manifest.layers[0]
+            profile = layer.profile
+            self.assertEqual(
+                "gda2020_vicgrid/filegdb/whole_of_dataset/victoria/VMADD.gdb",
+                profile.dataset_relative_path,
+            )
+            self.assertEqual("VMADD", profile.dataset_stem)
+            self.assertEqual("ADDRESS", profile.layer_name)
+            self.assertEqual("OpenFileGDB", profile.driver)
+            self.assertEqual(4222035, profile.feature_count)
+            self.assertEqual("Point", profile.geometry_type)
+            self.assertTrue(profile.spatial)
+            self.assertEqual("OBJECTID", profile.fid_column)
+            self.assertEqual("SHAPE", profile.geometry_column)
+            self.assertEqual(7899, profile.epsg)
+            self.assertEqual("vmadd_address", layer.target_table)
+
+            # -- fields: exact width cases, plus the true field count -------
+            # NOTE: 02-RESEARCH.md recorded 40 attribute fields; an
+            # independent `ogrinfo -json -al -so` run this session against
+            # the same real VMADD.gdb/ADDRESS layer (extracted standalone,
+            # outside this test) reports 61 -- confirmed genuine schema
+            # fields (BLG_UNIT_*/FLOOR_*/HOUSE_*/DISP_*/ROAD_*/etc.), not a
+            # parsing artifact. This assertion pins the live-verified truth
+            # per this plan's own purpose (research's number was stale/
+            # wrong); see the plan SUMMARY's Deviations section.
+            self.assertEqual(61, len(profile.fields))
+            fields_by_name = {f.name: f for f in profile.fields}
+            self.assertEqual(10, fields_by_name["PFI"].width)
+            self.assertEqual(80, fields_by_name["EZI_ADDRESS"].width)
+            self.assertIsNone(fields_by_name["UFI"].width)
+
+            # -- extent: the driver's own float tuple, no rounding, checked
+            # against pyogrio.read_info() called directly inside this test
+            # (the independent oracle) rather than against hard-coded
+            # numbers.
+            dataset_path = run_directory / profile.dataset_relative_path
+            info = pyogrio.read_info(str(dataset_path), layer="ADDRESS")
+            oracle_extent = tuple(float(value) for value in info["total_bounds"])
+            self.assertEqual(oracle_extent, profile.extent)
+
+            # -- manifest.json + sidecar exist and the digest matches -------
+            manifest_path = run_directory / "manifest.json"
+            sidecar_path = run_directory / "manifest.json.sha256"
+            self.assertTrue(manifest_path.is_file())
+            self.assertTrue(sidecar_path.is_file())
+            manifest_bytes = manifest_path.read_bytes()
+            self.assertTrue(manifest_bytes.endswith(b"\n"))
+            expected_digest = hashlib.sha256(manifest_bytes[:-1]).hexdigest()
+            self.assertEqual(
+                expected_digest, sidecar_path.read_text(encoding="utf-8").strip()
+            )
+
+            # -- the repository's own runs/ root was never written into -----
+            self.assertEqual(repo_runs_existed_before, repo_runs_dir.exists())
+        finally:
+            shutil.rmtree(run_root, ignore_errors=True)
+
+        self.assertFalse(run_root.exists())
+
+        # -- the real artifact itself is unchanged before vs after ----------
+        sha256_after, byte_count_after = _sha256_and_size(REAL_ARTIFACT)
+        self.assertEqual(sha256_before, sha256_after)
+        self.assertEqual(byte_count_before, byte_count_after)
+
+
 if __name__ == "__main__":
     unittest.main()
