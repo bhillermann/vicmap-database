@@ -344,6 +344,126 @@ class ManifestRoundTripTest(_TempDirMixin, unittest.TestCase):
             with self.assertRaises(manifest_module.ManifestWriteFailed):
                 manifest_module.write_manifest(manifest, run_dir)
 
+    # -- 02-09 Task 2: directory-entry durability (WR-02) + byte identity ---
+
+    def test_successful_write_fsyncs_run_directory_exactly_once(self):
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-fsync-")
+        with patch.object(manifest_module, "_fsync_directory") as fsync_spy:
+            manifest_module.write_manifest(manifest, run_dir)
+        fsync_spy.assert_called_once_with(run_dir)
+
+    def test_rollback_path_never_calls_directory_fsync(self):
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-fsync-rollback-")
+        sidecar_path = run_dir / "manifest.json.sha256"
+        real_open = os.open
+
+        def _fail_sidecar_open(path, flags, *args, **kwargs):
+            if Path(path) == sidecar_path:
+                raise OSError("disk full")
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch("os.open", side_effect=_fail_sidecar_open), patch.object(
+            manifest_module, "_fsync_directory"
+        ) as fsync_spy:
+            with self.assertRaises(manifest_module.ManifestWriteFailed):
+                manifest_module.write_manifest(manifest, run_dir)
+        fsync_spy.assert_not_called()
+
+    def test_directory_fsync_failure_does_not_affect_successful_write(self):
+        # _fsync_directory swallows its own OSError, so a failing directory
+        # fsync must not change write_manifest's outcome. Distinguish the
+        # directory's own os.open (O_RDONLY, no O_CREAT) from the two file
+        # creates so only the directory fsync is made to fail.
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-fsync-noninterference-")
+        real_open = os.open
+        real_fsync = os.fsync
+        directory_descriptors = set()
+
+        def _tracking_open(path, flags, *args, **kwargs):
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if not (flags & os.O_CREAT) and Path(path) == run_dir:
+                directory_descriptors.add(descriptor)
+            return descriptor
+
+        def _failing_fsync(descriptor):
+            if descriptor in directory_descriptors:
+                raise OSError("fsync failed")
+            return real_fsync(descriptor)
+
+        with patch("os.open", side_effect=_tracking_open), patch(
+            "os.fsync", side_effect=_failing_fsync
+        ):
+            digest = manifest_module.write_manifest(manifest, run_dir)
+
+        self.assertTrue((run_dir / "manifest.json").exists())
+        self.assertTrue((run_dir / "manifest.json.sha256").exists())
+        self.assertEqual(
+            digest, (run_dir / "manifest.json.sha256").read_text(encoding="utf-8").strip()
+        )
+
+    def test_non_ascii_manifest_digest_is_byte_identity_not_code_point_count(self):
+        profile = _layer_profile(layer_name="ADRESSÉ")
+        companions = (
+            manifest_module.CompanionFile(
+                relative_path="ライセンス.html",
+                byte_count=123,
+                sha256="a" * 64,
+            ),
+        )
+        manifest = _manifest(profile=profile, companions=companions)
+        run_dir = self.make_temp_dir("manifest-nonascii-")
+
+        returned_digest = manifest_module.write_manifest(manifest, run_dir)
+
+        manifest_bytes = (run_dir / "manifest.json").read_bytes()
+        self.assertTrue(manifest_bytes.endswith(b"\n"))
+        expected_digest = hashlib.sha256(manifest_bytes[:-1]).hexdigest()
+        self.assertEqual(expected_digest, returned_digest)
+
+        sidecar_text = (run_dir / "manifest.json.sha256").read_text(encoding="utf-8").strip()
+        self.assertEqual(expected_digest, sidecar_text)
+
+        decoded_text = manifest_bytes.decode("utf-8")
+        # Proves the digest is over UTF-8 bytes, not code points: each
+        # non-ASCII character in this manifest encodes to more than one
+        # byte, so the byte length must exceed the decoded character count.
+        self.assertGreater(len(manifest_bytes), len(decoded_text))
+
+        round_tripped = json.loads(decoded_text)
+        self.assertEqual("ADRESSÉ", round_tripped["layers"][0]["layer_name"])
+        self.assertEqual(
+            "ライセンス.html", round_tripped["companions"][0]["relative_path"]
+        )
+
+    def test_empty_manifest_publishes_hashes_and_rolls_back_like_populated_one(self):
+        manifest = _manifest(layers=(), companions=())
+        run_dir = self.make_temp_dir("manifest-empty-")
+
+        digest = manifest_module.write_manifest(manifest, run_dir)
+        manifest_bytes = (run_dir / "manifest.json").read_bytes()
+        payload = json.loads(manifest_bytes.decode("utf-8"))
+        self.assertEqual([], payload["layers"])
+        self.assertEqual([], payload["companions"])
+        expected_digest = hashlib.sha256(manifest_bytes[:-1]).hexdigest()
+        self.assertEqual(expected_digest, digest)
+        self.assertEqual(
+            expected_digest,
+            (run_dir / "manifest.json.sha256").read_text(encoding="utf-8").strip(),
+        )
+
+        # Task 1's rollback reproduction, against this same degenerate input.
+        empty_manifest = _manifest(
+            layers=(), companions=(), run_timestamp="20260915T000001Z"
+        )
+        retry_dir = self.make_temp_dir("manifest-empty-rollback-")
+        (retry_dir / "manifest.json.sha256").write_text("stale\n", encoding="utf-8")
+        with self.assertRaises(manifest_module.ManifestWriteFailed):
+            manifest_module.write_manifest(empty_manifest, retry_dir)
+        self.assertFalse((retry_dir / "manifest.json").exists())
+
     def test_provenance_message_fingerprint_matches_phase_one_sidecar(self):
         # Independent of any live sidecar on disk: build an ArtifactProvenance
         # the way read_provenance_sidecar would return one, and prove the
