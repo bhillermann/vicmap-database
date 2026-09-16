@@ -349,8 +349,19 @@ def extract_artifact(
 
                 member_received = 0
                 digest = hashlib.sha256()
-                with zip_file.open(info, "r") as source, open(
-                    destination, "wb"
+                # Exclusive create (mirrors manifest.py's
+                # _write_new_file_fsync idiom): the filesystem is the last
+                # oracle on "is this destination already claimed?" -- an
+                # alias the pre-pass guard somehow missed fails its own
+                # create here instead of silently truncating an already-
+                # written, already-hashed file. FileExistsError is an
+                # OSError, so it maps to RunDirectoryWriteFailed below with
+                # no raw text reaching a caller.
+                descriptor = os.open(
+                    destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644
+                )
+                with zip_file.open(info, "r") as source, os.fdopen(
+                    descriptor, "wb"
                 ) as target:
                     while True:
                         chunk = source.read(1024 * 1024)
