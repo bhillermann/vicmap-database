@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import shutil
 import stat
 import tempfile
@@ -40,11 +41,13 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import read_mailbox
 from vicmap_acquire import extraction
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_ARCHIVE = REPO_ROOT / "tests" / "fixtures" / "Order_TRACER1.zip"
+REAL_ARTIFACT = REPO_ROOT / "artifacts" / "Order_OK0VUZ.zip"
 
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
@@ -286,6 +289,26 @@ class MemberGuardRejectionTest(ExtractionTestCase):
             self._extract(archive)
         self._assert_nothing_written()
 
+    def test_aliased_pair_rejected_when_colliding_name_appears_first(self):
+        # Pins that the aliasing verdict does not depend on which of the two
+        # colliding literal names appears first in the archive's central
+        # directory -- the "shorter/plainer name first" ordering.
+        archive = self._write_archive(
+            [_member("d/f.txt", b"a" * 10), _member("d//f.txt", b"b" * 12)]
+        )
+        with self.assertRaises(extraction.ArchiveUnsafeMemberRejected):
+            self._extract(archive)
+        self._assert_nothing_written()
+
+    def test_aliased_pair_rejected_when_colliding_name_appears_second(self):
+        # Same pair, reversed order -- the guard's verdict must be identical.
+        archive = self._write_archive(
+            [_member("d//f.txt", b"b" * 12), _member("d/f.txt", b"a" * 10)]
+        )
+        with self.assertRaises(extraction.ArchiveUnsafeMemberRejected):
+            self._extract(archive)
+        self._assert_nothing_written()
+
     def test_case_alias_rejected(self):
         # "d/f.txt" and "d/F.txt" resolve to distinct Path objects on this
         # case-sensitive development filesystem, but the case-normalized key
@@ -412,6 +435,21 @@ class MemberAcceptanceTest(ExtractionTestCase):
         self.assertEqual(by_name["subdir/"].sha256, _EMPTY_SHA256)
         self.assertTrue((result.run_directory / "subdir").is_dir())
 
+    def test_zero_member_archive_extracts_to_empty_result(self):
+        archive = self._write_archive([])
+        result = self._extract(archive)
+        self.assertEqual(result.members, ())
+        self.assertEqual(result.total_byte_count, 0)
+        self.assertTrue(result.run_directory.exists())
+
+    def test_single_member_archive_extracts_normally(self):
+        archive = self._write_archive([_member("only.txt", b"solo")])
+        result = self._extract(archive)
+        self.assertEqual(len(result.members), 1)
+        self.assertEqual(result.members[0].relative_path, "only.txt")
+        self.assertEqual(result.members[0].byte_count, 4)
+        self.assertEqual(result.members[0].sha256, hashlib.sha256(b"solo").hexdigest())
+
 
 class CeilingEnforcementTest(ExtractionTestCase):
     def test_per_member_ceiling_trips_on_real_streamed_bytes(self):
@@ -474,6 +512,139 @@ class PublicationTest(ExtractionTestCase):
         self.assertTrue(marker.exists())
         self.assertEqual(marker.read_bytes(), b"pre-existing content")
         self.assertEqual(list(final_dir.iterdir()), [marker])
+
+
+class WriteTimeGuardTest(ExtractionTestCase):
+    """T-02-53: exclusive-create output handles make the filesystem the last
+    oracle -- a destination that already exists at write time fails its
+    create rather than truncating an already-written, already-hashed file.
+    """
+
+    def test_preexisting_destination_file_fails_exclusive_create(self):
+        # Pre-create the member's destination file inside the (not yet
+        # existing) temporary extraction directory at the exact moment the
+        # write loop reaches it, simulating a destination another member --
+        # or another process -- already claimed. This is the filesystem-
+        # truth complement to Task 1's pre-pass aliasing guard: even an
+        # alias that the guard somehow missed must still fail here rather
+        # than silently overwrite.
+        archive = self._write_archive([_member("only.txt", b"real content")])
+        temp_dir = self.run_root / "ORD1" / ".tmp-20260101T000000Z"
+        destination = temp_dir / "only.txt"
+        real_open = os.open
+
+        def _pre_create_then_open(path, flags, mode=0o777):
+            # Other call sites in extraction.py (e.g. _fsync_directory) call
+            # os.open with only (path, flags) -- mode needs a default so
+            # this mock is transparent to every unrelated call, not just
+            # the one under test.
+            if Path(path) == destination:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"already here, claimed first")
+            return real_open(path, flags, mode)
+
+        with patch(
+            "vicmap_acquire.extraction.os.open", side_effect=_pre_create_then_open
+        ):
+            with self.assertRaises(extraction.RunDirectoryWriteFailed):
+                self._extract(archive)
+
+        # The pre-created bytes must survive untouched -- the exclusive
+        # create failed before any truncation could occur.
+        self.assertEqual(destination.read_bytes(), b"already here, claimed first")
+
+
+class ProvenanceIntegrityTest(ExtractionTestCase):
+    """The independent oracle: recorded provenance is checked against disk,
+    never derived from ``ExtractionResult``'s own arithmetic (the
+    differential-oracle discipline ``tests/test_discovery_differential.py``
+    already applies to ``ogrinfo``). Written from the extraction contract
+    itself -- "every member is accounted for with its relative path, byte
+    count, and SHA-256" -- so it fails for the CR-01 archive at HEAD no
+    matter which mechanism the guard uses, and keeps failing for any future
+    defect that lets recorded provenance drift from disk.
+    """
+
+    def _assert_provenance_matches_disk(
+        self, result: extraction.ExtractionResult
+    ) -> None:
+        recorded_files: set[str] = set()
+        for member in result.members:
+            destination = result.run_directory / member.relative_path
+            if member.relative_path.endswith("/"):
+                self.assertTrue(destination.is_dir())
+                continue
+            data = destination.read_bytes()
+            self.assertEqual(
+                len(data),
+                member.byte_count,
+                msg=f"{member.relative_path}: recorded byte_count disagrees with disk",
+            )
+            self.assertEqual(
+                hashlib.sha256(data).hexdigest(),
+                member.sha256,
+                msg=f"{member.relative_path}: recorded sha256 disagrees with disk",
+            )
+            recorded_files.add(member.relative_path)
+
+        actual_files = {
+            path.relative_to(result.run_directory).as_posix()
+            for path in result.run_directory.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(
+            recorded_files,
+            actual_files,
+            "recorded non-directory members must equal files actually on disk",
+        )
+
+    def test_tracer_fixture_provenance_matches_disk(self):
+        result = self._extract(FIXTURE_ARCHIVE, run_timestamp="20260915T000000Z")
+        self.assertGreater(len(result.members), 0)
+        self._assert_provenance_matches_disk(result)
+
+    @unittest.skipUnless(
+        REAL_ARTIFACT.is_file(), "requires artifacts/Order_OK0VUZ.zip on disk"
+    )
+    def test_real_delivery_provenance_matches_disk(self):
+        # Sources every extraction ceiling from the repository's own
+        # shipped vicmap.toml (via read_mailbox.load_discovery_config)
+        # rather than a hand-built policy, proving the shipped
+        # configuration processes the real delivery -- and doubles as the
+        # non-regression proof that all 46 members still extract under the
+        # tightened aliasing guard (02-07's calibration pattern).
+        sha256_before = hashlib.sha256(REAL_ARTIFACT.read_bytes()).hexdigest()
+        shipped_config = read_mailbox.load_discovery_config(REPO_ROOT / "vicmap.toml")
+
+        run_root = Path(tempfile.mkdtemp(prefix="vicmap-extraction-real-runs-"))
+        self.addCleanup(shutil.rmtree, run_root, ignore_errors=True)
+        self.assertFalse(str(run_root).startswith(str(REPO_ROOT)))
+        repo_runs_dir = REPO_ROOT / "runs"
+        repo_runs_existed_before = repo_runs_dir.exists()
+
+        policy = extraction.ExtractionPolicy(
+            run_root=run_root,
+            max_total_bytes=shipped_config.max_total_bytes,
+            max_member_bytes=shipped_config.max_member_bytes,
+            max_member_count=shipped_config.max_member_count,
+            max_compression_ratio=shipped_config.max_compression_ratio,
+        )
+        result = extraction.extract_artifact(
+            REAL_ARTIFACT,
+            order_id="ORDREAL",
+            run_timestamp="20260915T000000Z",
+            policy=policy,
+        )
+
+        with zipfile.ZipFile(REAL_ARTIFACT) as reference:
+            expected_count = len(reference.infolist())
+        self.assertEqual(46, expected_count)
+        self.assertEqual(len(result.members), expected_count)
+        self._assert_provenance_matches_disk(result)
+
+        self.assertEqual(repo_runs_existed_before, repo_runs_dir.exists())
+        sha256_after = hashlib.sha256(REAL_ARTIFACT.read_bytes()).hexdigest()
+        self.assertEqual(sha256_before, sha256_after)
 
 
 class VerifyArtifactTest(ExtractionTestCase):
