@@ -726,9 +726,13 @@ class LiveDeliveryRegressionTest(unittest.TestCase):
     (01-11/01-13/01-14, ``01-LIVE-VERIFICATION.md``). When present, this
     test drives the complete ``run_discovery`` path against the real
     233 MB delivery into a temporary run root outside the repository
-    working tree, and asserts the exact values research verified this
-    session (``02-RESEARCH.md``) -- doubling as a regression for a future
-    ``pyogrio``/GDAL upgrade silently changing an answer.
+    working tree, using the repository's own shipped ``vicmap.toml``
+    extraction ceilings (via ``read_mailbox.load_discovery_config``) rather
+    than a test-local override, and asserts the exact values research
+    verified this session (``02-RESEARCH.md``) -- doubling as a regression
+    for a future ``pyogrio``/GDAL upgrade silently changing an answer, and
+    for the shipped ceiling ever regressing below what the real delivery
+    requires (02-07).
     """
 
     @unittest.skipUnless(
@@ -749,6 +753,13 @@ class LiveDeliveryRegressionTest(unittest.TestCase):
 
         provenance = read_provenance_sidecar(REAL_ARTIFACT, order_id=REAL_ORDER_ID)
 
+        # The shipped vicmap.toml is the sole source of every extraction
+        # ceiling this test exercises -- proving the *production* policy
+        # processes the real delivery, not a private copy of it (02-07
+        # Task 1). Only run_root stays test-local: it must never point at
+        # the repository's own runs/ directory.
+        shipped_config = read_mailbox.load_discovery_config(REPO_ROOT / "vicmap.toml")
+
         # A throwaway system temp directory, entirely outside the
         # repository working tree and never the permitted runs/ root --
         # removed in the finally block below.
@@ -767,15 +778,10 @@ class LiveDeliveryRegressionTest(unittest.TestCase):
                 message_fingerprint=provenance.message_fingerprint,
                 extraction_policy=extraction.ExtractionPolicy(
                     run_root=run_root,
-                    max_total_bytes=10_737_418_240,
-                    max_member_bytes=4_294_967_296,
-                    max_member_count=4096,
-                    # NOT vicmap.toml's production default (20): the real
-                    # delivery's tiny .gdbtablx/.atx index members compress
-                    # up to ~139x (verified this session), the same shape
-                    # 02-01's tracer fixture hit and worked around the same
-                    # way -- test-local only, see this plan's SUMMARY.
-                    max_compression_ratio=200,
+                    max_total_bytes=shipped_config.max_total_bytes,
+                    max_member_bytes=shipped_config.max_member_bytes,
+                    max_member_count=shipped_config.max_member_count,
+                    max_compression_ratio=shipped_config.max_compression_ratio,
                 ),
                 discovery_policy=discovery.DiscoveryPolicy(
                     supported_formats=("OpenFileGDB",),

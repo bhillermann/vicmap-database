@@ -23,7 +23,7 @@ run_dir = "runs"
 max_total_bytes = 10737418240
 max_member_bytes = 4294967296
 max_member_count = 4096
-max_compression_ratio = 20
+max_compression_ratio = 200
 
 [discovery]
 supported_formats = ["OpenFileGDB"]
