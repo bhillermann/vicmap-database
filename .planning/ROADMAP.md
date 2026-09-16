@@ -85,7 +85,7 @@ Plans:
 3. Every source layer has a deterministic target table name visible before loading begins.
 4. An unreadable dataset or normalized-name collision stops the run before any database object is changed.
 
-**Plans:** 6/6 plans executed
+**Plans:** 6/9 plans complete (6 original executed, 3 gap-closure pending)
 
 Plans:
 
@@ -103,6 +103,17 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 
 - [x] 02-06-PLAN.md — Settle the immutable manifest contract, prove every hard stop lands before it is written, and record one live proof.
+
+*Gap closure — created after `gsd-verify-work` recorded `gaps_found` (3/6 must-haves; GEO-01 and GEO-05 blocked).*
+
+**Gap-closure Wave 1**
+
+- [ ] 02-07-PLAN.md — Make the shipped `vicmap.toml` able to process the real delivery, proven end to end, and recognize dataset extensions in any letter case.
+- [ ] 02-08-PLAN.md — Key the extraction aliasing guard on destination identity so recorded provenance can never describe a file that is not on disk.
+
+**Gap-closure Wave 2** *(blocked on Gap-closure Wave 1)*
+
+- [ ] 02-09-PLAN.md — Roll back a partially published manifest so a hard stop leaves nothing behind and a retry can proceed.
 
 ### Phase 3: Validated PostGIS Staging
 
@@ -162,7 +173,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Trusted Graph Acquisition | 14/14 | In Progress|  |
-| 2. Safe Geospatial Discovery | 6/6 | In Progress|  |
+| 2. Safe Geospatial Discovery | 6/9 | In Progress|  |
 | 3. Validated PostGIS Staging | 0/TBD | Not started | — |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
 | 5. Approved Legacy Cleanup | 0/TBD | Not started | — |
