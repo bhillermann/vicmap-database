@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 02
 current_phase_name: Safe Geospatial Discovery
 status: executing
-stopped_at: Completed 02-08-PLAN.md
-last_updated: "2026-09-16T21:04:15.969Z"
+stopped_at: Completed 02-09-PLAN.md
+last_updated: "2026-09-16T21:19:57.366Z"
 last_activity: 2026-09-17
 last_activity_desc: Phase 02 execution started
-state_head: 7f9321391974c00c221905861401494b0885278f
+state_head: d711e3656dfe3ba4288974a2fe02101da48a633f
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 23
-  completed_plans: 22
+  completed_plans: 23
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 02 (Safe Geospatial Discovery) — EXECUTING
-Plan: 3 of 9
+Plan: 4 of 9
 Status: Ready to execute
 Last activity: 2026-09-17 — Phase 02 execution started
 
 ## Session
 
-**Last session:** 2026-09-16T21:03:57.665Z
-**Stopped at:** Completed 02-08-PLAN.md
+**Last session:** 2026-09-16T21:19:44.410Z
+**Stopped at:** Completed 02-09-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -72,6 +72,7 @@ Last activity: 2026-09-17 — Phase 02 execution started
 | Phase 02 P06 | ~20min (Task 3) | 3 tasks | 3 files |
 | Phase 02-safe-geospatial-discovery P07 | ~15min | 3 tasks | 5 files |
 | Phase 02-safe-geospatial-discovery P08 | 12min | 2 tasks | 2 files |
+| Phase 02 P09 | 11min | 2 tasks | 2 files |
 
 ## Decisions
 
@@ -137,6 +138,8 @@ Last activity: 2026-09-17 — Phase 02 execution started
 - [Phase 02-safe-geospatial-discovery]: [Phase 02]: find_datasets' _EXTENSION_DRIVERS lookup now normalizes via path.suffix.casefold() at the call site, closing WR-01 case-sensitive extension recognition. — Keeps the recognized extension set closed and unchanged (exactly five lowercase keys) while widening only which paths get examined; the downstream pyogrio.read_info driver re-check against supported_formats still gates admission.
 - [Phase 02]: Rejected destination.exists() as the aliasing check; _validate_members runs before temp_dir exists, so it would catch nothing. — 02-REVIEW.md's diagnosis was correct but its proposed mechanism was not; resolved-Path and case-folded keys compare members against each other instead.
 - [Phase 02]: Kept the pre-pass identity key (Task 1) and the write-time exclusive create (Task 2) as two separate, complementary guards. — The pre-pass is order-independent and catches nearly everything before any write; the exclusive create is the filesystem's own truth against any identity-key edge case.
+- [Phase 02]: [Phase 02]: write_manifest's sidecar-write failure now rolls back the just-created manifest.json (nested try scoped after the manifest's own O_EXCL create returns), so a reported GEO-05 hard stop never leaves a manifest and a retry into the same run directory always succeeds, closing CR-02. — The rollback is provably scoped to a file this call itself created: manifest.json's O_EXCL create must have already returned without raising before the sidecar write is even attempted, so a pre-existing complete manifest is never touched.
+- [Phase 02]: [Phase 02]: Added ensure_ascii=False to write_manifest's json.dumps call, since the shipped default ASCII-escaped non-ASCII layer/companion names, making the required byte-identity digest property provably false; write_manifest now also fsyncs the run directory's own entry exactly once after both files exist, closing WR-02. — Discovered because the plan's own required non-ASCII regression failed against the pre-fix code (byte length equaled character length); evidence.py's similar-looking json.dumps idiom is left unchanged since its payload is already redacted, ASCII-safe operator output.
 
 ### Blockers
 

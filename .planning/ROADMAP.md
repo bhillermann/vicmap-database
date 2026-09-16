@@ -85,7 +85,7 @@ Plans:
 3. Every source layer has a deterministic target table name visible before loading begins.
 4. An unreadable dataset or normalized-name collision stops the run before any database object is changed.
 
-**Plans:** 6/9 plans complete (6 original executed, 3 gap-closure pending)
+**Plans:** 9/9 plans executed (6 original executed, 3 gap-closure pending)
 
 Plans:
 
@@ -113,7 +113,7 @@ Plans:
 
 **Gap-closure Wave 2** *(blocked on Gap-closure Wave 1)*
 
-- [ ] 02-09-PLAN.md — Roll back a partially published manifest so a hard stop leaves nothing behind and a retry can proceed.
+- [x] 02-09-PLAN.md — Roll back a partially published manifest so a hard stop leaves nothing behind and a retry can proceed.
 
 ### Phase 3: Validated PostGIS Staging
 
@@ -173,7 +173,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Trusted Graph Acquisition | 14/14 | In Progress|  |
-| 2. Safe Geospatial Discovery | 6/9 | In Progress|  |
+| 2. Safe Geospatial Discovery | 9/9 | In Progress|  |
 | 3. Validated PostGIS Staging | 0/TBD | Not started | — |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
 | 5. Approved Legacy Cleanup | 0/TBD | Not started | — |

@@ -19,7 +19,7 @@
 - [ ] **GEO-02**: Operator can see every supported geospatial dataset and layer discovered in the unpacked order.
 - [ ] **GEO-03**: Operator can see each layer's fields, feature count, geometry type, and source CRS.
 - [ ] **GEO-04**: Operator can see the deterministic source-layer-to-table-name mapping before any database mutation.
-- [ ] **GEO-05**: Processing stops before database mutation if datasets are unreadable or normalized table names collide.
+- [x] **GEO-05**: Processing stops before database mutation if datasets are unreadable or normalized table names collide.
 
 ### PostGIS Staging
 
@@ -92,7 +92,7 @@
 | GEO-02 | Phase 2 | Gaps Found |
 | GEO-03 | Phase 2 | Gaps Found |
 | GEO-04 | Phase 2 | Gaps Found |
-| GEO-05 | Phase 2 | Gaps Found |
+| GEO-05 | Phase 2 | Complete |
 | DB-01 | Phase 3 | Pending |
 | DB-02 | Phase 3 | Pending |
 | DB-03 | Phase 3 | Pending |
