@@ -226,25 +226,43 @@ def _validate_members(
     Mirrors ``download.py``'s validate-before-connect ordering
     (``validate_https_target`` runs completely before ``session.get`` is
     ever called): this pass runs to completion -- the member-count ceiling,
-    then every member's path/mode/encryption/duplicate-name guards -- and
-    raises on the first violation, before the write phase in
-    ``extract_artifact`` ever begins. A valid member appearing before an
-    invalid one is therefore never written to disk.
+    then every member's path/mode/encryption/aliasing guards -- and raises
+    on the first violation, before the write phase in ``extract_artifact``
+    ever begins. A valid member appearing before an invalid one is
+    therefore never written to disk.
+
+    D-26's hardlink-style aliasing guard is keyed on each member's
+    *resolved destination*, not on the archive-supplied ``ZipInfo.filename``
+    string: ``_reject_unsafe_member`` is called first to obtain that
+    resolved ``Path``, then two keys derived from it are tested for a
+    collision -- the resolved ``Path`` itself (catches redundant separators
+    and ``.`` segments, e.g. ``d/f.txt`` vs ``d//f.txt`` or ``a/b`` vs
+    ``a/./b``) and ``os.path.normcase(str(destination)).casefold()``
+    (catches members whose names differ only by letter case, which alias on
+    a case-insensitive filesystem such as the default APFS on the
+    ``aarch64-darwin``/``x86_64-darwin`` targets ``flake.nix`` builds for).
+    Whole-archive duplicate detection remains the caller's responsibility,
+    as before.
     """
 
     if len(infolist) > policy.max_member_count:
         raise ArchiveCeilingExceeded()
 
-    seen_names: set[str] = set()
+    seen_destinations: set[Path] = set()
+    seen_case_folded: set[str] = set()
     validated: list[tuple[zipfile.ZipInfo, Path]] = []
     for info in infolist:
-        if info.filename in seen_names:
-            # A repeated member name is D-26's hardlink-style aliasing --
-            # the second occurrence could silently overwrite or alias the
-            # first once written, so no member name may appear twice.
-            raise ArchiveUnsafeMemberRejected()
         destination = _reject_unsafe_member(info, destination_root)
-        seen_names.add(info.filename)
+        case_folded = os.path.normcase(str(destination)).casefold()
+        if destination in seen_destinations or case_folded in seen_case_folded:
+            # Two members naming one destination -- whatever strings the
+            # archive spelled their names with -- is D-26's hardlink-style
+            # aliasing: the second occurrence could silently overwrite or
+            # alias the first once written, so no destination may be
+            # claimed twice.
+            raise ArchiveUnsafeMemberRejected()
+        seen_destinations.add(destination)
+        seen_case_folded.add(case_folded)
         validated.append((info, destination))
     return validated
 
