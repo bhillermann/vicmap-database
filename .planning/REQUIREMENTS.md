@@ -16,9 +16,9 @@
 ### Geospatial Discovery
 
 - [x] **GEO-01**: Operator can unpack the order archive into an isolated run directory without permitting path traversal, unsafe links, or writes outside that directory.
-- [ ] **GEO-02**: Operator can see every supported geospatial dataset and layer discovered in the unpacked order.
-- [ ] **GEO-03**: Operator can see each layer's fields, feature count, geometry type, and source CRS.
-- [ ] **GEO-04**: Operator can see the deterministic source-layer-to-table-name mapping before any database mutation.
+- [x] **GEO-02**: Operator can see every supported geospatial dataset and layer discovered in the unpacked order.
+- [x] **GEO-03**: Operator can see each layer's fields, feature count, geometry type, and source CRS.
+- [x] **GEO-04**: Operator can see the deterministic source-layer-to-table-name mapping before any database mutation.
 - [x] **GEO-05**: Processing stops before database mutation if datasets are unreadable or normalized table names collide.
 
 ### PostGIS Staging
@@ -89,9 +89,9 @@
 | MAIL-04 | Phase 1 | Complete |
 | MAIL-05 | Phase 1 | Complete |
 | GEO-01 | Phase 2 | Complete |
-| GEO-02 | Phase 2 | Gaps Found |
-| GEO-03 | Phase 2 | Gaps Found |
-| GEO-04 | Phase 2 | Gaps Found |
+| GEO-02 | Phase 2 | Complete |
+| GEO-03 | Phase 2 | Complete |
+| GEO-04 | Phase 2 | Complete |
 | GEO-05 | Phase 2 | Complete |
 | DB-01 | Phase 3 | Pending |
 | DB-02 | Phase 3 | Pending |
