@@ -263,6 +263,42 @@ class MemberGuardRejectionTest(ExtractionTestCase):
             self._extract(archive)
         self._assert_nothing_written()
 
+    def test_double_slash_path_alias_rejected(self):
+        # "d/f.txt" and "d//f.txt" are different literal ZipInfo.filename
+        # strings but pathlib.resolve() collapses the redundant separator,
+        # so both name the identical on-disk destination -- the exact CR-01
+        # reproduction: reverting the guard to compare info.filename makes
+        # this test fail because the two strings are not equal.
+        archive = self._write_archive(
+            [_member("d/f.txt", b"a" * 10), _member("d//f.txt", b"b" * 12)]
+        )
+        with self.assertRaises(extraction.ArchiveUnsafeMemberRejected):
+            self._extract(archive)
+        self._assert_nothing_written()
+
+    def test_dot_segment_path_alias_rejected(self):
+        # "a/b" and "a/./b" differ in literal spelling but resolve() collapses
+        # the "." segment to the same destination path.
+        archive = self._write_archive(
+            [_member("a/b", b"one"), _member("a/./b", b"two")]
+        )
+        with self.assertRaises(extraction.ArchiveUnsafeMemberRejected):
+            self._extract(archive)
+        self._assert_nothing_written()
+
+    def test_case_alias_rejected(self):
+        # "d/f.txt" and "d/F.txt" resolve to distinct Path objects on this
+        # case-sensitive development filesystem, but the case-normalized key
+        # (os.path.normcase(...).casefold()) must still flag them as one
+        # aliasing violation -- this is the guard behavior itself, not a
+        # probe of actual filesystem case-folding.
+        archive = self._write_archive(
+            [_member("d/f.txt", b"one"), _member("d/F.txt", b"two")]
+        )
+        with self.assertRaises(extraction.ArchiveUnsafeMemberRejected):
+            self._extract(archive)
+        self._assert_nothing_written()
+
     def test_encrypted_member_rejected(self):
         raw = _patch_general_purpose_flag_bit(
             _build_archive([_member("secret.txt")]), 0x1
