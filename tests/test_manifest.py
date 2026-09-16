@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -250,6 +251,98 @@ class ManifestRoundTripTest(_TempDirMixin, unittest.TestCase):
             with self.assertRaises(manifest_module.ManifestWriteFailed):
                 manifest_module.write_manifest(manifest, run_dir)
         self.assertFalse((run_dir / "manifest.json").exists())
+
+    # -- 02-09 Task 1: partial-publish rollback and retry-succeeds ----------
+    #
+    # The existing test above patches os.open globally, so both creates fail
+    # identically and the "first committed, second failed" ordering is never
+    # reached. Every test below targets that exact ordering, which is the
+    # axis CR-02 exploited: manifest.json committed, sidecar failed, and no
+    # rollback ever ran to undo the half-publish.
+
+    def test_sidecar_pre_existing_leaves_no_manifest_and_directory_unchanged(self):
+        # The exact CR-02 reproduction: only the sidecar pre-exists, so the
+        # manifest.json create succeeds and the sidecar create fails with
+        # FileExistsError -- the ordering the old suite never reached.
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-partial-")
+        (run_dir / "manifest.json.sha256").write_text("stale-digest\n", encoding="utf-8")
+        before_listing = sorted(p.name for p in run_dir.iterdir())
+
+        with self.assertRaises(manifest_module.ManifestWriteFailed):
+            manifest_module.write_manifest(manifest, run_dir)
+
+        self.assertFalse((run_dir / "manifest.json").exists())
+        after_listing = sorted(p.name for p in run_dir.iterdir())
+        self.assertEqual(before_listing, after_listing)
+
+    def test_failed_sidecar_create_then_retry_succeeds_into_same_directory(self):
+        # The property CR-02 made unreachable: because manifest.json used to
+        # survive a failed call, its O_EXCL create permanently blocked every
+        # retry into that run directory. With rollback in place, a retry
+        # must succeed.
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-retry-")
+        sidecar_path = run_dir / "manifest.json.sha256"
+        real_open = os.open
+        state = {"triggered": False}
+
+        def _flaky_open(path, flags, *args, **kwargs):
+            if not state["triggered"] and Path(path) == sidecar_path:
+                state["triggered"] = True
+                raise OSError("disk full")
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch("os.open", side_effect=_flaky_open):
+            with self.assertRaises(manifest_module.ManifestWriteFailed):
+                manifest_module.write_manifest(manifest, run_dir)
+            self.assertFalse((run_dir / "manifest.json").exists())
+
+            digest = manifest_module.write_manifest(manifest, run_dir)
+
+        self.assertTrue((run_dir / "manifest.json").exists())
+        self.assertTrue(sidecar_path.exists())
+        self.assertEqual(digest, sidecar_path.read_text(encoding="utf-8").strip())
+
+    def test_rollback_does_not_fire_on_pre_existing_complete_manifest(self):
+        # Rollback scope proof: a pre-existing complete manifest must never
+        # be unlinked. The first create raises FileExistsError before the
+        # sidecar write is ever attempted, so the rollback path must never
+        # run -- proven here by making any unlink call itself fail loudly
+        # (AssertionError, not caught anywhere in write_manifest), not just
+        # by the byte-identity check below.
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-rollback-scope-")
+        manifest_module.write_manifest(manifest, run_dir)
+        original_bytes = (run_dir / "manifest.json").read_bytes()
+
+        with patch.object(
+            Path, "unlink", side_effect=AssertionError("rollback must not fire")
+        ) as unlink_spy:
+            with self.assertRaises(manifest_module.ManifestWriteFailed):
+                manifest_module.write_manifest(manifest, run_dir)
+            unlink_spy.assert_not_called()
+
+        self.assertEqual(original_bytes, (run_dir / "manifest.json").read_bytes())
+
+    def test_rollback_unlink_failure_still_raises_manifest_write_failed(self):
+        # A rollback unlink that itself raises must still surface as the
+        # closed ManifestWriteFailed, never a raw OSError.
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-rollback-failure-")
+        sidecar_path = run_dir / "manifest.json.sha256"
+        real_open = os.open
+
+        def _fail_sidecar_open(path, flags, *args, **kwargs):
+            if Path(path) == sidecar_path:
+                raise OSError("disk full")
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch("os.open", side_effect=_fail_sidecar_open), patch.object(
+            Path, "unlink", side_effect=OSError("cannot unlink")
+        ):
+            with self.assertRaises(manifest_module.ManifestWriteFailed):
+                manifest_module.write_manifest(manifest, run_dir)
 
     def test_provenance_message_fingerprint_matches_phase_one_sidecar(self):
         # Independent of any live sidecar on disk: build an ArtifactProvenance
