@@ -1,79 +1,252 @@
-# Testing Practices
+# Testing Patterns
 
-**Analysis date:** 2026-08-31
+**Analysis Date:** 2026-09-18
 
-## Current State
+## Test Framework
 
-- The repository contains no test files, test directories, or test configuration.
-- There is no `tests/` layout, no `test_*.py` modules, and no inline doctest coverage.
-- No Python test framework such as `pytest` or `unittest` is configured.
-- `flake.nix` includes no project test runner, test dependency, check output, or CI-facing test command.
-- The locally built third-party `O365` package explicitly sets `doCheck = false`, so its upstream checks do not run during the Nix build.
-- No continuous-integration configuration is present.
-- No coverage tool, threshold, report format, or coverage artifact is configured.
+**Runner:**
+- `unittest` (Python standard library)
+- Test discovery via `python -m unittest discover` or direct module execution
+- No pytest/nose configuration detected
 
-## Testability of the Current Script
+**Assertion Library:**
+- `unittest.TestCase` assertion methods: `assertEqual()`, `assertTrue()`, `assertRaises()`, `assertIn()`, `assertIsNone()`
 
-- Importing `read_mailbox.py` immediately reads environment variables and may raise `ValueError`.
-- With configuration present, importing the module constructs an `O365.Account`, reads the filesystem token backend, and may authenticate over the network.
-- Import continues by selecting the `automations@vegetationlink.com.au` mailbox, opening `Inbox`, and enumerating messages.
-- These import-time side effects prevent isolated unit tests from importing helpers safely.
-- Configuration, authentication, mailbox selection, message retrieval, and rendering have no function boundaries to target independently.
-- The fixed mailbox address and folder name cannot be substituted through function arguments.
-- The unused `SCOPES` and `count` values have no tests that would reveal their divergence from the actual execution path.
+**Run Commands:**
+```bash
+python -m unittest discover tests/       # Run all tests
+python -m unittest tests.test_discovery  # Run specific test module
+python -m unittest tests.test_discovery.FindDatasetsTest  # Run specific test class
+```
 
-## Framework and Layout
+## Test File Organization
 
-- There is no established framework or repository-specific test naming convention to preserve.
-- When tests are introduced, place them under a top-level `tests/` directory rather than beside the operational script.
-- Mirror production responsibilities with focused modules such as configuration, account construction, and message processing before creating corresponding tests.
-- Use one consistent runner and expose it through the Nix development environment so local and automated execution match.
-- Add the chosen runner to the Python environment in `flake.nix`; currently the environment contains only `python-o365`.
-- Provide a single documented command that runs all tests from the repository root.
+**Location:**
+- Tests co-located in separate `tests/` directory (not in source tree)
+- Test files mirror source structure by naming: `tests/test_discovery.py` tests `vicmap_acquire/discovery.py`
+- Fixtures in `tests/fixtures/` subdirectory
+- Fixture builders in `tests/fixtures/build_fixtures.py`
 
-## Unit Test Patterns Needed
+**Naming:**
+- Test modules: `test_<module_name>.py` (e.g., `test_discovery.py`)
+- Test classes: `<ComponentName>Test` or `<ComponentName>Test<Aspect>` (e.g., `FindDatasetsTest`, `NormalizeTargetTableNameTest`)
+- Test methods: `test_<behavior_description>()` (e.g., `test_finds_the_single_vmadd_dataset()`)
 
-- Configuration tests should cover all required variables present and each variable missing individually.
-- Validation assertions should verify the exact environment-variable names actually consumed by `read_mailbox.py`.
-- Account-construction tests should verify credentials, tenant ID, auth flow, and token backend without contacting Microsoft Graph.
-- Authentication tests should cover already-authenticated and unauthenticated accounts.
-- Mailbox tests should verify the configured resource and `Inbox` folder selection through injected collaborators.
-- Message-processing tests should use small fake message objects and assert safe output or transformation behavior.
-- A regression test should ensure a single retrieval path is used instead of issuing redundant `get_messages()` calls.
+**Structure:**
+```
+tests/
+├── __init__.py
+├── test_discovery.py         # Tests for discovery.py
+├── test_discovery_differential.py  # Cross-check vs oracle
+├── test_discovery_tracer.py
+├── test_discovery_config.py
+├── test_manifest.py
+├── test_naming.py
+├── test_extraction.py
+├── test_download.py
+├── test_evidence.py
+├── test_candidates.py
+├── test_origin.py
+├── test_graph.py
+├── test_provenance.py
+├── test_repository_policy.py
+├── test_html_visibility_differential.py  # Differential oracle test
+├── fixtures/
+│   ├── Order_TRACER1.zip              # Real fixture data
+│   ├── geometryless_gdb.zip
+│   ├── point_z_gdb.zip
+│   └── build_fixtures.py
+```
 
-## Mocking and Fixtures
+## Test Structure
 
-- No mocks, fixtures, factories, snapshots, or recorded HTTP responses currently exist.
-- External O365 calls should be replaced by injected fakes or mocks in unit tests.
-- Environment manipulation should be scoped per test and restored automatically to avoid leaking credentials or state between cases.
-- Token tests should use a temporary directory and synthetic token content; never read `my_token.txt` or `token/my_token.txt`.
-- Network access should be disabled or treated as a failure in the default unit-test suite.
-- Reusable fixtures should describe roles (`authenticated_account`, `inbox_folder`) rather than mirror incidental SDK construction details.
+**Suite Organization:**
+- Each test class inherits from `unittest.TestCase`
+- `setUp()` method initializes test fixtures and temporary resources
+- Test methods are independent; setUp runs before each test
+- Example from `tests/test_discovery.py`:
 
-## Integration and End-to-End Coverage
+```python
+class FindDatasetsTest(_TempDirMixin, unittest.TestCase):
+    def setUp(self):
+        self.run_dir = self.make_temp_dir("find-datasets-")
+        _extract(ORDER_TRACER1, self.run_dir)
 
-- No integration, contract, smoke, or end-to-end tests are present.
-- A future live Microsoft Graph smoke test must be opt-in because it requires credentials, network access, tenant permissions, and a real mailbox.
-- Live tests should use a dedicated test mailbox rather than `automations@vegetationlink.com.au`.
-- Separate deterministic tests from credentialed tests with an explicit marker or command so ordinary development never triggers mailbox access.
-- Integration assertions should minimize message content exposure and avoid printing full mailbox objects in logs.
+    def test_finds_the_single_vmadd_dataset(self):
+        datasets = discovery.find_datasets(self.run_dir, DEFAULT_POLICY)
+        self.assertEqual(1, len(datasets))
+        path, driver = datasets[0]
+        self.assertTrue(str(path).endswith("VMADD.gdb"))
+        self.assertEqual("OpenFileGDB", driver)
+```
 
-## Coverage and Quality Gates
+**Patterns:**
+- **Cleanup via context managers**: `addCleanup()` used to register cleanup functions (e.g., `shutil.rmtree`)
+  ```python
+  def make_temp_dir(self, prefix: str) -> Path:
+      temp_dir = Path(tempfile.mkdtemp(prefix=prefix))
+      self.addCleanup(shutil.rmtree, temp_dir, ignore_errors=True)
+      return temp_dir
+  ```
 
-- Current effective project coverage is unmeasured because no tests or coverage configuration exist.
-- There are no pass thresholds for lines, branches, mutation score, typing, linting, or formatting.
-- Initial coverage should prioritize configuration failures and authentication branches, which contain the only explicit decision logic today.
-- Add coverage reporting only after import-time behavior is removed; otherwise module import itself will require unsafe external setup.
-- Nix checks should eventually execute the deterministic suite, but no such check exists in the current flake.
+- **Mixins for shared setup**: `_TempDirMixin` shared by multiple test classes
+  
+- **Exception testing with context managers**: `assertRaises()` captures and inspects exceptions
+  ```python
+  with self.assertRaises(discovery.UnsupportedFormat):
+      discovery.find_datasets(empty_dir, DEFAULT_POLICY)
+  ```
 
-## Running Tests
+- **Exception message inspection**: Captured context object inspected for redacted output
+  ```python
+  with self.assertRaises(discovery.LayerUnreadable) as ctx:
+      discovery.find_datasets(lying_dir, DEFAULT_POLICY)
+  self.assertNotIn("pyogrio", str(ctx.exception))
+  self.assertEqual("layer_unreadable", str(ctx.exception))
+  ```
 
-- There is currently no valid project test command to run.
-- `nix develop` enters the declared development shell but does not execute validation.
-- `nix flake check` has no project test check defined in `flake.nix`.
-- Running `python read_mailbox.py` is an operational mailbox action, not a test, and depends on injected secrets and external service availability.
-- Do not use the production script as a smoke-test substitute because it may authenticate, access real mail, and disclose message metadata.
+- **Parametric testing via `subTest()`**: Not unittest's `subTest` in traditional use; instead loops test multiple cases
+  ```python
+  invalid_inputs = [("", "ADDRESS"), ("VMADD", ""), ...]
+  for dataset_stem, layer_name in invalid_inputs:
+      with self.subTest(dataset_stem=dataset_stem, layer_name=layer_name):
+          try:
+              normalize_target_table_name(dataset_stem, layer_name)
+          except TableNameInvalid:
+              pass
+          except Exception as exc:
+              self.fail(f"expected TableNameInvalid, got {type(exc).__name__}")
+          else:
+              self.fail("expected TableNameInvalid, no exception raised")
+  ```
+
+## Mocking
+
+**Framework:** `unittest.mock` (Python standard library)
+
+**Patterns:**
+- `patch.object()` to mock specific module attributes/functions
+- `MagicMock()` for fake return values
+- `side_effect` to raise exceptions on call
+- Mocking only external seams (pyogrio, subprocess, file I/O)
+
+**Example from `test_discovery.py`:**
+```python
+def test_injected_list_layers_exception_surfaces_as_layer_unreadable(self):
+    lying_dir = self.make_temp_dir("list-layers-raises-")
+    (lying_dir / "FAKE.gdb").mkdir()
+    with patch.object(
+        discovery.pyogrio,
+        "list_layers",
+        side_effect=RuntimeError("some pyogrio/GDAL diagnostic text"),
+    ):
+        with self.assertRaises(discovery.LayerUnreadable) as ctx:
+            discovery.find_datasets(lying_dir, DEFAULT_POLICY)
+    self.assertNotIn("pyogrio", str(ctx.exception))
+```
+
+**What to Mock:**
+- External libraries/drivers: `pyogrio`, `pyproj`, `subprocess`
+- File system operations when determinism is needed
+- Network calls (none in this codebase)
+- Do NOT mock standard library primitives like `Path` unless absolutely necessary
+
+**What NOT to Mock:**
+- Internal vicmap_acquire modules (unit test boundaries instead)
+- Data structures and value objects
+- Exception classes
+- Pure functions (call directly instead)
+
+## Fixtures and Factories
+
+**Test Data:**
+- Real data in `tests/fixtures/`: `Order_TRACER1.zip`, `geometryless_gdb.zip`, `point_z_gdb.zip`
+- ZIP archives extracted to temporary directories for each test via `_extract()` helper
+- Lightweight stand-in objects created on-the-fly for isolated unit tests
+
+**Factory Pattern from `test_manifest.py`:**
+```python
+def _field(name: str, ogr_type: str, *, width=None, precision=None, nullable=True):
+    return discovery.FieldProfile(
+        name=name, ogr_type=ogr_type, width=width, precision=precision, nullable=nullable
+    )
+
+def _layer_profile(**overrides) -> discovery.LayerProfile:
+    defaults = dict(
+        dataset_relative_path="gda2020_vicgrid/filegdb/whole_of_dataset/victoria/VMADD.gdb",
+        dataset_stem="VMADD",
+        ...
+    )
+    return discovery.LayerProfile(**{**defaults, **overrides})
+```
+
+**Location:**
+- Fixtures directory: `tests/fixtures/`
+- Factories and helpers at top of test modules or in test classes as static methods
+- Shared helpers (e.g., `_extract()`, `_TempDirMixin`) defined in test modules
+
+## Coverage
+
+**Requirements:** Not explicitly configured
+- No `.coverage` configuration file detected
+- Coverage not enforced in the build
+
+**View Coverage:**
+```bash
+python -m coverage run -m unittest discover tests/
+python -m coverage report
+python -m coverage html
+```
+
+## Test Types
+
+**Unit Tests (Primary):**
+- Scope: Single function or closely related functions
+- Approach: Fast, deterministic, no external dependencies
+- Example: `NormalizeTargetTableNameTest` tests pure naming normalization without geodatabases
+- Files: `test_naming.py`, `test_origin.py` (pure functions with no I/O)
+
+**Integration Tests:**
+- Scope: Multiple modules working together or with real fixtures
+- Approach: Use real fixture data and isolated temporary directories
+- Example: `ReadFieldSchemaTest` in `test_discovery.py` uses real `Order_TRACER1.zip` fixture
+- Files: `test_discovery.py`, `test_extraction.py`, `test_manifest.py` (composition tests)
+
+**Differential/Oracle Tests:**
+- Scope: Implementation cross-checked against independent oracle
+- Approach: Oracle is hand-written, completely independent of implementation
+- Constraint: Oracles MUST NOT import implementation functions, only public data containers
+- Example: `test_discovery_differential.py` compares `discover_layers()` output against independent `ogrinfo -json` parsing
+  - Oracle functions: `_run_ogrinfo_json()`, `_oracle_layer()`, `_oracle_geometry_normalized()`
+  - Module imports ONLY: `discover_layers`, `DiscoveryPolicy` (data container)
+  - Never imports: `read_field_schema`, `profile_layer`, geometry normalization helpers
+- Enforced by: `ImportIndependenceTest` uses `ast` module to verify import constraint at runtime
+- Files: `test_discovery_differential.py`, `test_html_visibility_differential.py`
+
+## Common Patterns
+
+**Async Testing:**
+- Not applicable (synchronous Python project)
+
+**Error Testing:**
+- All error testing uses `assertRaises()` context manager
+- Exception code/message validated by inspecting `ctx.exception`
+- Pattern ensures exceptions are closed (no raw subprocess/driver text exposed)
+- Example:
+  ```python
+  with self.assertRaises(discovery.LayerUnreadable) as ctx:
+      discovery.find_datasets(lying_dir, DEFAULT_POLICY)
+  self.assertNotIn("GDAL", str(ctx.exception))
+  self.assertEqual("layer_unreadable", str(ctx.exception))
+  ```
+
+**Module Independence Verification:**
+- `ast` module used to inspect source code imports at test time
+- Verifies layer/dependency constraints are maintained
+- Examples:
+  - `NamingModulePurityTest` in `test_naming.py` confirms `naming` has no database/socket imports
+  - `ImportIndependenceTest` in `test_discovery_differential.py` confirms differential oracle stays independent
 
 ---
 
-**Refreshed:** 2026-08-31
+*Testing analysis: 2026-09-18*

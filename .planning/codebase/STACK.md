@@ -1,59 +1,92 @@
 # Technology Stack
 
-**Analysis Date:** 2026-08-31
+**Analysis Date:** 2026-09-18
 
-## Current Maturity
+## Languages
 
-- The repository is an uncommitted initial scaffold: `git` has a `main` branch but no commits, and every current project file is untracked.
-- The only application code is `read_mailbox.py`; no Vicmap download, archive extraction, spatial transformation, PostgreSQL connection, PostGIS schema, or refresh/swap workflow is implemented yet.
-- Treat the PostGIS refresh wording in `flake.nix` as intended project direction, not evidence of an existing database implementation.
+**Primary:**
+- Python 3 - Complete acquisition pipeline, CLI orchestration, geospatial processing, and testing
 
-## Languages and Runtime
+## Runtime
 
-- Python is the application language. `read_mailbox.py` uses Python 3 syntax and standard-library `os` environment access.
-- Nix is the environment and dependency definition language. `flake.nix` defines the development shell and `flake.lock` pins its inputs.
-- Shell is used only for environment bootstrap: `.envrc` selects the flake, and the `shellHook` in `flake.nix` evaluates environment assignments produced by `opnix env`.
-- JSON appears as generated configuration/state in `flake.lock` and the local token backend; it is not an application data model.
+**Environment:**
+- Python 3.14.7 (via Nix flakes)
 
-## Runtime and Frameworks
+**Package Manager:**
+- Nix flakes only — no pip, `requirements.txt`, or `pyproject.toml` in this repo. Python
+  dependencies are declared in `flake.nix` via `python3.withPackages`.
+- Lockfile: `flake.lock` pins the reproducible environment
 
-- Python is supplied by `python3.withPackages` in `flake.nix`; there is no separate `pyproject.toml`, `requirements.txt`, virtualenv, package module, or console entry point.
-- The sole application-level framework/library is `O365` version 2.1, built directly from the `O365/python-o365` GitHub tag in `flake.nix`.
-- The O365 package is built as a PEP 517 project using `setuptools`; upstream package checks are disabled with `doCheck = false`.
-- `read_mailbox.py` uses `O365.Account` and `O365.FileSystemTokenBackend` directly rather than wrapping them behind project-owned service modules.
+## Frameworks
 
-## Dependency Inventory
+**Core:**
+- O365 2.1 - Microsoft Graph API client for Office 365 mailbox access and OAuth integration
+- requests - HTTP client for artifact downloads and API calls
+- GDAL/OGR - Geospatial vector data reading and processing
 
-- Direct Nix inputs are `nixpkgs` (`nixos-unstable`), `hercules-ci/flake-parts`, and `brizzbuzz/opnix`; exact revisions and hashes are recorded in `flake.lock`.
-- The custom O365 derivation propagates `requests`, `requests-oauthlib`, `msal`, `tzlocal`, `tzdata`, `beautifulsoup4`, and `python-dateutil`.
-- Development-shell tools are `git`, `opnix`, and Python with the custom O365 package.
-- No PostgreSQL client, PostGIS tooling, GDAL/OGR, GeoPandas, HTTP download CLI, archive utility, scheduler, test runner, linter, or formatter is declared.
-- There is no dependency separation between development, test, and production because only a development shell exists.
+**Geospatial:**
+- pyogrio - Python bindings for OGR for layer discovery and metadata extraction (`vicmap_acquire/discovery.py`)
+- pyproj - Coordinate system transformations and projections (`vicmap_acquire/discovery.py`)
 
-## Configuration and Secrets
+**Data Processing:**
+- beautifulsoup4 - HTML parsing for email content validation
+- html5lib - HTML5 parser for email origin verification (`vicmap_acquire/candidates.py`)
+- python-dateutil - Date/time parsing and manipulation
 
-- `flake.nix` declares three runtime variables: `O365_AUTH_ID`, `O365_AUTH_SECRET`, and `TENANT_ID`.
-- Those variables map to 1Password references under `op://nixos-services/o365_app_credentials/...` and are emitted in shell format by opnix.
-- `.envrc` points `OPNIX_ENV_TOKEN_FILE` at `$HOME/.config/opnix/token` and invokes `use flake`, requiring direnv plus nix-direnv-compatible behavior.
-- The shell hook can skip secret injection when `OPNIX_ENV_DISABLE` is non-empty and can override the opnix token path through `OPNIX_ENV_TOKEN_FILE`.
-- Local files `my_token.txt`, `token/my_token.txt`, and `.config/op/config` are runtime credentials/configuration artifacts, not source dependencies; they must remain excluded from version control and logs.
-- There is no checked-in `.gitignore`, example configuration, typed settings layer, or startup validation beyond the three-variable check in `read_mailbox.py`.
+**Authentication:**
+- msal (Microsoft Authentication Library) - OAuth 2.0 token acquisition for O365
+- requests-oauthlib - OAuth support in requests library
+- O365.utils.token.MemoryTokenBackend - In-memory OAuth token storage (`vicmap_acquire/graph.py`)
 
-## Supported Platforms
+**Testing:**
+- unittest (Python standard library) - Test framework for all test modules (`tests/test_*.py`)
 
-- The flake declares `x86_64-linux`, `aarch64-linux`, `aarch64-darwin`, and `x86_64-darwin` systems.
-- Nix with flakes is therefore the reproducible platform prerequisite; direnv is optional for automatic activation but currently assumed by `.envrc`.
-- Access to the configured 1Password vault/item and a valid opnix service token is required for the default shell hook.
-- Network access to GitHub/Nix caches is required to realize the development shell, and Microsoft endpoints are required when running the mailbox script.
-- Cross-platform declaration does not prove runtime testing: the repository contains no CI workflow or platform-specific test evidence.
+**Build/Dev:**
+- Nix Flakes - Declarative development environment and dependency management (`flake.nix`)
+- direnv - Automatic environment activation via `.envrc`
 
-## Build, Test, and Operations
+## Key Dependencies
 
-- Enter the intended environment with `nix develop`; `.envrc` provides the automatic equivalent where direnv is installed and allowed.
-- Run the current program as `python read_mailbox.py` from the repository root so the relative `token/` backend resolves predictably.
-- There are no automated tests, fixtures, static analysis settings, build artifact, deployment manifest, container, service unit, or scheduled-job configuration.
-- Future implementation should extend `flake.nix` for every native/runtime dependency and add project-owned packaging and tests rather than relying on ambient tools.
-- Future database work must explicitly declare PostgreSQL/PostGIS versions and geospatial tooling because neither exists in the current stack.
+**Critical:**
+- O365 2.1 - Provides authenticated access to Office 365 mailbox; blocks entire acquisition pipeline if unavailable. Dependencies: requests, requests-oauthlib, msal, tzlocal, tzdata, beautifulsoup4, python-dateutil
+- requests - HTTP client for downloading artifacts from AWS S3 and handling redirects/timeouts
+- pyogrio - Vector data discovery without materializing full datasets; critical for layer enumeration in `vicmap_acquire/discovery.py`
+- pyproj - Coordinate system metadata extraction from geospatial datasets
+
+**Infrastructure:**
+- GDAL - System-level library providing OGR tools (ogrinfo CLI) and spatial data driver support
+- tzdata - Timezone database for date normalization across UTC contexts
+
+## Configuration
+
+**Environment:**
+- Configuration file: `vicmap.toml` - TOML-based configuration for mailbox, download policy, extraction policy, and discovery settings
+- Environment variables: `O365_AUTH_ID`, `O365_AUTH_SECRET`, `TENANT_ID` - Microsoft entra credentials for OAuth, managed via opnix secrets integration
+- Secrets management: opnix (`flake.nix` lines 13-18) - External secrets provider pulling from 1Password vaults
+- Token file: `.config/opnix/token` - opnix authentication token for secrets retrieval
+
+**Build:**
+- `flake.nix` - Nix flakes manifest defining Python environment, dependencies, shell hooks, and secrets configuration
+- `flake.lock` - Nix flakes lockfile ensuring reproducible builds
+
+## Platform Requirements
+
+**Development:**
+- Nix (with flakes support enabled)
+- direnv (optional, enabled via `.envrc`)
+- Git (for version control)
+- 1Password CLI or opnix token access (for secrets)
+
+**Runtime:**
+- Python 3.x
+- GDAL system library (liboct, libproj)
+- Network access to Microsoft Graph API (graph.microsoft.com)
+- Network access to AWS S3 (s3.ap-southeast-2.amazonaws.com)
+
+**Testing:**
+- Python unittest runner (built-in)
+- Test fixtures stored in `tests/fixtures/`
 
 ---
-*Technology stack analysis refreshed: 2026-08-31*
+
+*Stack analysis: 2026-09-18*

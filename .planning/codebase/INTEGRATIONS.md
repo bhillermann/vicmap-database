@@ -1,57 +1,129 @@
 # External Integrations
 
-**Analysis Date:** 2026-08-31
+**Analysis Date:** 2026-09-18
 
-## Integration Overview
+## APIs & External Services
 
-- Two external services are implemented: 1Password-backed secret retrieval through opnix, and Microsoft 365 mailbox access through the Microsoft Graph API via the O365 Python library.
-- A PostGIS refresh is named in the `flake.nix` description, but there is no database driver, connection configuration, SQL, schema, or database call in the current repository.
-- No Vicmap endpoint, WFS service, download URL, webhook, queue, scheduler, cloud runtime, or notification integration is configured.
+**Microsoft Graph / Office 365:**
+- Microsoft Graph API - Mailbox access for order notifications
+  - SDK/Client: O365 2.1
+  - Auth: OAuth 2.0 with MSAL (Microsoft Authentication Library)
+  - Credentials: `O365_AUTH_ID` (client ID), `O365_AUTH_SECRET` (client secret), `TENANT_ID`
+  - Endpoint: https://graph.microsoft.com/v1.0/
+  - Usage: Message retrieval from monitored mailbox (`automations@vegetationlink.com.au`)
+  - Implementation: `vicmap_acquire/graph.py` (GraphMailbox class)
 
-## Microsoft 365 and Microsoft Graph
+**DataShare API (Victoria Maps):**
+- Email notifications from DataShare service
+  - Provider: `noreply@datashare.maps.vic.gov.au`
+  - Format: Email messages with download links and provenance metadata
+  - Configuration: Monitored via O365 mailbox integration
+  - Parsing: `vicmap_acquire/candidates.py` (email validation and extraction)
 
-- `read_mailbox.py` creates an `O365.Account` using application credentials from `O365_AUTH_ID` and `O365_AUTH_SECRET`, with the directory identifier supplied by `TENANT_ID`.
-- Authentication uses `auth_flow_type='credentials'`, so this is an app-only/client-credentials integration rather than an interactive delegated-user flow.
-- The requested authentication scope is `https://graph.microsoft.com/.default`; effective permissions therefore come from the app registration's pre-consented Microsoft Graph application permissions.
-- The script targets the shared/user mailbox resource `automations@vegetationlink.com.au`, opens its `Inbox`, and iterates messages returned by the O365 library.
-- `SCOPES = ['basic', 'mailbox']` is declared but unused; the actual call passes the Graph `.default` scope directly.
-- The code calls `get_messages(limit=500)` once and discards that result, then calls `get_messages()` again without the limit; planners should treat the first call as redundant rather than as an enforced processing cap.
-- Messages are printed as object representations only. Attachments, sender filtering, subject matching, received-time watermarks, pagination policy, idempotency, and downstream processing are not implemented.
+## Data Storage
 
-## Microsoft Authentication State
+**Databases:**
+- Not used - this is a stateless acquisition tool
 
-- `O365.FileSystemTokenBackend` persists authentication state to `token/my_token.txt`, using a path relative to the process working directory.
-- A second root-level `my_token.txt` exists but is not referenced by `read_mailbox.py`; it should not be treated as part of the active token path.
-- The active token file is a sensitive local artifact and must not be committed, copied into documentation, or emitted in diagnostic output.
-- If `account.is_authenticated` is false, `account.authenticate(...)` runs and prints only its result; the program does not stop explicitly when the result is false.
-- App-only access requires tenant admin consent and an application access policy/configuration that permits the target mailbox where applicable.
+**File Storage:**
+- AWS S3 (ap-southeast-2 region)
+  - Connection: HTTPS to `s3.ap-southeast-2.amazonaws.com`
+  - Bucket: `cl-isd-prd-datashare-s3-delivery`
+  - Access: Temporary signed URLs provided in email notifications (no permanent credentials)
+  - Download client: requests library with stream processing
+  - Implementation: `vicmap_acquire/download.py` (download_artifact function)
+  - Configuration: `vicmap.toml` sections `[download]`
+    - `allowed_hosts`: ["s3.ap-southeast-2.amazonaws.com"]
+    - `allowed_url_prefixes`: ["https://s3.ap-southeast-2.amazonaws.com/cl-isd-prd-datashare-s3-delivery/"]
+    - `max_bytes`: 10 GB per artifact
+    - `connect_timeout_seconds`: 10
+    - `read_timeout_seconds`: 60
+    - `max_redirects`: 5
 
-## 1Password and opnix
+**Local File Storage:**
+- Artifact directory: `artifacts/` - Downloaded ZIP files and provenance sidecars
+- Run directory: `runs/` - Extracted geospatial datasets organized by order ID
+- Configuration: `vicmap.toml` sections `[download]` and `[extraction]`
 
-- `flake.nix` obtains `O365_AUTH_ID`, `O365_AUTH_SECRET`, and `TENANT_ID` from the 1Password item `nixos-services/o365_app_credentials`.
-- The 1Password fields used are `username`, `password`, and `tenant_id`, respectively; these names are an operational contract between the flake and the vault item.
-- opnix receives its service token from `OPNIX_ENV_TOKEN_FILE`, defaulting in the shell hook to `$HOME/.config/opnix/token`.
-- `.envrc` sets the same token-file location before invoking the flake, coupling local startup to a user-level credential file.
-- `OPNIX_ENV_DISABLE` bypasses injection. When it is used, callers must supply all three Microsoft variables by another secure mechanism.
-- Secret values are materialized as process environment variables by `eval "$(opnix env ...)"`; avoid shell tracing, environment dumps, and verbose process wrappers around activation.
+**Caching:**
+- Not used - single-pass acquisition with no caching layer
 
-## Database and Vicmap Boundaries
+## Authentication & Identity
 
-- PostgreSQL/PostGIS is an intended destination only, inferred from the flake description; no host, port, database name, role, password, SSL mode, schema, extension, or migration mechanism is defined.
-- No Python PostgreSQL adapter such as psycopg, asyncpg, or SQLAlchemy is installed.
-- No source endpoint or credentials exist for Vicmap data, and no HTTP/WFS client behavior is implemented outside the transitive `requests` dependency used by O365.
-- Planning must establish both source acquisition and PostGIS write contracts before treating the repository as a refresh pipeline.
+**Auth Provider:**
+- Microsoft Entra (Azure AD) - OAuth 2.0 authorization code flow
+  - Implementation: `vicmap_acquire/graph.py` (GraphMailbox uses O365.Account with MemoryTokenBackend)
+  - Token storage: In-memory only (no persistent token cache)
+  - Scopes: Mail.Read (implicit in O365 SDK)
 
-## Failure Handling and Observability
+**Email Signing & Origin Verification:**
+- DKIM (DomainKeys Identified Mail) - Email signature validation
+- DMARC (Domain-based Message Authentication, Reporting and Conformance) - Domain authentication
+- SPF (Sender Policy Framework) - IP validation (checked via Authentication-Results header)
+- CompAuth - Microsoft Entra-specific authentication header
+- Implementation: `vicmap_acquire/origin.py` (verify_authenticated_origin function)
+- Configuration: `vicmap.toml` `[mailbox]` `required_authentication_results`: ["dkim", "dmarc", "compauth"]
 
-- Startup fails fast with `ValueError` if any of the three Microsoft environment variables is absent, although the error text incorrectly names them as `MS_APP_ID`, `MS_APP_SECRET`, and `MS_TENANT_ID`.
-- opnix failures occur during shell activation because the shell hook evaluates its output; there is no project-owned recovery path or structured diagnostic.
-- Microsoft authentication, folder lookup, Graph network errors, permission errors, throttling, paging failures, and token-file corruption are not caught in `read_mailbox.py` and therefore terminate through library exceptions.
-- There is no timeout, retry/backoff policy, circuit breaker, dead-letter storage, checkpoint, transaction, or resumability logic.
-- There is no structured logging or metrics; console output consists of shell activation text, an optional authentication result, and message representations.
-- There are no webhooks. Mailbox access is polling performed only when the script is invoked.
-- Future integration code should validate configuration names consistently, fail on unsuccessful authentication, bound mailbox queries, record a durable processing watermark, and redact all credential/token material.
-- Future PostGIS refresh work should use transactions and staging/swap semantics with explicit cleanup and retry behavior; none of those guarantees are present today.
+## Monitoring & Observability
+
+**Error Tracking:**
+- Not integrated - errors surface through exit codes and exception messages
+
+**Logs:**
+- Standard output/stderr via Python logging module
+- Logging configuration: `vicmap_acquire/graph.py` (_suppress_provider_logging function disables verbose dependency logging)
+- Log suppression: O365, msal, requests, urllib3 loggers set to CRITICAL+1
+
+## CI/CD & Deployment
+
+**Hosting:**
+- Not a deployed service - CLI utility for local/scheduled acquisition
+
+**CI Pipeline:**
+- Not configured - manual test execution via `python -m unittest discover`
+
+## Environment Configuration
+
+**Required env vars:**
+- `O365_AUTH_ID` - Microsoft Entra application (client) ID
+- `O365_AUTH_SECRET` - Client secret for application authentication
+- `TENANT_ID` - Microsoft Entra tenant ID for multi-tenant OAuth resolution
+- `OPNIX_ENV_TOKEN_FILE` - Path to opnix token file for secrets retrieval (defaults to `$HOME/.config/opnix/token`)
+
+**Secrets location:**
+- 1Password vault (accessed via opnix)
+  - `op://nixos-services/o365_app_credentials/username` → `O365_AUTH_ID`
+  - `op://nixos-services/o365_app_credentials/password` → `O365_AUTH_SECRET`
+  - `op://nixos-services/o365_app_credentials/tenant_id` → `TENANT_ID`
+- Configuration: `flake.nix` lines 13-18 (opnixEnvConfig)
+
+## Webhooks & Callbacks
+
+**Incoming:**
+- None - system polls mailbox via O365 API
+
+**Outgoing:**
+- None - system reads only, does not write to external services
+
+## Email Protocol Details
+
+**Mailbox Monitoring:**
+- Protocol: HTTP REST via Microsoft Graph API (not IMAP/POP3)
+- Folder: Inbox (configurable via `vicmap.toml` `[mailbox]` `folder`)
+- Lookback: 15 days configurable via `lookback_days` parameter
+- Filtering: 
+  - Allowed senders: ["noreply@datashare.maps.vic.gov.au"]
+  - Allowed order IDs: ["OK0VUZ"] (configurable via `allowed_order_ids`)
+  - Sender authentication required: DKIM, DMARC, CompAuth (configurable)
+
+## Geospatial Data Services
+
+**OGR/GDAL Drivers:**
+- ogrinfo command-line tool - Layer discovery and metadata extraction
+- Timeout: 60 seconds per operation (configurable via `vicmap.toml` `[discovery]` `ogrinfo_timeout_seconds`)
+- Implementation: `vicmap_acquire/discovery.py` (subprocess calls to system ogrinfo)
+- Supported formats: OpenFileGDB, ESRI Shapefile, GPKG, MapInfo File, DXF (extension-to-driver map in `discovery.py`)
 
 ---
-*External integrations analysis refreshed: 2026-08-31*
+
+*Integration audit: 2026-09-18*

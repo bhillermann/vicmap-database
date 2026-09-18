@@ -1,71 +1,200 @@
 # Coding Conventions
 
-**Analysis date:** 2026-08-31
+**Analysis Date:** 2026-09-18
 
-## Repository Shape
+## Naming Patterns
 
-- The current implementation is a single top-level Python script, `read_mailbox.py`.
-- Development dependencies and environment assembly live in `flake.nix`; shell activation lives in `.envrc`.
-- There is no Python package directory, application entry-point wrapper, project metadata, formatter configuration, or linter configuration.
-- All visible project files are currently untracked, and the repository has no commits or tracked-file history from which to infer broader conventions.
-- Secret-bearing artifacts exist at `my_token.txt` and `token/my_token.txt`; code and documentation must not treat these as source files or examples.
+**Files:**
+- Snake_case for module files: `discovery.py`, `extraction.py`, `naming.py`, `manifest.py`
+- Test files follow pattern: `test_<module_name>.py` (e.g., `test_discovery.py`, `test_naming.py`)
 
-## Python Style and Naming
+**Functions:**
+- Snake_case for all functions and methods
+- Private functions prefixed with single underscore: `_positive_integer()`, `_strip_comments()`
+- Public functions are verbs or descriptive phrases: `find_datasets()`, `read_field_schema()`, `normalize_target_table_name()`
 
-- `read_mailbox.py` uses uppercase snake case for module-level configuration values: `MSAPPID`, `MSAPPSECRET`, `TENANT_ID`, `SCOPES`, `CREDENTIALS`, and `TOKEN_BACKEND`.
-- Runtime objects use lowercase names such as `account`, `mailbox`, `inbox`, `count`, and `message`.
-- Naming is inconsistent around Microsoft environment variables: code reads `O365_AUTH_ID`, `O365_AUTH_SECRET`, and `TENANT_ID`, while the validation error names `MS_APP_ID`, `MS_APP_SECRET`, and `MS_TENANT_ID`.
-- New environment-variable references should use the exact names declared in `flake.nix`: `O365_AUTH_ID`, `O365_AUTH_SECRET`, and `TENANT_ID`.
-- Assignment spacing is inconsistent (`inbox=...` versus `account = ...`); follow standard spaces around assignment operators when extending the script.
-- Strings use both single and double quotes without an established semantic distinction.
-- Collection literals and function calls generally include trailing commas when written across multiple lines.
+**Variables:**
+- Local variables use snake_case
+- Constants use UPPER_SNAKE_CASE: `_EXTENSION_DRIVERS`, `MANIFEST_SCHEMA_VERSION`, `_MAX_NAME_BYTES`
+- Private constants prefixed with underscore: `_HEX_64`, `_RESERVED_KEYWORDS`
 
-## Imports and Dependencies
+**Types:**
+- Class names use PascalCase: `DiscoveryPolicy`, `LayerProfile`, `ImportManifest`
+- Exception classes use PascalCase ending with "Failure" or "Error": `DiscoveryFailure`, `LayerUnreadable`, `NamingFailure`
+- TypeVars and generics use UPPER_CASE: `_T = TypeVar("_T")`
 
-- Third-party imports from `O365` appear before the standard-library `os` import in `read_mailbox.py`.
-- Imports are explicit (`Account`, `FileSystemTokenBackend`) rather than wildcard imports.
-- `flake.nix` is the only dependency declaration and supplies Python plus the locally built `O365` package.
-- `flake.nix` pins `O365` version `2.1` from GitHub and declares its propagated dependencies directly.
-- The Nix derivation disables upstream package checks with `doCheck = false`.
-- Keep dependency changes in `flake.nix`; no `requirements.txt`, `pyproject.toml`, or lockfile for Python exists.
+## Code Style
 
-## Code Structure and Function Design
+**Formatting:**
+- Nix flake defines dev environment with Python 3 packages
+- No explicit linting/formatting tool configured (no `.eslintrc`, `.flake8`, `pyproject.toml` found)
+- No `.prettierrc` or similar formatters configured
+- Code style appears to follow PEP 8 implicitly
 
-- `read_mailbox.py` executes authentication and mailbox access at import time.
-- The script defines no functions, classes, `main()` function, or `if __name__ == "__main__"` guard.
-- Configuration loading, validation, authentication, mailbox lookup, message retrieval, and output are coupled in one module-level flow.
-- The `SCOPES` constant is declared but unused; authentication instead passes the Microsoft Graph `.default` scope inline.
-- `count` receives a message query result but is never consumed; a second call to `inbox.get_messages()` drives iteration.
-- Any extension should first isolate configuration loading, account creation, and mailbox processing into small functions so callers and tests can avoid import-time network activity.
-- Keep external-service objects at integration boundaries; pass them into processing functions instead of resolving them from globals.
+**Linting:**
+- No explicit linter configuration visible
+- Conventions appear to be enforced via code review (see phase documentation)
 
-## Errors, Logging, and Output
+## Import Organization
 
-- Missing required configuration raises `ValueError` before the O365 account is created.
-- The validation message is assembled with an explicit line-continuation backslash and has mismatched variable names.
-- Authentication reports its result with `print()` and message processing prints each message object directly.
-- There is no configured `logging` module, log level, structured event format, retry policy, or exception translation.
-- Exceptions from token loading, authentication, mailbox lookup, and message enumeration currently propagate unchanged.
-- Preserve fail-fast configuration validation, but use accurate variable names and actionable context in future errors.
-- Avoid printing credentials, token contents, or entire message objects when adding diagnostics because mailbox objects may contain sensitive data.
+**Order:**
+1. `from __future__ import annotations` (always first, enables forward references)
+2. Standard library imports (stdlib modules)
+3. Third-party imports (pyogrio, pyproj, O365, etc.)
+4. Local imports (vicmap_acquire modules, discover_order, read_mailbox)
 
-## Comments and Documentation
+**Example from `discover_order.py`:**
+```python
+from __future__ import annotations
 
-- The only Python comment is a generic O365 guidance note above `CREDENTIALS`; it does not explain a project-specific decision.
-- There are no docstrings, README, type annotations, or module-level usage instructions.
-- `flake.nix` communicates intent through its flake description and otherwise relies on descriptive attribute names.
-- Add comments only for non-obvious service or security constraints; express routine flow through named functions.
-- Public helpers should gain concise docstrings once the script is decomposed into reusable units.
+import argparse
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
 
-## Nix and Shell Conventions
+import read_mailbox
+from vicmap_acquire.discovery import DiscoveryFailure, DiscoveryPolicy, discover_layers
+from vicmap_acquire.extraction import ArchiveFailure, ExtractionPolicy, extract_artifact
+```
 
-- `flake.nix` uses two-space indentation at outer levels, with some extra blank space and uneven indentation around `let`/`in`.
-- Nix attribute names are descriptive; the hyphenated local package name `python-o365` follows Nix naming norms.
-- The development shell supports Linux and Darwin on both x86-64 and ARM64.
-- Secrets are injected during `shellHook` through `opnix env`, with a configurable `OPNIX_ENV_TOKEN_FILE`.
-- `.envrc` exports the token-file path and activates the flake through direnv.
-- Keep secret resolution in environment setup and keep literal secret/token values out of source-controlled configuration.
+**Path Aliases:**
+- No `__init__.py` aliases detected
+- Direct imports from modules: `from vicmap_acquire.discovery import ...`
+- Relative imports not used; absolute imports from package root preferred
+
+## Error Handling
+
+**Patterns:**
+- **Closed exception hierarchy**: Each module defines a base `*Failure` class inheriting from `RuntimeError`
+  - `DiscoveryFailure` in `vicmap_acquire/discovery.py`
+  - `NamingFailure` in `vicmap_acquire/naming.py`
+  - `DownloadFailure` in `vicmap_acquire/download.py`
+  - `ArchiveFailure` in `vicmap_acquire/extraction.py`
+
+- **Exception codes**: All custom exceptions define a `code` class attribute with a string code
+  ```python
+  class LayerUnreadable(DiscoveryFailure):
+      code = "layer_unreadable"
+  ```
+
+- **No raw exception text**: Exceptions capture no external text (subprocess output, driver diagnostics, etc.)
+  - Constructor raises with only `self.code` via `super().__init__(self.code)`
+  - Exception chaining suppressed with `raise ... from None` when converting external exceptions
+
+- **Total functions**: Public entry points are total with respect to their inputs
+  - An unexpected exception collapses to one typed closed failure, never raw text
+  - Example: `find_datasets()` catches all `Exception` and raises `LayerUnreadable()` from None
+
+## Logging
+
+**Framework:** No dedicated logging framework detected
+- Code does not import `logging` module
+- Logging/diagnostics appear to be handled externally via evidence.py event sink
+
+**Patterns:**
+- No inline print statements in acquisition modules
+- `evidence.py` uses JSON Lines format for structured event output
+- Events route through `event_sink` callable for emission
+
+## Comments
+
+**When to Comment:**
+- Comments explain design rationale and reference design documents (D-21, D-23, D-34, etc.)
+- Comments on classes/functions that are part of a closed protocol describe the protocol
+- Inline comments explain non-obvious logic or edge cases
+- Comments reference code review decisions and task tracking
+
+**JSDoc/TSDoc:**
+- Not applicable (Python project)
+- Docstrings used instead
+
+**Docstring Style:**
+- First line is a one-line summary
+- Blank line followed by extended description
+- Design document references embedded: `D-21 through D-24 target-table normalization`
+- Behavior description of public functions explains inputs, outputs, and failure modes
+- Example from `discovery.py`:
+  ```python
+  def find_datasets(
+      run_directory: Path, policy: DiscoveryPolicy
+  ) -> tuple[tuple[Path, str], ...]:
+      """Return every recognized dataset beneath ``run_directory``, paired with
+      its actual driver, ordered by relative path under plain code-point
+      comparison (D-34).
+      
+      A path is a *candidate* only when its suffix is in ``_EXTENSION_DRIVERS``
+      ...
+      """
+  ```
+
+## Function Design
+
+**Size:** Functions are generally 20-60 lines
+- Focused on single responsibility
+- Complex logic broken into helper functions with leading underscore
+- Example: `find_datasets()` is ~60 lines handling enumeration logic
+
+**Parameters:**
+- Use keyword-only arguments where appropriate via `*` separator in function signature
+- Type hints on all parameters: `def build_manifest(*, order_id: str, run_timestamp: str, ...)`
+- Dataclass frozen objects used for configuration/policy objects requiring multiple parameters
+
+**Return Values:**
+- All functions explicitly annotated with return type
+- Return None explicitly only when appropriate; don't return bare None implicitly
+- Tuples used for multiple return values: `tuple[tuple[Path, str], ...]`
+- Return values are often immutable types: tuples, frozensets, frozen dataclasses
+
+## Module Design
+
+**Exports:**
+- All public functions/classes documented in module docstring
+- Private symbols prefixed with underscore
+- Module docstrings explain overall responsibility and design constraints
+- Example from `naming.py`: "This module has no I/O, opens no database connection (D-23), and does not import discovery, manifest, extraction, or read_mailbox"
+
+**Dataclasses:**
+- Frozen dataclasses used extensively for immutable value objects: `@dataclass(frozen=True)`
+- Validation in `__post_init__()` method for policy/configuration objects
+- No mutable state in dataclasses once created
+
+**Example from `discovery.py`:**
+```python
+@dataclass(frozen=True)
+class DiscoveryPolicy:
+    """Complete non-secret policy for one discovery pass (D-34)."""
+    supported_formats: tuple[str, ...]
+    ogrinfo_timeout_seconds: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.supported_formats, tuple) or not self.supported_formats:
+            raise ValueError("supported_formats must be a non-empty tuple")
+        ...
+```
+
+**Immutable Collections:**
+- `frozenset` for constant sets: `_AUTH_METHODS = frozenset({...})`
+- `MappingProxyType` for immutable dicts: `_EXTENSION_DRIVERS = MappingProxyType({...})`
+- Tuple unpacking preferred over lists
+
+## Type Annotations
+
+**Pattern:**
+- PEP 484 style type hints throughout
+- Forward reference strings not needed (enabled by `from __future__ import annotations`)
+- Use `|` for unions (Python 3.10+): `str | None` instead of `Optional[str]`
+- Use `collections.abc` for protocol types: `Iterator`, `Mapping`, `Callable`
+- Use `typing` for special forms: `TypeVar`, `TextIO`, `TYPE_CHECKING`
+
+**Example from `discovery.py`:**
+```python
+def read_field_schema(
+    dataset_path: Path, policy: DiscoveryPolicy
+) -> dict[str, tuple[FieldProfile, ...]]:
+    """..."""
+```
 
 ---
 
-**Refreshed:** 2026-08-31
+*Convention analysis: 2026-09-18*
