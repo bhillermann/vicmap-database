@@ -8,11 +8,27 @@ needed. ``NamingModulePurityTest`` inspects the module's own source with
 ``ast`` to prove it stays leaf-ward (no import of ``discovery``,
 ``manifest``, ``extraction``, or ``read_mailbox``) and structurally incapable
 of contacting a database (no database driver or ``socket`` import).
+
+``PostgresKeywordOracleTest`` (IN-01) is the one exception to "no database
+driver": every other test above checks ``_RESERVED_KEYWORDS`` against
+*itself* -- ``PostgresKeywordSnapshotTest``'s trap words were chosen by
+reading the same hand-transcribed frozenset the code under test uses, so a
+transcription error in that frozenset (a missing or extra keyword) would
+never be caught by any test that was written against the same list. The
+oracle test instead asks a *running PostgreSQL server* -- via
+``pg_get_keywords()``, which the server derives at build time from its own
+grammar tables (``src/include/parser/kwlist.h``), not from anyone re-reading
+the Appendix C documentation page a second time -- and diffs its answer
+against ``_RESERVED_KEYWORDS``. This is optional and skips cleanly (never
+fails) when no PostgreSQL driver is importable or no server is reachable,
+since neither this module nor its test suite may require a live database
+(D-23) or network access to pass.
 """
 
 from __future__ import annotations
 
 import ast
+import os
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -198,6 +214,77 @@ class PostgresKeywordSnapshotTest(unittest.TestCase):
             with self.subTest(word=word):
                 with self.assertRaises(TableNameInvalid):
                     _normalize_whole(word)
+
+
+class PostgresKeywordOracleTest(unittest.TestCase):
+    """IN-01 differential oracle: cross-check ``_RESERVED_KEYWORDS`` against
+    a live PostgreSQL server's own ``pg_get_keywords()`` instead of another
+    hand-written assertion against the same transcribed list.
+
+    Skipped, never failed, when no PostgreSQL driver (``psycopg`` or
+    ``psycopg2``) is installed, or when no server is reachable within a
+    short local timeout -- this suite has no required network or live
+    database dependency. Set ``VICMAP_TEST_POSTGRES_DSN`` to point this
+    test at a specific server; otherwise it tries a local default
+    connection (``dbname=postgres``) and skips on any connection failure.
+    """
+
+    _DSN_ENV_VAR = "VICMAP_TEST_POSTGRES_DSN"
+    _CONNECT_TIMEOUT_SECONDS = 2
+
+    def _connect(self):
+        try:
+            import psycopg as _driver  # psycopg3, preferred if present
+        except ImportError:
+            try:
+                import psycopg2 as _driver  # type: ignore[no-redef]
+            except ImportError:
+                self.skipTest(
+                    "no PostgreSQL driver (psycopg or psycopg2) installed -- "
+                    "IN-01 oracle check skipped, not failed"
+                )
+
+        dsn = os.environ.get(self._DSN_ENV_VAR)
+        try:
+            if dsn:
+                connection = _driver.connect(
+                    dsn, connect_timeout=self._CONNECT_TIMEOUT_SECONDS
+                )
+            else:
+                connection = _driver.connect(
+                    dbname="postgres",
+                    connect_timeout=self._CONNECT_TIMEOUT_SECONDS,
+                )
+        except Exception as exc:  # noqa: BLE001 -- any connect failure just skips
+            self.skipTest(
+                f"no reachable PostgreSQL server for IN-01 oracle check: {exc}"
+            )
+        return connection
+
+    def test_reserved_keywords_match_live_server_pg_get_keywords(self):
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT word, catcode FROM pg_get_keywords()")
+                rows = cursor.fetchall()
+        finally:
+            connection.close()
+
+        # catcode 'R' = RESERVED_KEYWORD ("reserved" in Appendix C);
+        # catcode 'T' = TYPE_FUNC_NAME_KEYWORD ("reserved (can be function
+        # or type)" in Appendix C). These are the server's own category
+        # codes, generated from its grammar tables -- not re-typed from the
+        # documentation page naming.py's own comment cites.
+        server_blocking_keywords = {
+            word for word, catcode in rows if catcode in ("R", "T")
+        }
+        self.assertEqual(
+            naming_module._RESERVED_KEYWORDS,
+            server_blocking_keywords,
+            "naming.py's hand-transcribed _RESERVED_KEYWORDS has drifted "
+            "from this live server's pg_get_keywords() reserved categories "
+            "('R' and 'T') -- see IN-01",
+        )
 
 
 @dataclass(frozen=True)
