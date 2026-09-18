@@ -120,6 +120,31 @@ def _patch_general_purpose_flag_bit(raw: bytes, bit: int) -> bytes:
     return bytes(data)
 
 
+def _patch_compression_method(raw: bytes, method: int) -> bytes:
+    """Set both headers' compression-method field directly in raw archive bytes.
+
+    Same rationale as ``_patch_general_purpose_flag_bit``: ``ZipInfo`` metadata
+    a test sets before writing is not what a caller later reads back purely
+    through ``compress_type`` in every case relevant here, but more
+    importantly this constructs a value (99) that ``zipfile`` itself will
+    never write via any public API -- there is no ``ZIP_*`` constant for an
+    unsupported method, so the only way to build a member whose local *and*
+    central directory records both declare one is to patch the on-disk bytes
+    after the fact. Compression method is a two-byte field at local file
+    header offset 8 and central directory record offset 10. Assumes exactly
+    one member, as every fixture using this helper does.
+    """
+
+    data = bytearray(raw)
+    local_offset = data.find(b"PK\x03\x04")
+    central_offset = data.find(b"PK\x01\x02")
+    assert local_offset != -1 and central_offset != -1
+    for header_offset, method_field_offset in ((local_offset, 8), (central_offset, 10)):
+        position = header_offset + method_field_offset
+        data[position : position + 2] = method.to_bytes(2, "little")
+    return bytes(data)
+
+
 class ExtractionTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.run_root = Path(tempfile.mkdtemp(prefix="vicmap-extraction-runs-"))
@@ -552,6 +577,42 @@ class WriteTimeGuardTest(ExtractionTestCase):
         # The pre-created bytes must survive untouched -- the exclusive
         # create failed before any truncation could occur.
         self.assertEqual(destination.read_bytes(), b"already here, claimed first")
+
+    @unittest.skipUnless(
+        Path("/proc/self/fd").is_dir(), "requires a /proc-backed platform"
+    )
+    def test_fd_not_leaked_when_zip_open_raises_after_exclusive_create(self):
+        # WR-03: os.open(destination, O_EXCL) succeeds (the descriptor is
+        # allocated), then zip_file.open(info, "r") raises because the
+        # member's local *and* central directory headers both declare an
+        # unsupported compression method (99, patched directly into the raw
+        # archive bytes -- no public zipfile API can construct this). In the
+        # pre-fix compound `with zip_file.open(...) as source, os.fdopen(
+        # descriptor, ...) as target:` ordering, `os.fdopen` is never
+        # reached, so the descriptor from `os.open()` is never closed by
+        # anything and the process's open-fd count permanently increases by
+        # one. This test fails at that ordering and passes once
+        # `os.fdopen(descriptor, ...)` is entered first, so the `with`
+        # statement's own partial-entry cleanup closes it.
+        raw = _patch_compression_method(
+            _build_archive([_member("a.bin", b"hello world")]), 99
+        )
+        path = self.artifact_dir / "unsupported-method.zip"
+        path.write_bytes(raw)
+
+        fd_dir = Path(f"/proc/{os.getpid()}/fd")
+        fds_before = len(list(fd_dir.iterdir()))
+
+        with self.assertRaises(extraction.ArchiveUnreadable):
+            self._extract(path)
+
+        fds_after = len(list(fd_dir.iterdir()))
+        self.assertEqual(
+            fds_after,
+            fds_before,
+            "open file descriptor count must return to its pre-call value "
+            "after ArchiveUnreadable is raised",
+        )
 
 
 class ProvenanceIntegrityTest(ExtractionTestCase):

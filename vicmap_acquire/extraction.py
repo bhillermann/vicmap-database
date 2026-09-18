@@ -360,9 +360,19 @@ def extract_artifact(
                 descriptor = os.open(
                     destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644
                 )
-                with zip_file.open(info, "r") as source, os.fdopen(
-                    descriptor, "wb"
-                ) as target:
+                # WR-03: os.fdopen(descriptor, ...) must be entered *before*
+                # zip_file.open(info, "r") in this compound ``with``. Python
+                # constructs/enters context managers left-to-right; if the
+                # raw descriptor's wrapper were entered second and
+                # zip_file.open() raised first (a corrupt/adversarial member
+                # header), the descriptor from os.open() above would never
+                # be handed to anything that closes it -- it would leak for
+                # the remaining life of the process. Entering os.fdopen()
+                # first means the ``with`` statement's own partial-entry
+                # cleanup closes it if the sibling construction then fails.
+                with os.fdopen(descriptor, "wb") as target, zip_file.open(
+                    info, "r"
+                ) as source:
                     while True:
                         chunk = source.read(1024 * 1024)
                         if not chunk:
