@@ -1,148 +1,170 @@
 ---
 phase: 02-safe-geospatial-discovery
-reviewed: 2026-09-16T21:26:36Z
+reviewed: 2026-09-18T02:30:00Z
 depth: standard
-files_reviewed: 8
+files_reviewed: 2
 files_reviewed_list:
-  - vicmap_acquire/discovery.py
   - vicmap_acquire/extraction.py
-  - vicmap_acquire/manifest.py
-  - vicmap.toml
-  - tests/test_discovery.py
-  - tests/test_discovery_config.py
   - tests/test_extraction.py
-  - tests/test_manifest.py
 findings:
   critical: 0
-  warning: 1
-  info: 1
+  warning: 0
+  info: 2
   total: 2
 status: issues_found
 ---
 
-# Phase 2: Code Review Report (incremental re-review after gap closure)
+# Phase 2: Code Review Report (incremental re-review of WR-03 fix)
 
-**Reviewed:** 2026-09-16T21:26:36Z
+**Reviewed:** 2026-09-18T02:30:00Z
 **Depth:** standard
-**Files Reviewed:** 8
+**Files Reviewed:** 2
 **Status:** issues_found
 
 ## Summary
 
-This is a re-review of everything changed since commit `5d3a21e` (the commit the prior `02-REVIEW.md` was produced against): plans 02-07, 02-08, and 02-09 closing the gaps that review raised. All four prior findings (CR-01, CR-02, WR-01, WR-02) are **RESOLVED**, each with a targeted regression that fails against the pre-fix code and passes against the fix (verified by reading the fix and its accompanying test, and by live-reproducing the compression-ratio calibration numbers against both the checked-in fixture and the real 233 MB delivery). IN-01 (`naming.py`'s hand-transcribed keyword set) was out of this incremental scope's changed-file list and is untouched — carried forward unresolved for completeness, not re-audited this pass.
+This is a re-review scoped to what changed since the prior `02-REVIEW.md` (commit
+`679b07c`): commit `d6b0754`, which was supposed to fix WR-03 (the file-descriptor
+leak in `extract_artifact`'s compound `with` statement when `zip_file.open()`
+raises after `os.open(..., O_EXCL)` has already succeeded) and add a regression
+test for it.
 
-One new defect was found in the 02-08 hardening itself: the write-time exclusive-create guard added to close CR-01 (`os.open(destination, O_WRONLY|O_CREAT|O_EXCL, ...)` immediately followed by a compound `with zip_file.open(info, "r") as source, os.fdopen(descriptor, "wb") as target:`) leaks the raw file descriptor whenever `zip_file.open(info, "r")` raises — which it legitimately can, for a corrupt or adversarially malformed member (bad local-header compression method, header/CRC mismatch), squarely inside this module's own adversarial-input threat model. This is live-reproduced below (WR-03). It also contradicts the function's own `finally`-block comment, which claims "every other resource this function opens... is already scoped to a `with` block above and closes itself" — that claim is false for this specific ordering. Severity is Warning rather than Critical because the process is short-lived per invocation (no observed data corruption, security bypass, or crash), but it is a genuine regression introduced by the very fix meant to harden this path, so it belongs in this incremental review rather than being deferred.
+**WR-03 is verified RESOLVED.** The diff against `679b07c` touches exactly the
+compound `with` statement identified in the prior report — reordering
+`with zip_file.open(info, "r") as source, os.fdopen(descriptor, "wb") as target:`
+to `with os.fdopen(descriptor, "wb") as target, zip_file.open(info, "r") as source:`
+— plus an explanatory inline comment and one new test
+(`WriteTimeGuardTest.test_fd_not_leaked_when_zip_open_raises_after_exclusive_create`)
+with its supporting `_patch_compression_method` fixture helper. No other lines in
+either file changed. This was independently confirmed three ways this session,
+not just by reading the fix:
 
-One new Info-level observation is also recorded: the recalibrated `max_compression_ratio = 200` (02-07) clears the real delivery's measured worst-case per-member ratio (~139.24, independently re-measured this session) by only ~1.44x headroom — tighter than the fixture's ~1.6x headroom. The shipped regression test (`ShippedCeilingCalibrationTest`) will catch a future regression below the currently-measured worst case, but the margin itself is thin enough that a future delivery with one more-compressible member could reopen the exact WR-class hard-stop this recalibration was meant to close.
+1. **Live reproduction against the fixed code**, outside the test suite: a
+   synthetic single-member zip with both the local file header's and central
+   directory record's compression-method field patched to an unsupported value
+   (99, unreachable through any public `zipfile` writer API) was extracted
+   through `extraction.extract_artifact` directly. Open file descriptor count
+   (`/proc/<pid>/fd`) was identical before the call and after `ArchiveUnreadable`
+   was raised (`before 4 after 4`).
+2. **Full test suite run**, `python3 -m unittest discover -s tests`: 400 tests,
+   OK, matching the fix report's claimed count.
+3. **Targeted module run**, `python3 -m unittest tests.test_extraction -v`: 40
+   tests, OK, including the new regression test passing.
+
+No new defect was introduced by commit `d6b0754` itself. The reordering is a
+pure context-manager entry-order correction: `os.fdopen(descriptor, "wb")` is
+constructed from an already-valid descriptor (`os.open` succeeded moments
+earlier under the same lock of control flow), so its own construction cannot
+plausibly fail in a way that would re-leak the descriptor, and no other code
+path, exception type, or control-flow branch changed. The new test is
+appropriately scoped (`@unittest.skipUnless(Path("/proc/self/fd").is_dir(), ...)`
+for portability) and is a real regression test, not a tautology — the fix
+report's own verification log shows it failing (`AssertionError: 5 != 4`)
+against the pre-fix ordering and passing against the fix, which this review
+independently re-confirmed via `git show <pre-fix commit>` diffing.
+
+Two prior Info findings were out of this incremental review's scope (neither
+`naming.py` nor `vicmap.toml` changed in commit `d6b0754`) and are carried
+forward verbatim, unresolved, below.
 
 ## Disposition of Prior Findings
 
-### CR-01 (RESOLVED): Archive duplicate-member guard compares raw filenames, not resolved destinations
+### WR-03 (RESOLVED): Write-time exclusive-create guard leaked the destination file descriptor when `zip_file.open()` raised after `os.open()` succeeded
 
-**Prior file/lines:** `vicmap_acquire/extraction.py` `_validate_members`
+**Prior file/lines:** `vicmap_acquire/extraction.py:360-365` (pre-fix, at commit `679b07c`)
 
-**Fix verified:** `_validate_members` (extraction.py:221-267) now keys the aliasing guard on `_reject_unsafe_member`'s *resolved* destination `Path`, plus a second `os.path.normcase(str(destination)).casefold()` key for case-only aliasing on case-insensitive filesystems. Both `d/f.txt` vs `d//f.txt` and `d/f.txt` vs `d/F.txt` are now rejected pre-write, in either archive order. Regressions added and read: `test_double_slash_path_alias_rejected`, `test_dot_segment_path_alias_rejected`, `test_aliased_pair_rejected_when_colliding_name_appears_{first,second}`, `test_case_alias_rejected` (`tests/test_extraction.py:269-323`) — all target the exact reproduction from the prior CR-01 report and would fail against the reverted (raw-filename) guard, per their own inline comments.
+**Fix verified:** `extract_artifact`'s compound `with` statement (now
+`vicmap_acquire/extraction.py:373-375`) enters `os.fdopen(descriptor, "wb")`
+first and `zip_file.open(info, "r")` second — the reverse of the pre-fix
+ordering. Python's compound `with A() as a, B() as b:` statement enters `A`
+before constructing `B`; if `B`'s construction then raises, the `with`
+statement's own guaranteed partial-entry cleanup exits `A`. With the fix,
+`A` is the already-open descriptor's wrapper, so a `zip_file.open()` failure
+(e.g., a member declaring an unsupported/malformed compression method) now
+correctly closes the descriptor instead of leaking it. An inline comment was
+added directly above the statement recording the WR-03 rationale, which
+matches the actual code exactly (verified by reading, not just the comment's
+own claim).
 
-A complementary write-time hardening was also added (`os.open(..., O_EXCL)` per member, `tests/test_extraction.py::WriteTimeGuardTest`), making the filesystem the last oracle for any alias the pre-pass guard might still miss. This hardening itself introduces a new regression — see **WR-03** below — but the CR-01 defect as originally reported (the aliasing guard silently bypassed by path-alias members) is fully closed.
+Regression added and independently re-run this session:
+`WriteTimeGuardTest.test_fd_not_leaked_when_zip_open_raises_after_exclusive_create`
+(`tests/test_extraction.py:584-615`), using a new `_patch_compression_method`
+helper (`tests/test_extraction.py:123-145`) that patches both the local file
+header and central directory record's compression-method field to an
+unsupported value (99) directly in the raw archive bytes, since no public
+`zipfile` writer API can construct such a member. The test asserts the
+process's `/proc/<pid>/fd` count is identical before the call and after
+`ArchiveUnreadable` is raised, and is skipped on platforms without `/proc`.
 
-**Status: RESOLVED.**
-
-### CR-02 (RESOLVED): `write_manifest` publishes `manifest.json` and its sidecar as two independent, non-atomic commits
-
-**Prior file/lines:** `vicmap_acquire/manifest.py` `write_manifest`
-
-**Fix verified:** `write_manifest` (manifest.py:201-256) now wraps the sidecar's `_write_new_file_fsync` call in its own `try/except OSError`, best-effort unlinking `manifest_path` before re-raising on sidecar failure. The unlink is provably scoped to a manifest this exact call created (reached only after the `O_EXCL` manifest create returned without raising). Regressions read and traced: `test_sidecar_pre_existing_leaves_no_manifest_and_directory_unchanged` (the literal CR-02 reproduction — sidecar pre-exists, manifest create succeeds, sidecar create fails, rollback removes the manifest, directory listing is unchanged before/after), `test_failed_sidecar_create_then_retry_succeeds_into_same_directory` (proves the previously-permanent stuck state is now retryable), `test_rollback_does_not_fire_on_pre_existing_complete_manifest` (proves the rollback path is never reached for a genuinely pre-existing manifest, via an `unlink` spy that raises `AssertionError` if called), and `test_rollback_unlink_failure_still_raises_manifest_write_failed` (a failing rollback unlink itself still surfaces as the closed `ManifestWriteFailed`, never a raw `OSError`). Traced the control flow by hand: there is no code path between the two `_write_new_file_fsync` calls, so a `manifest.json` create failure (e.g., a pre-existing manifest) can never reach the rollback branch, and only a sidecar-create failure can.
-
-**Status: RESOLVED.**
-
-### WR-01 (RESOLVED): `find_datasets` matches archive suffixes case-sensitively
-
-**Prior file/lines:** `vicmap_acquire/discovery.py:35-43`, `:168`
-
-**Fix verified:** `find_datasets` now does `_EXTENSION_DRIVERS.get(path.suffix.casefold())` (discovery.py:169) against a table whose keys are already lowercase; the docstring comment was updated to state the probe, not the table, is casefolded. Regressions read: `test_uppercase_geodatabase_extension_is_recognized` (renames the real extracted `VMADD.gdb` to `VMADD.GDB` and asserts it is still found and profiled) and `test_uppercase_unsupported_extension_raises_unsupported_format` (an uppercase `.SHP` now correctly raises `UnsupportedFormat`, not a generic `DeliveryEmpty`) — both tests' own comments state they fail at pre-02-07 HEAD.
-
-**Status: RESOLVED.**
-
-### WR-02 (RESOLVED): `manifest.json`'s directory entry is never fsynced
-
-**Prior file/lines:** `vicmap_acquire/manifest.py`
-
-**Fix verified:** A private `_fsync_directory` (manifest.py:171-198), copied to match `extraction.py`'s/`download.py`'s idiom exactly (swallows its own `OSError` on open/fsync/close), is now called once on `run_directory` after both files are confirmed written (manifest.py:253). Regressions read: `test_successful_write_fsyncs_run_directory_exactly_once` (spy assert-called-once-with `run_dir`), `test_rollback_path_never_calls_directory_fsync` (a failed/rolled-back call must never fsync), and `test_directory_fsync_failure_does_not_affect_successful_write` (a failing directory fsync must not change the outcome, distinguishing the directory's own non-`O_CREAT` open from the two file creates).
+Live-reproduced independently this session (not merely re-reading the fix
+report's claim): extracting the same 99-method fixture through the fixed
+`extract_artifact` leaves the open-fd count unchanged (`before 4 after 4`).
+Full suite (`python3 -m unittest discover -s tests`) and the module alone
+(`python3 -m unittest tests.test_extraction -v`) both pass in full (400 and 40
+tests respectively, no failures, no unexpected skips).
 
 **Status: RESOLVED.**
 
 ### IN-01 (CARRIED FORWARD, UNCHANGED): `_RESERVED_KEYWORDS` in `naming.py` has no independent PostgreSQL oracle
 
-`naming.py` and `test_naming.py` are not in this incremental review's file list and were not touched by 02-07/02-08/02-09. No new information; carried forward at Info severity, unresolved, exactly as previously reported.
+`naming.py` and `tests/test_naming.py` are not in this incremental review's
+file list (`vicmap_acquire/extraction.py`, `tests/test_extraction.py` only)
+and were not touched by commit `d6b0754`. Not re-audited this pass. Carried
+forward verbatim at Info severity, unresolved, exactly as previously
+reported: the hand-transcribed reserved-keyword set has no independent
+oracle verifying it against PostgreSQL's actual reserved-word list, so a
+transcription error (a missing or extra keyword) would not be caught by any
+existing test, since the tests were written against the same hand-transcribed
+list they are meant to check.
 
-## Warnings
+### IN-02 (CARRIED FORWARD, UNCHANGED): The recalibrated `max_compression_ratio = 200` clears the real delivery's worst-case ratio by only ~1.44x
 
-### WR-03: The write-time exclusive-create guard added to close CR-01 leaks the destination file descriptor when `zip_file.open()` raises after `os.open()` succeeds
+`vicmap.toml` is not in this incremental review's file list and was not
+touched by commit `d6b0754`. Not re-audited this pass. Carried forward
+verbatim at Info severity, unresolved, exactly as previously reported:
+independently re-measured in the prior review with a bare `zipfile` walk
+(never through `vicmap_acquire.extraction`), `tests/fixtures/Order_TRACER1.zip`'s
+worst-case per-member compression ratio is ~122.67 (headroom to 200: ~1.63x)
+and the real 233 MB delivery `artifacts/Order_OK0VUZ.zip`'s worst case is
+~139.24 (headroom to 200: ~1.44x). Both are guarded by the shipped
+`ShippedCeilingCalibrationTest`, so this is not an unguarded regression risk,
+but the margin is thin: the worst-case members driving this ratio are tiny
+GDB index files (`.gdbtablx`/`.spx`/`.atx`, 4-5 KB each, compressing to
+35-90 bytes), and a future Vicmap delivery tool version producing a slightly
+more redundant index file could plausibly push the real worst case past 200
+again. `max_member_bytes`/`max_total_bytes` remain the actual bound on total
+inflation regardless of ratio, so this is not a security gap — only a note
+that the calibration, while correct, has a thin safety margin. No action
+required now; if a future delivery trips this ceiling again, consider
+widening the margin further (e.g., 2-3x the currently-measured worst case)
+rather than the minimum value that merely clears today's numbers.
 
-**File:** `vicmap_acquire/extraction.py:360-365` (the `os.open(...)` call and the following compound `with` statement)
+## Narrative Findings (AI reviewer)
 
-**Issue:**
+No new Critical or Warning findings were introduced by commit `d6b0754`. The
+change is minimal (a two-line reorder plus a comment and a new test), and
+line-by-line comparison against the pre-fix version at commit `679b07c`
+confirms no other code in either file was touched.
 
-```python
-descriptor = os.open(
-    destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644
-)
-with zip_file.open(info, "r") as source, os.fdopen(
-    descriptor, "wb"
-) as target:
-    ...
-```
-
-In a compound `with A() as a, B() as b:` statement, Python constructs and enters `A`'s context manager first, then constructs and enters `B`'s. Here `A` is `zip_file.open(info, "r")` and `B` is `os.fdopen(descriptor, "wb")`. If `zip_file.open(info, "r")` raises — which it legitimately can, for a member whose local file header declares an unsupported/mismatched compression method, or whose local header otherwise fails `zipfile`'s own consistency check against the central directory — the previously-opened raw descriptor from `os.open(destination, ...)` is never passed to `os.fdopen()` and is therefore never closed by anything in this function. The descriptor leaks for the remaining lifetime of the process, and an empty (0-byte) orphaned file is left at `destination` inside the `.tmp-` directory with no corresponding `ExtractedMember` entry.
-
-Live-reproduced this session: a synthetic single-member zip with its local *and* central-directory compression-method fields patched to an unsupported value (`99`) raises `ArchiveUnreadable` as expected, but the process's open file descriptor count increases by one and does not decrease, and `run_root/ORD1/.tmp-.../a.bin` is left on disk as a 0-byte file:
-
-```
-raised: <class 'vicmap_acquire.extraction.ArchiveUnreadable'> archive_unreadable
-fds before: 4 after: 5
-/tmp/.../ORD1 dir
-/tmp/.../ORD1/.tmp-20260101T000000Z dir
-/tmp/.../ORD1/.tmp-20260101T000000Z/a.bin 0
-```
-
-This directly contradicts the function's own `finally`-block comment (extraction.py:407-417): "Every other resource this function opens (the zip archive, each output file) is already scoped to a `with` block above and closes itself" — for this exact ordering, the raw descriptor from `os.open()` is *not* scoped to a `with` block until `os.fdopen()` succeeds, and that call never happens if the sibling context manager's construction fails first.
-
-No existing regression exercises this path: `tests/test_extraction.py::WriteTimeGuardTest::test_preexisting_destination_file_fails_exclusive_create` only tests the case where `os.open()` itself fails (`O_EXCL` collision) — it never exercises `os.open()` succeeding followed by `zip_file.open()` failing.
-
-Severity is Warning rather than Critical: this is a per-invocation CLI script (`discover_order.py`), so the leaked descriptor and orphaned file do not survive past process exit, and no data corruption or security bypass results. It is nonetheless a genuine, live-reproduced regression introduced by the very hardening meant to close CR-01, and it would matter in any future context that calls `extract_artifact` more than once per process (already true of this codebase's own test suite, which calls it hundreds of times in a single `unittest` process).
-
-**Fix:**
-
-Reorder the compound `with` statement so the destination file descriptor's context manager is entered *first* — the `with` statement's guaranteed partial-entry cleanup then closes it correctly if the zip member's context manager subsequently fails to construct:
-
-```python
-with os.fdopen(descriptor, "wb") as target, zip_file.open(info, "r") as source:
-    while True:
-        chunk = source.read(1024 * 1024)
-        ...
-```
-
-Re-run the reproduction above (patch the local + central directory compression-method fields to an unsupported value) as a regression, asserting the open file descriptor count returns to its pre-call value after `ArchiveUnreadable` is raised.
+One residual observation, not risen to Info severity because it does not
+represent a defect: the fix leaves a 0-byte orphaned file at `destination`
+inside the `.tmp-` directory when `zip_file.open()` raises after
+`os.open(..., O_EXCL)` succeeds (the descriptor's file object is now closed
+correctly, but the already-created file itself is not removed). This is
+consistent with, and required by, this module's own documented D-25
+contract ("a guard trip during extraction leaves the private `.tmp-`
+directory behind for inspection -- nothing is auto-deleted") and was already
+true before the WR-03 fix; the fix only changes whether the *descriptor*
+leaks, not whether the on-disk 0-byte artifact remains. No action needed.
 
 ## Info
 
 ### IN-01: `_RESERVED_KEYWORDS` in naming.py is a hand-transcribed constant with no independent oracle (carried forward, unchanged — see Disposition above)
 
-### IN-02: The recalibrated `max_compression_ratio = 200` clears the real delivery's worst-case ratio by only ~1.44x
-
-**File:** `vicmap.toml:26`
-
-**Issue:** Re-measured independently this session with a bare `zipfile` walk (never through `vicmap_acquire.extraction`, matching `ShippedCeilingCalibrationTest`'s own discipline):
-
-- `tests/fixtures/Order_TRACER1.zip` worst-case per-member ratio: ~122.67 (headroom to 200: ~1.63x)
-- `artifacts/Order_OK0VUZ.zip` (the real 233 MB delivery) worst-case per-member ratio: ~139.24 (headroom to 200: ~1.44x)
-
-Both are comfortably above 1.0 and both are guarded by `ShippedCeilingCalibrationTest`, which will go red the moment a future delivery's worst-case ratio regresses past whatever is shipped — so this is not an unguarded regression risk. It is, however, a thinner margin than it might appear: the worst-case members driving this ratio are the tiny `.gdbtablx`/`.spx`/`.atx` GDB index files (4–5 KB each, compressing to 35–90 bytes), and a future Vicmap delivery tool version producing a slightly more redundant index file could plausibly push the real worst case past 200 again, reproducing the exact "known issue" this recalibration was meant to close. `max_member_bytes`/`max_total_bytes` remain the actual bound on how much any single compressible member can inflate before extraction aborts regardless of ratio, so this is not a security gap — only a note that the calibration, while now correct, is not calibrated with a large safety margin.
-
-**Fix:** No action required now; the existing `ShippedCeilingCalibrationTest` already catches a regression. If a future delivery trips this ceiling again, consider widening the margin further (e.g., 2–3x the currently-measured worst case) rather than the minimum value that merely clears today's numbers, since GDB index file compressibility is a Vicmap/GDAL implementation detail this project does not control.
+### IN-02: The recalibrated `max_compression_ratio = 200` clears the real delivery's worst-case ratio by only ~1.44x (carried forward, unchanged — see Disposition above)
 
 ---
 
-_Reviewed: 2026-09-16T21:26:36Z_
+_Reviewed: 2026-09-18T02:30:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
