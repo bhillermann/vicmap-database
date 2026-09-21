@@ -276,6 +276,19 @@ class EvidenceContractTest(unittest.TestCase):
             "table_name_invalid": "naming",
             "table_name_collision": "naming",
             "manifest_write_failed": "manifest",
+            "manifest_unreadable": "manifest",
+            "manifest_digest_mismatch": "manifest",
+            "db_connection_failed": "db_preflight",
+            "db_postgis_unavailable": "db_preflight",
+            "db_target_srid_unresolved": "db_preflight",
+            "db_privilege_denied": "db_preflight",
+            "db_load_failed": "db_load",
+            "db_row_count_mismatch": "db_validation",
+            "db_srid_mismatch": "db_validation",
+            "db_geometry_type_mismatch": "db_validation",
+            "db_geometry_repair_changed_type": "db_validation",
+            "db_geometry_repair_incomplete": "db_validation",
+            "db_staging_ddl_failed": "db_staging_ddl",
         }
         self.assertEqual(expected, evidence.reason_stage_vocabulary())
         self.assertEqual(set(expected.values()), {stage.value for stage in evidence.Stage})
@@ -1643,6 +1656,150 @@ class ControllerSinkFailureTest(unittest.TestCase):
         rendered = stdout.getvalue() + stderr.getvalue()
         self.assertNotIn(marker, rendered)
         self.assertNotIn("Traceback", rendered)
+
+
+class Phase3VocabularyTest(unittest.TestCase):
+    def test_phase_3_reason_codes_extend_the_closed_vocabulary(self):
+        expected_additions = {
+            "manifest_unreadable": "manifest",
+            "manifest_digest_mismatch": "manifest",
+            "db_connection_failed": "db_preflight",
+            "db_postgis_unavailable": "db_preflight",
+            "db_target_srid_unresolved": "db_preflight",
+            "db_privilege_denied": "db_preflight",
+            "db_load_failed": "db_load",
+            "db_row_count_mismatch": "db_validation",
+            "db_srid_mismatch": "db_validation",
+            "db_geometry_type_mismatch": "db_validation",
+            "db_geometry_repair_changed_type": "db_validation",
+            "db_geometry_repair_incomplete": "db_validation",
+            "db_staging_ddl_failed": "db_staging_ddl",
+        }
+        vocabulary = evidence.reason_stage_vocabulary()
+        for reason, stage in expected_additions.items():
+            with self.subTest(reason=reason):
+                self.assertEqual(stage, vocabulary.get(reason))
+        self.assertEqual(len(expected_additions), 13)
+        self.assertLessEqual(set(expected_additions), set(vocabulary))
+
+    def test_every_reason_code_has_a_failure_policy_entry(self):
+        for reason in evidence.ReasonCode:
+            with self.subTest(reason=reason.value):
+                evidence.SafeFailure(reason)  # must not raise KeyError
+
+
+class DatabaseIdentityEventTest(unittest.TestCase):
+    def _kwargs(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = dict(
+            host="127.0.0.1",
+            port=5432,
+            dbname="vicmap",
+            role="vicmap_loader",
+            server_version="PostgreSQL 18.6 on x86_64-pc-linux-gnu",
+            postgis_version="POSTGIS=\"3.5.0\"",
+        )
+        base.update(overrides)
+        return base
+
+    def test_happy_path_renders_all_six_fields_in_clear(self):
+        event = evidence.SuccessEvent.database_identity(**self._kwargs())
+        self.assertEqual(
+            {
+                "event": "database_identity",
+                "host": "127.0.0.1",
+                "port": 5432,
+                "dbname": "vicmap",
+                "role": "vicmap_loader",
+                "server_version": "PostgreSQL 18.6 on x86_64-pc-linux-gnu",
+                "postgis_version": "POSTGIS=\"3.5.0\"",
+            },
+            dict(event),
+        )
+
+    def test_server_version_with_newline_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.database_identity(
+                **self._kwargs(server_version="PostgreSQL\n18.6")
+            )
+
+    def test_server_version_over_two_hundred_characters_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.database_identity(
+                **self._kwargs(server_version="x" * 201)
+            )
+
+    def test_port_zero_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.database_identity(**self._kwargs(port=0))
+
+    def test_port_true_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.database_identity(**self._kwargs(port=True))
+
+    def test_dbname_with_uppercase_letter_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.database_identity(**self._kwargs(dbname="Vicmap"))
+
+
+class StagingEventRedactionTest(unittest.TestCase):
+    def _kwargs(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = dict(
+            order_id="OK0VUZ",
+            staging_table="vmadd_address_20260921t000000z",
+            spatial=True,
+            row_count=100,
+            geometry_type="POINT",
+            srid=7899,
+            repaired_count=0,
+            extent=(0.0, 0.0, 1.0, 1.0),
+        )
+        base.update(overrides)
+        return base
+
+    def test_non_spatial_with_real_geometry_type_raises(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.staging_layer_validated(
+                **self._kwargs(
+                    spatial=False,
+                    geometry_type="POINT",
+                    srid=evidence.NOT_APPLICABLE,
+                    repaired_count=evidence.NOT_APPLICABLE,
+                    extent=evidence.NOT_APPLICABLE,
+                )
+            )
+
+    def test_non_spatial_with_all_not_applicable_renders_the_literal(self):
+        event = evidence.SuccessEvent.staging_layer_validated(
+            **self._kwargs(
+                spatial=False,
+                geometry_type=evidence.NOT_APPLICABLE,
+                srid=evidence.NOT_APPLICABLE,
+                repaired_count=evidence.NOT_APPLICABLE,
+                extent=evidence.NOT_APPLICABLE,
+            )
+        )
+        rendered = json.dumps(dict(event))
+        self.assertEqual(4, rendered.count("not_applicable"))
+
+    def test_spatial_with_any_not_applicable_field_raises(self):
+        for field in ("geometry_type", "srid", "repaired_count", "extent"):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    evidence.SuccessEvent.staging_layer_validated(
+                        **self._kwargs(**{field: evidence.NOT_APPLICABLE})
+                    )
+
+    def test_non_finite_extent_value_raises(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.staging_layer_validated(
+                **self._kwargs(extent=(0.0, 0.0, float("nan"), 0.0))
+            )
+
+    def test_extent_with_xmin_greater_than_xmax_raises(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.staging_layer_validated(
+                **self._kwargs(extent=(2.0, 0.0, 1.0, 1.0))
+            )
 
 
 if __name__ == "__main__":

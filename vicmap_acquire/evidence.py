@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+import math
 import re
 import sys
 from collections.abc import Iterator, Mapping
@@ -19,6 +21,13 @@ _ORDER_ID = re.compile(r"[A-Za-z0-9]+")
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
 _MIN_FINGERPRINT_HEX_CHARS = 8
 _MAX_FINGERPRINT_HEX_CHARS = 64
+
+# D-61: server-controlled identity text (version(), PostGIS_Full_Version())
+# rendered in clear, bounded to printable ASCII with no control characters
+# so a hostile or malformed server banner cannot inject newlines into the
+# JSON Lines stream or smuggle unbounded text into operator output.
+_SERVER_VERSION_TEXT = re.compile(r"[ -~]{1,200}")
+_GEOMETRY_TYPE_NAME = re.compile(r"[A-Z]{1,32}")
 
 
 def _require_fingerprint_length(expected_length: int) -> int:
@@ -48,6 +57,10 @@ class Stage(str, Enum):
     DISCOVERY = "discovery"
     NAMING = "naming"
     MANIFEST = "manifest"
+    DB_PREFLIGHT = "db_preflight"
+    DB_LOAD = "db_load"
+    DB_VALIDATION = "db_validation"
+    DB_STAGING_DDL = "db_staging_ddl"
 
 
 class ReasonCode(str, Enum):
@@ -84,6 +97,19 @@ class ReasonCode(str, Enum):
     TABLE_NAME_INVALID = "table_name_invalid"
     TABLE_NAME_COLLISION = "table_name_collision"
     MANIFEST_WRITE_FAILED = "manifest_write_failed"
+    MANIFEST_UNREADABLE = "manifest_unreadable"
+    MANIFEST_DIGEST_MISMATCH = "manifest_digest_mismatch"
+    DB_CONNECTION_FAILED = "db_connection_failed"
+    DB_POSTGIS_UNAVAILABLE = "db_postgis_unavailable"
+    DB_TARGET_SRID_UNRESOLVED = "db_target_srid_unresolved"
+    DB_PRIVILEGE_DENIED = "db_privilege_denied"
+    DB_LOAD_FAILED = "db_load_failed"
+    DB_ROW_COUNT_MISMATCH = "db_row_count_mismatch"
+    DB_SRID_MISMATCH = "db_srid_mismatch"
+    DB_GEOMETRY_TYPE_MISMATCH = "db_geometry_type_mismatch"
+    DB_GEOMETRY_REPAIR_CHANGED_TYPE = "db_geometry_repair_changed_type"
+    DB_GEOMETRY_REPAIR_INCOMPLETE = "db_geometry_repair_incomplete"
+    DB_STAGING_DDL_FAILED = "db_staging_ddl_failed"
 
 
 _FAILURE_POLICY = MappingProxyType(
@@ -220,8 +246,65 @@ _FAILURE_POLICY = MappingProxyType(
             Stage.MANIFEST,
             "review_run_directory_permissions_and_retry",
         ),
+        ReasonCode.MANIFEST_UNREADABLE: (
+            Stage.MANIFEST,
+            "regenerate_the_order_manifest",
+        ),
+        ReasonCode.MANIFEST_DIGEST_MISMATCH: (
+            Stage.MANIFEST,
+            "regenerate_the_order_manifest",
+        ),
+        ReasonCode.DB_CONNECTION_FAILED: (
+            Stage.DB_PREFLIGHT,
+            "verify_database_service_and_non_secret_connection_policy",
+        ),
+        ReasonCode.DB_POSTGIS_UNAVAILABLE: (
+            Stage.DB_PREFLIGHT,
+            "enable_the_postgis_extension_in_the_target_database",
+        ),
+        ReasonCode.DB_TARGET_SRID_UNRESOLVED: (
+            Stage.DB_PREFLIGHT,
+            "review_configured_target_srid",
+        ),
+        ReasonCode.DB_PRIVILEGE_DENIED: (
+            Stage.DB_PREFLIGHT,
+            "run_the_documented_provisioning_script_as_superuser",
+        ),
+        ReasonCode.DB_LOAD_FAILED: (
+            Stage.DB_LOAD,
+            "review_the_named_loader_diagnostic_file",
+        ),
+        ReasonCode.DB_ROW_COUNT_MISMATCH: (
+            Stage.DB_VALIDATION,
+            "recheck_source_layer_against_manifest_feature_count",
+        ),
+        ReasonCode.DB_SRID_MISMATCH: (
+            Stage.DB_VALIDATION,
+            "review_configured_target_srid",
+        ),
+        ReasonCode.DB_GEOMETRY_TYPE_MISMATCH: (
+            Stage.DB_VALIDATION,
+            "review_declared_geometry_type",
+        ),
+        ReasonCode.DB_GEOMETRY_REPAIR_CHANGED_TYPE: (
+            Stage.DB_VALIDATION,
+            "review_source_geometry_before_reloading",
+        ),
+        ReasonCode.DB_GEOMETRY_REPAIR_INCOMPLETE: (
+            Stage.DB_VALIDATION,
+            "review_source_geometry_before_reloading",
+        ),
+        ReasonCode.DB_STAGING_DDL_FAILED: (
+            Stage.DB_STAGING_DDL,
+            "review_the_named_loader_diagnostic_file",
+        ),
     }
 )
+
+
+# D-57: a non-spatial layer's geometry, SRID, and extent checks are recorded
+# as this exact literal -- never as passed.
+NOT_APPLICABLE = "not_applicable"
 
 
 def fingerprint(value: str, expected_length: int = 16) -> str:
@@ -292,6 +375,70 @@ def _require_target_table(value: str) -> str:
     if not isinstance(value, str) or _TARGET_TABLE.fullmatch(value) is None:
         raise ValueError("target table name is not a safe scalar")
     return value
+
+
+def _require_server_version(value: str) -> str:
+    if not isinstance(value, str) or _SERVER_VERSION_TEXT.fullmatch(value) is None:
+        raise ValueError("server version text is not a safe scalar")
+    return value
+
+
+def _require_port(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not (1 <= value <= 65535):
+        raise ValueError("port must be an int between 1 and 65535")
+    return value
+
+
+def _require_database_host(value: str) -> str:
+    if isinstance(value, str) and _HOST.fullmatch(value) is not None:
+        return value
+    try:
+        ipaddress.ip_address(value)
+    except (ValueError, TypeError):
+        raise ValueError("host is not a safe scalar") from None
+    return value
+
+
+def _require_geometry_type_or_not_applicable(value: str) -> str:
+    if value == NOT_APPLICABLE:
+        return value
+    if not isinstance(value, str) or _GEOMETRY_TYPE_NAME.fullmatch(value) is None:
+        raise ValueError("geometry type is not a safe scalar")
+    return value
+
+
+def _require_srid_or_not_applicable(value: int | str) -> int | str:
+    if value == NOT_APPLICABLE:
+        return value
+    if isinstance(value, bool) or not isinstance(value, int) or not (1 <= value <= 998999):
+        raise ValueError("srid must be an int between 1 and 998999, or not_applicable")
+    return value
+
+
+def _require_count_or_not_applicable(value: int | str) -> int | str:
+    if value == NOT_APPLICABLE:
+        return value
+    return _require_count(value)
+
+
+def _require_extent_or_not_applicable(
+    value: tuple[float, float, float, float] | str,
+) -> tuple[float, float, float, float] | str:
+    if value == NOT_APPLICABLE:
+        return value
+    if not isinstance(value, tuple) or len(value) != 4:
+        raise ValueError("extent must be a 4-tuple, or not_applicable")
+    xmin, ymin, xmax, ymax = value
+    for scalar in (xmin, ymin, xmax, ymax):
+        if (
+            isinstance(scalar, bool)
+            or not isinstance(scalar, (int, float))
+            or not math.isfinite(scalar)
+        ):
+            raise ValueError("extent values must be finite numbers")
+    if xmin > xmax or ymin > ymax:
+        raise ValueError("extent must be ordered (xmin<=xmax, ymin<=ymax)")
+    return (float(xmin), float(ymin), float(xmax), float(ymax))
 
 
 class _SafeEvent(Mapping[str, object]):
@@ -449,6 +596,104 @@ class SuccessEvent(_SafeEvent):
             }
         )
 
+    @classmethod
+    def database_identity(
+        cls,
+        *,
+        host: str,
+        port: int,
+        dbname: str,
+        role: str,
+        server_version: str,
+        postgis_version: str,
+    ) -> "SuccessEvent":
+        """D-61: connection identity shown in clear -- host is never fingerprinted."""
+
+        return cls(
+            {
+                "event": "database_identity",
+                "host": _require_database_host(host),
+                "port": _require_port(port),
+                "dbname": _require_target_table(dbname),
+                "role": _require_target_table(role),
+                "server_version": _require_server_version(server_version),
+                "postgis_version": _require_server_version(postgis_version),
+            }
+        )
+
+    @classmethod
+    def staging_table_loaded(
+        cls,
+        *,
+        order_id: str,
+        target_table: str,
+        staging_table: str,
+        row_count: int,
+    ) -> "SuccessEvent":
+        return cls(
+            {
+                "event": "staging_table_loaded",
+                "order_id": _require_order_id(order_id),
+                "target_table": _require_target_table(target_table),
+                "staging_table": _require_target_table(staging_table),
+                "row_count": _require_count(row_count),
+            }
+        )
+
+    @classmethod
+    def staging_layer_validated(
+        cls,
+        *,
+        order_id: str,
+        staging_table: str,
+        spatial: bool,
+        row_count: int,
+        geometry_type: str,
+        srid: int | str,
+        repaired_count: int | str,
+        extent: tuple[float, float, float, float] | str,
+    ) -> "SuccessEvent":
+        """D-57: a non-spatial layer reports geometry fields as ``not_applicable``,
+        never as passed; a spatial layer must never carry ``not_applicable``."""
+
+        if isinstance(spatial, bool) is False:
+            raise ValueError("spatial must be a bool")
+        four = (geometry_type, srid, repaired_count, extent)
+        if spatial:
+            if any(value == NOT_APPLICABLE for value in four):
+                raise ValueError(
+                    "a spatial layer cannot report not_applicable geometry fields"
+                )
+        else:
+            if any(value != NOT_APPLICABLE for value in four):
+                raise ValueError(
+                    "a non-spatial layer must report not_applicable for all geometry fields"
+                )
+
+        validated_geometry_type = _require_geometry_type_or_not_applicable(geometry_type)
+        validated_srid = _require_srid_or_not_applicable(srid)
+        validated_repaired_count = _require_count_or_not_applicable(repaired_count)
+        validated_extent = _require_extent_or_not_applicable(extent)
+        rendered_extent = (
+            validated_extent
+            if validated_extent == NOT_APPLICABLE
+            else list(validated_extent)
+        )
+
+        return cls(
+            {
+                "event": "staging_layer_validated",
+                "order_id": _require_order_id(order_id),
+                "staging_table": _require_target_table(staging_table),
+                "spatial": spatial,
+                "row_count": _require_count(row_count),
+                "geometry_type": validated_geometry_type,
+                "srid": validated_srid,
+                "repaired_count": validated_repaired_count,
+                "extent": rendered_extent,
+            }
+        )
+
 
 class ProgressEvent(_SafeEvent):
     @classmethod
@@ -488,6 +733,32 @@ class ProgressEvent(_SafeEvent):
                 raise ValueError("percent must be one exact decimal")
             fields["percent"] = percent
         return cls(fields)
+
+    @classmethod
+    def staging_layer_position(cls, *, position: int, total: int) -> "ProgressEvent":
+        """Per-layer granularity around each loader child-process call (Pitfall 4a).
+
+        This module never parses a loader's own terminal progress bar --
+        that is a carriage-return-driven stream, not a structured one.
+        """
+
+        if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+            raise ValueError("total must be a positive integer")
+        if (
+            isinstance(position, bool)
+            or not isinstance(position, int)
+            or not (1 <= position <= total)
+        ):
+            raise ValueError("position must be an integer between 1 and total")
+        percent = min(1000, (position * 1000) // total) / 10
+        return cls(
+            {
+                "event": "staging_progress",
+                "layer_position": position,
+                "layer_total": total,
+                "percent": percent,
+            }
+        )
 
 
 class SafeFailure(_SafeEvent):
