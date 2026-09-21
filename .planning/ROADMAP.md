@@ -131,7 +131,7 @@ Plans:
 4. Blocking validation reports row counts, geometry columns and types, SRIDs, validity, and extents for all staging tables.
 5. A failed load or validation leaves all existing production tables unchanged.
 
-**Plans:** 2/6 plans executed
+**Plans:** 4/6 plans executed
 
 Plans:
 
@@ -143,7 +143,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 03-04-PLAN.md — Prove one manifest layer reaches a named staging table end to end, then make the privilege preflight prove capability.
+- [x] 03-04-PLAN.md — Prove one manifest layer reaches a named staging table end to end, then make the privilege preflight prove capability.
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -194,7 +194,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Trusted Graph Acquisition | 14/14 | In Progress|  |
 | 2. Safe Geospatial Discovery | 9/9 | Complete    | 2026-09-17 |
-| 3. Validated PostGIS Staging | 2/6 | In Progress|  |
+| 3. Validated PostGIS Staging | 4/6 | In Progress|  |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
 | 5. Approved Legacy Cleanup | 0/TBD | Not started | — |
 

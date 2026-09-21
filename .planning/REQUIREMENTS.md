@@ -23,8 +23,8 @@
 
 ### PostGIS Staging
 
-- [ ] **DB-01**: Operator can connect to the configured local PostGIS database on port `5432` and verify its non-secret identity and PostGIS version.
-- [ ] **DB-02**: Operator can verify that the loader has the required transaction, schema, and table privileges before loading.
+- [x] **DB-01**: Operator can connect to the configured local PostGIS database on port `5432` and verify its non-secret identity and PostGIS version.
+- [x] **DB-02**: Operator can verify that the loader has the required transaction, schema, and table privileges before loading.
 - [ ] **DB-03**: Operator can load every selected layer into uniquely named staging tables without creating or modifying tables in `public`.
 - [ ] **DB-04**: Operator can see blocking validation results for row counts, geometry columns, geometry types, SRIDs, validity, and extents.
 - [ ] **DB-05**: A failed load or validation leaves existing production tables unchanged.
@@ -93,8 +93,8 @@
 | GEO-03 | Phase 2 | Complete |
 | GEO-04 | Phase 2 | Complete |
 | GEO-05 | Phase 2 | Complete |
-| DB-01 | Phase 3 | Pending |
-| DB-02 | Phase 3 | Pending |
+| DB-01 | Phase 3 | Complete |
+| DB-02 | Phase 3 | Complete |
 | DB-03 | Phase 3 | Pending |
 | DB-04 | Phase 3 | Pending |
 | DB-05 | Phase 3 | Pending |

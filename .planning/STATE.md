@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 03
 current_phase_name: Validated PostGIS Staging
 status: executing
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-09-21T05:35:48.256Z"
+stopped_at: Completed 03-04-PLAN.md (live-verified against real database)
+last_updated: "2026-09-21T07:30:24.165Z"
 last_activity: 2026-09-21
 last_activity_desc: Phase 03 execution started
-state_head: b64f61db31e0f8a44b2ea24fa156eed4a6add1f3
+state_head: b38234465b2740dfc02d228eab7926af6ee2972f
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 29
-  completed_plans: 26
+  completed_plans: 27
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 03 (Validated PostGIS Staging) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-09-21 — Phase 03 execution started
 
 ## Session
 
-**Last session:** 2026-09-21T05:35:48.212Z
-**Stopped at:** Completed 03-03-PLAN.md
+**Last session:** 2026-09-21T07:30:24.112Z
+**Stopped at:** Completed 03-04-PLAN.md (live-verified against real database)
 **Resume file:** None
 
 ## Performance Metrics
@@ -76,6 +76,7 @@ Last activity: 2026-09-21 — Phase 03 execution started
 | Phase 03-validated-postgis-staging P01 | ~55min | 3 tasks | 1 files |
 | Phase 03 P02 | ~20min | 2 tasks | 5 files |
 | Phase 03-validated-postgis-staging P03 | ~25min | 2 tasks | 4 files |
+| Phase 03 P04 | 95min | 3 tasks | 6 files |
 
 ## Decisions
 
@@ -149,8 +150,11 @@ Last activity: 2026-09-21 — Phase 03 execution started
 - [Phase 03]: Widened load_config's exact section-set check from four to five names for vicmap.toml's new [database] section; host validation accepts ipaddress.ip_address() or the dotted-hostname pattern (bare localhost rejected).
 - [Phase 03]: [Phase 03] Renamed manifest.py's new test classes to ManifestReadRoundTripTest/ManifestReadDigestTest to avoid rebinding the existing 26-test ManifestRoundTripTest class in tests/test_manifest.py.
 - [Phase 03]: [Phase 03] evidence.py's database_identity/staging_layer_position docstrings avoid the literal substrings 'ogr2ogr'/'subprocess' so the no-driver-parsing acceptance criterion holds under a literal grep, not just in spirit.
+- [Phase 03]: Live verification of 03-04 found and fixed three real bugs (SET bind-parameter syntax, 200-char server-version bound, wrong GDAL --config flag names for the fail-closed transform guard) that no unit test had caught; the fail-closed guard (PROHIB-09) was silently a no-op until fixed. — Rule 1 auto-fix: all three blocked the live human-check this task exists to run, and one is security-relevant (PROHIB-09).
+- [Phase 03]: db/provision_vicmap_loader.sql's missing CREATE DATABASE step is documented as a known gap (WINDOWS.md), not silently patched in; 03-05/03-06 must not assume the database already exists. — Adding CREATE DATABASE changes what the script assumes about who runs it and when -- an operator-facing provisioning decision outside this plan's authorized scope.
 
 ### Blockers
 
 - vicmap.toml's [extraction].max_compression_ratio=20 will hard-stop a real discover_order.py run against Order_OK0VUZ.zip (small OpenFileGDB index files compress up to ~139x); raise to 200+ before running discovery for real.
-- 03-04/03-06 must verify ogr2ogr -t_srs EPSG:7899 under OGR_CT_ONLY_BEST=YES/OGR_CT_ALLOW_BALLPARK=NO actually uses the vendored ICSM grid, not a grid-free Helmert transform (03-01 finding: pyproj TransformerGroup/only_best ranks the Helmert op as 'best' by declared accuracy, reproducing the same +0.5m/+1.5m shift research flagged).
+- 03-05/03-06 must verify ogr2ogr -t_srs EPSG:7899 under the fail-closed transform guard (correct GDAL syntax, per 03-04: `-ct_opt ONLY_BEST=YES -ct_opt ALLOW_BALLPARK=NO` -- 03-01/03-03's original `--config OGR_CT_ONLY_BEST`/`OGR_CT_ALLOW_BALLPARK` phrasing named non-existent GDAL options and has been corrected in code) actually uses the vendored ICSM grid, not a grid-free Helmert transform (03-01 finding: pyproj TransformerGroup/only_best ranks the Helmert op as 'best' by declared accuracy, reproducing the same +0.5m/+1.5m shift research flagged).
+- The GDA94-Vicgrid-to-GDA2020-Vicgrid grid-vs-Helmert question is still open. 03-04 additionally found that pyproj's TransformerGroup (03-01's own verification method) cannot see PROJ_DATA in this pyproj build (internal hardcoded path checked before the env var) -- any future settlement must use a different verification method and a layer with a genuinely different source SRID.
