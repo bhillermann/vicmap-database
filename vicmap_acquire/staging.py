@@ -339,25 +339,92 @@ def read_database_identity(policy: StagingPolicy, *, password: str) -> DatabaseI
 
 
 def preflight_staging_privileges(policy: StagingPolicy, *, password: str) -> None:
-    """DB-02, thin form (Task 2 of 03-04): checks the two declarative grants
-    that are valid before any table exists -- ``USAGE`` and ``CREATE`` on the
-    staging schema. Task 3 replaces this body with the full probe
-    transaction; the signature and the ``PrivilegeDenied`` failure type stay
-    identical so that replacement is a body change, not an interface
-    change."""
+    """DB-02: prove capability with a real, rolled-back ``CREATE`` rather
+    than inferring it from grant metadata alone (research Pitfall 3:
+    ``has_table_privilege`` raises on a table that, by D-48, has never
+    existed). Raises ``PrivilegeDenied`` on the first of: the connected role
+    is a superuser (D-59 -- a superuser would pass every check below for the
+    wrong reason), it lacks ``USAGE`` or ``CREATE`` on the staging schema, it
+    holds ``CREATE`` on ``public`` (DB-03/DB-05's runtime proof that the
+    loader cannot write there), or the rolled-back probe ``CREATE TABLE`` /
+    ``CREATE INDEX`` itself fails. Raises ``TargetSridUnresolved`` when the
+    configured ``target_srid`` has no ``spatial_ref_sys`` row. The probe
+    transaction is rolled back unconditionally, on both the pass and the
+    fail path, so DB-05 holds by construction: nothing is left behind."""
 
     connection = _connect(policy, password)
     try:
         with connection.cursor() as cursor:
+            # 1. Not a superuser (D-59): a superuser bypasses every ACL
+            # check below, so it would pass them for the wrong reason.
+            cursor.execute(
+                "SELECT rolsuper FROM pg_roles WHERE rolname = current_user"
+            )
+            row = cursor.fetchone()
+            if row is None or row[0]:
+                raise PrivilegeDenied()
+
+            # 2. Staging schema grants -- the two declarative checks valid
+            # before any table exists. Schema name is a text parameter here,
+            # not an sql.Identifier: has_schema_privilege takes it as data.
             cursor.execute(
                 "SELECT has_schema_privilege(current_user, %s, 'USAGE'), "
                 "has_schema_privilege(current_user, %s, 'CREATE')",
                 (policy.staging_schema, policy.staging_schema),
             )
             has_usage, has_create = cursor.fetchone()
-        if not has_usage or not has_create:
-            raise PrivilegeDenied()
-    except PrivilegeDenied:
+            if not has_usage or not has_create:
+                raise PrivilegeDenied()
+
+            # 3. No CREATE on public (DB-03/DB-05): turns D-47's structural
+            # claim into a runtime proof -- the loader demonstrates it could
+            # not write to public even if it tried.
+            cursor.execute(
+                "SELECT has_schema_privilege(current_user, 'public', 'CREATE')"
+            )
+            (has_public_create,) = cursor.fetchone()
+            if has_public_create:
+                raise PrivilegeDenied()
+
+            # 4. Target SRID is known to PostGIS -- D-63's
+            # geometry(Point, <srid>) constraint cannot be created against an
+            # SRID the server does not know, and failing here names the
+            # cause instead of surfacing it later as a raw DDL error.
+            cursor.execute(
+                "SELECT 1 FROM spatial_ref_sys WHERE srid = %s",
+                (policy.target_srid,),
+            )
+            if cursor.fetchone() is None:
+                raise TargetSridUnresolved()
+
+            # 5. Real capability, rolled back. has_table_privilege cannot
+            # perform this check (Pitfall 3): it raises rather than
+            # returning false against a table that has never existed. This
+            # also proves the PostGIS geometry type and the GiST access
+            # method are actually usable, and that the operator's quota and
+            # tablespace allow a create.
+            table_ref = sql.Identifier(policy.staging_schema, PROBE_TABLE_NAME)
+            try:
+                cursor.execute(
+                    sql.SQL(
+                        "CREATE TABLE {table} "
+                        "(gid integer PRIMARY KEY, geom geometry(Point, {srid}) NOT NULL)"
+                    ).format(table=table_ref, srid=sql.Literal(policy.target_srid))
+                )
+                cursor.execute(
+                    sql.SQL("CREATE INDEX ON {table} USING GIST (geom)").format(
+                        table=table_ref
+                    )
+                )
+            except Exception:
+                connection.rollback()
+                raise PrivilegeDenied() from None
+            else:
+                # The rollback is unconditional and the transaction never
+                # commits, on the pass path as much as the fail path -- DB-05
+                # is satisfied by construction, not by remembering to clean up.
+                connection.rollback()
+    except (PrivilegeDenied, TargetSridUnresolved):
         raise
     except Exception:
         raise DatabaseConnectionFailed() from None

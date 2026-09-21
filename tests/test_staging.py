@@ -607,5 +607,181 @@ class LoadIntegrationTest(_LivePostgresMixin, unittest.TestCase):
         self.assertIsNone(public_hit)
 
 
+class PrivilegePreflightTest(_LivePostgresMixin, unittest.TestCase):
+    """Exercises DB-02's full proof -- one pass path, four fail paths --
+    against a throwaway role and schema this test itself creates through a
+    separate superuser connection, and drops in ``tearDown``. Skips cleanly,
+    never fails, without a PostgreSQL driver, without a reachable ordinary
+    connection (``VICMAP_TEST_POSTGRES_DSN``), or without
+    ``VICMAP_TEST_POSTGRES_SUPERUSER_DSN`` naming a reachable superuser
+    connection. Drops no object it did not itself create."""
+
+    _SUPERUSER_DSN_ENV_VAR = "VICMAP_TEST_POSTGRES_SUPERUSER_DSN"
+
+    def setUp(self):
+        self._connect().close()  # proves driver + ordinary server, or skips
+        params = self._connection_params()
+        self.host = params["host"]
+        self.port = params["port"]
+        self.dbname = params["dbname"]
+
+        superuser_dsn = os.environ.get(self._SUPERUSER_DSN_ENV_VAR)
+        if not superuser_dsn:
+            self.skipTest(
+                f"{self._SUPERUSER_DSN_ENV_VAR} not set -- privilege "
+                "preflight check skipped, not failed"
+            )
+
+        import psycopg
+        from psycopg.conninfo import conninfo_to_dict
+
+        try:
+            connection = psycopg.connect(
+                superuser_dsn, connect_timeout=self._CONNECT_TIMEOUT_SECONDS
+            )
+        except Exception as exc:  # noqa: BLE001 -- any connect failure just skips
+            self.skipTest(
+                f"no reachable PostgreSQL superuser connection for "
+                f"privilege preflight check: {exc}"
+            )
+        connection.autocommit = True
+        self.superuser_connection = connection
+
+        parsed = conninfo_to_dict(superuser_dsn)
+        self.superuser_password = str(parsed.get("password") or "")
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_user")
+            (self.superuser_role,) = cursor.fetchone()
+
+        pid = os.getpid()
+        self.role_name = f"staging_preflight_role_{pid}"
+        self.schema_name = f"staging_preflight_schema_{pid}"
+        self.role_password = "preflight-test-password-9f3a"
+        self._granted_public_create = False
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                staging.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    staging.sql.Identifier(self.schema_name)
+                )
+            )
+            cursor.execute(
+                staging.sql.SQL("DROP ROLE IF EXISTS {}").format(
+                    staging.sql.Identifier(self.role_name)
+                )
+            )
+            cursor.execute(
+                staging.sql.SQL("CREATE ROLE {} LOGIN PASSWORD %s").format(
+                    staging.sql.Identifier(self.role_name)
+                ),
+                (self.role_password,),
+            )
+            cursor.execute(
+                staging.sql.SQL("CREATE SCHEMA {} AUTHORIZATION {}").format(
+                    staging.sql.Identifier(self.schema_name),
+                    staging.sql.Identifier(self.role_name),
+                )
+            )
+
+    def tearDown(self):
+        connection = getattr(self, "superuser_connection", None)
+        if connection is None:
+            return
+        try:
+            with connection.cursor() as cursor:
+                if self._granted_public_create:
+                    cursor.execute(
+                        staging.sql.SQL(
+                            "REVOKE CREATE ON SCHEMA public FROM {}"
+                        ).format(staging.sql.Identifier(self.role_name))
+                    )
+                cursor.execute(
+                    staging.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        staging.sql.Identifier(self.schema_name)
+                    )
+                )
+                cursor.execute(
+                    staging.sql.SQL("DROP ROLE IF EXISTS {}").format(
+                        staging.sql.Identifier(self.role_name)
+                    )
+                )
+        finally:
+            connection.close()
+
+    def _policy(self, **overrides) -> staging.StagingPolicy:
+        kwargs = dict(
+            host=self.host,
+            port=self.port,
+            dbname=self.dbname,
+            user=self.role_name,
+            staging_schema=self.schema_name,
+            publish_schema="vicmap",
+            target_srid=7899,
+            index_columns=("pfi",),
+            gt=20000,
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+            statement_timeout_seconds=3600,
+            lock_timeout_seconds=30,
+        )
+        kwargs.update(overrides)
+        return staging.StagingPolicy(**kwargs)
+
+    def test_pass_path_proves_capability_and_leaves_nothing_behind(self):
+        staging.preflight_staging_privileges(
+            self._policy(), password=self.role_password
+        )
+        with self.superuser_connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT to_regclass(%s)",
+                (f"{self.schema_name}.{staging.PROBE_TABLE_NAME}",),
+            )
+            (probe_table,) = cursor.fetchone()
+        self.assertIsNone(probe_table)
+
+    def test_fail_path_no_create_on_staging_schema(self):
+        with self.superuser_connection.cursor() as cursor:
+            cursor.execute(
+                staging.sql.SQL("REVOKE CREATE ON SCHEMA {} FROM {}").format(
+                    staging.sql.Identifier(self.schema_name),
+                    staging.sql.Identifier(self.role_name),
+                )
+            )
+        with self.assertRaises(staging.PrivilegeDenied):
+            staging.preflight_staging_privileges(
+                self._policy(), password=self.role_password
+            )
+
+    def test_fail_path_create_on_public(self):
+        with self.superuser_connection.cursor() as cursor:
+            cursor.execute(
+                staging.sql.SQL("GRANT CREATE ON SCHEMA public TO {}").format(
+                    staging.sql.Identifier(self.role_name)
+                )
+            )
+        self._granted_public_create = True
+        with self.assertRaises(staging.PrivilegeDenied):
+            staging.preflight_staging_privileges(
+                self._policy(), password=self.role_password
+            )
+
+    def test_fail_path_superuser(self):
+        with self.assertRaises(staging.PrivilegeDenied):
+            staging.preflight_staging_privileges(
+                self._policy(user=self.superuser_role),
+                password=self.superuser_password,
+            )
+
+    def test_fail_path_unknown_srid(self):
+        with self.superuser_connection.cursor() as cursor:
+            cursor.execute("SELECT COALESCE(MAX(srid), 0) FROM spatial_ref_sys")
+            (max_srid,) = cursor.fetchone()
+        unknown_srid = min(int(max_srid) + 1, 998999)
+        with self.assertRaises(staging.TargetSridUnresolved):
+            staging.preflight_staging_privileges(
+                self._policy(target_srid=unknown_srid), password=self.role_password
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
