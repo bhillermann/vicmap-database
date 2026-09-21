@@ -30,7 +30,9 @@ from unittest.mock import patch
 
 import read_mailbox
 from vicmap_acquire import staging
+from vicmap_acquire.discovery import LayerProfile
 from vicmap_acquire.evidence import SuccessEvent
+from vicmap_acquire.manifest import ManifestLayer
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -580,6 +582,102 @@ class DriverImportPolicyTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("staging imported cleanly", result.stdout)
         self.assertFalse((scratch_dir / "runs").exists())
+
+
+class GeometryTypeNormalizationTest(unittest.TestCase):
+    """No database. Pins every example in this plan's ``<interfaces>`` block
+    plus the rejection cases -- must never skip."""
+
+    def test_valid_examples_return_their_exact_pair(self):
+        cases = {
+            "Point": ("POINT", 0),
+            "Point Z": ("POINTZ", 2),
+            "Point M": ("POINTM", 1),
+            "Point ZM": ("POINTZM", 3),
+            "MultiPolygon": ("MULTIPOLYGON", 0),
+            "LineString Z": ("LINESTRINGZ", 2),
+        }
+        for declared, expected in cases.items():
+            with self.subTest(declared=declared):
+                self.assertEqual(
+                    expected, staging.normalize_declared_geometry_type(declared)
+                )
+
+    def test_lowercase_input_is_normalized(self):
+        self.assertEqual(("POINT", 0), staging.normalize_declared_geometry_type("point"))
+
+    def test_extra_internal_whitespace_is_tolerated(self):
+        self.assertEqual(
+            ("POINTZ", 2), staging.normalize_declared_geometry_type("Point   Z")
+        )
+
+    def test_invalid_examples_each_raise_geometry_type_mismatch(self):
+        for declared in ("Unknown", "", None, "Point X", "Curve"):
+            with self.subTest(declared=declared):
+                with self.assertRaises(staging.GeometryTypeMismatch):
+                    staging.normalize_declared_geometry_type(declared)
+
+
+class ValidationQueryShapeTest(unittest.TestCase):
+    """No database. Pins the single-pass D-56/D-57 query shape."""
+
+    def test_spatial_query_contains_every_required_postgis_call(self):
+        rendered = staging.build_validation_query(
+            staging_schema="vicmap_staging", staging_table="t", spatial=True
+        ).as_string(None)
+        for token in (
+            "ST_IsValid",
+            "ST_MakeValid",
+            "GeometryType",
+            "ST_SRID",
+            "ST_Zmflag",
+            "ST_Extent",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, rendered)
+
+    def test_non_spatial_query_contains_none_of_the_spatial_calls_and_a_row_count(self):
+        rendered = staging.build_validation_query(
+            staging_schema="vicmap_staging", staging_table="t", spatial=False
+        ).as_string(None)
+        for token in (
+            "ST_IsValid",
+            "ST_MakeValid",
+            "GeometryType",
+            "ST_SRID",
+            "ST_Zmflag",
+            "ST_Extent",
+        ):
+            with self.subTest(token=token):
+                self.assertNotIn(token, rendered)
+        self.assertIn("count", rendered.lower())
+
+    def test_both_queries_quote_schema_and_table_as_separate_identifiers(self):
+        spatial_rendered = staging.build_validation_query(
+            staging_schema="vicmap_staging", staging_table="t", spatial=True
+        ).as_string(None)
+        flat_rendered = staging.build_validation_query(
+            staging_schema="vicmap_staging", staging_table="t", spatial=False
+        ).as_string(None)
+        for rendered in (spatial_rendered, flat_rendered):
+            self.assertIn('"vicmap_staging"."t"', rendered)
+
+    def test_double_quote_in_identifier_is_escaped_not_broken(self):
+        rendered = staging.build_validation_query(
+            staging_schema="vicmap_staging",
+            staging_table='wei"rd',
+            spatial=False,
+        ).as_string(None)
+        self.assertIn('"wei""rd"', rendered)
+
+    def test_repair_statement_is_an_update_restricted_to_invalid_rows(self):
+        rendered = staging.build_repair_statement(
+            staging_schema="vicmap_staging", staging_table="t"
+        ).as_string(None)
+        self.assertIn("UPDATE", rendered)
+        self.assertIn("ST_MakeValid", rendered)
+        self.assertIn("WHERE NOT ST_IsValid", rendered)
+        self.assertIn('"vicmap_staging"."t"', rendered)
 
 
 class _LivePostgresMixin:

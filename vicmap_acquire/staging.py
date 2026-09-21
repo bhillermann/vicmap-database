@@ -537,6 +537,125 @@ def load_layer(
         raise LoadFailed()
 
 
+# D-56: the ZM-suffix vocabulary a declared geometry-type name may carry,
+# mapped onto ST_Zmflag(geom)'s own integer encoding.
+_ZM_SUFFIX_FLAGS = {"": 0, "M": 1, "Z": 2, "ZM": 3}
+
+_BASE_GEOMETRY_NAMES = frozenset(
+    {
+        "POINT",
+        "LINESTRING",
+        "POLYGON",
+        "MULTIPOINT",
+        "MULTILINESTRING",
+        "MULTIPOLYGON",
+        "GEOMETRYCOLLECTION",
+    }
+)
+
+def _split_declared_geometry_type(declared: object) -> tuple[str, str]:
+    """Split a ``LayerProfile.geometry_type`` string into its base name and
+    ZM suffix token, validating both against D-38's closed vocabulary.
+    Raises ``GeometryTypeMismatch`` for anything else, including ``None``,
+    ``""``, and the literal ``"Unknown"`` -- D-38 already hard-stops on
+    ``Unknown`` upstream in ``discovery.py``; silently accepting it here
+    would reopen that gap."""
+
+    if not isinstance(declared, str) or not declared:
+        raise GeometryTypeMismatch()
+    tokens = declared.split()
+    if not tokens or len(tokens) > 2:
+        raise GeometryTypeMismatch()
+    base = tokens[0].upper()
+    suffix_token = tokens[1].upper() if len(tokens) == 2 else ""
+    if base not in _BASE_GEOMETRY_NAMES:
+        raise GeometryTypeMismatch()
+    if suffix_token not in _ZM_SUFFIX_FLAGS:
+        raise GeometryTypeMismatch()
+    return base, suffix_token
+
+
+def normalize_declared_geometry_type(declared: object) -> tuple[str, int]:
+    """Map a ``pyogrio`` geometry-type name (``LayerProfile.geometry_type``,
+    e.g. ``"Point Z"``) onto ``(name, zmflag)``: the base name concatenated
+    with its ZM suffix and no space (``"POINTZ"``), and ``ST_Zmflag(geom)``'s
+    integer encoding (``0`` 2D, ``1`` M, ``2`` Z, ``3`` ZM).
+
+    This concatenated name is a fixed, tested contract for this function's
+    *return value* -- it is not a literal prediction of what PostGIS's own
+    ``GeometryType(geom)`` reports. Live verification against a real
+    PostgreSQL 17.5/PostGIS 3.5.2 server found ``GeometryType()`` never
+    appends a bare ``Z`` or ``ZM`` suffix at all (``GeometryType(
+    ST_GeomFromText('POINT Z (1 1 1)')) = 'POINT'``, not ``'POINTZ'``; a
+    genuine XYZM point also comes back bare ``'POINT'``) and only ever
+    appends ``M`` for the historically ambiguous XYM case (``GeometryType(
+    ST_GeomFromText('POINT M (1 1 1)')) = 'POINTM'``). ``validate_layer``
+    accounts for that quirk with ``_geometry_type_base_name`` and leans on
+    ``ST_Zmflag`` -- never this function's suffixed string -- as the
+    authoritative Z/M signal when comparing against a live table."""
+
+    base, suffix_token = _split_declared_geometry_type(declared)
+    return base + suffix_token, _ZM_SUFFIX_FLAGS[suffix_token]
+
+
+def build_validation_query(
+    *, staging_schema: str, staging_table: str, spatial: bool
+) -> "sql.Composed":
+    """The single read-only D-56/D-57 validation query for the selected
+    profile. Pure: composes identifiers, touches no connection.
+
+    The non-spatial profile (D-57) selects only a row count and contains no
+    ``ST_`` call and no reference to a geometry column at all -- D-35's
+    lookup tables and relationship classes have no geometry column to query.
+
+    The spatial profile computes every fact in one query: row count,
+    null-geometry count, invalid count, the D-55 pre-write type-change
+    count, and the two-element-capped distinct sets for SRID/geometry-type/
+    ZM-flag that make a *mixed* table blocking, not just a wrong single
+    value. Every scalar subquery is uncorrelated (each references
+    ``{table}`` directly, never an outer row), so the composed ``SELECT``
+    carries no outer ``FROM`` clause at all and always returns exactly one
+    row, including when the table itself holds zero rows."""
+
+    table_ref = sql.Identifier(staging_schema, staging_table)
+    if not spatial:
+        return sql.SQL("SELECT COUNT(*) AS row_count FROM {table}").format(
+            table=table_ref
+        )
+    return sql.SQL(
+        "SELECT "
+        "(SELECT COUNT(*) FROM {table}) AS row_count, "
+        "(SELECT COUNT(*) FROM {table} WHERE geom IS NULL) AS null_geom_count, "
+        "(SELECT COUNT(*) FROM {table} WHERE NOT ST_IsValid(geom)) AS invalid_count, "
+        "(SELECT COUNT(*) FROM {table} WHERE NOT ST_IsValid(geom) "
+        "AND GeometryType(ST_MakeValid(geom)) IS DISTINCT FROM GeometryType(geom)"
+        ") AS type_changed_count, "
+        "(SELECT array_agg(srid) FROM (SELECT DISTINCT ST_SRID(geom) AS srid "
+        "FROM {table} WHERE geom IS NOT NULL LIMIT 2) AS srid_sample) AS srids_seen, "
+        "(SELECT array_agg(geometry_type) FROM (SELECT DISTINCT GeometryType(geom) "
+        "AS geometry_type FROM {table} WHERE geom IS NOT NULL LIMIT 2) AS type_sample"
+        ") AS geometry_types_seen, "
+        "(SELECT array_agg(zmflag) FROM (SELECT DISTINCT ST_Zmflag(geom) AS zmflag "
+        "FROM {table} WHERE geom IS NOT NULL LIMIT 2) AS zmflag_sample) AS zmflags_seen, "
+        "(SELECT ST_Extent(geom)::text FROM {table}) AS extent"
+    ).format(table=table_ref)
+
+
+def build_repair_statement(
+    *, staging_schema: str, staging_table: str
+) -> "sql.Composed":
+    """D-54's counted repair: ``UPDATE ... SET geom = ST_MakeValid(geom)
+    WHERE NOT ST_IsValid(geom)``. Pure, ``sql.Identifier``-composed. Never
+    ``ST_CollectionExtract`` -- D-55 explicitly rejected that salvage
+    because it discards geometry silently -- and never a hand-rolled
+    ``buffer(0)`` repair."""
+
+    table_ref = sql.Identifier(staging_schema, staging_table)
+    return sql.SQL(
+        "UPDATE {table} SET geom = ST_MakeValid(geom) WHERE NOT ST_IsValid(geom)"
+    ).format(table=table_ref)
+
+
 def validate_layer(
     *,
     manifest_layer: ManifestLayer,
@@ -547,8 +666,8 @@ def validate_layer(
     """DB-04, row-count only for now (Task 2 of 03-04). Raises
     ``RowCountMismatch`` when the staging table's row count differs from
     ``manifest_layer.profile.feature_count`` (D-37's exact count, D-56's
-    baseline). 03-05 fills in the spatial checks; the signature and return
-    type stay."""
+    baseline). 03-05 Task 2 fills in the spatial checks; the signature and
+    return type stay."""
 
     connection = _connect(policy, password)
     try:
