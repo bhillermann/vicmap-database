@@ -853,6 +853,181 @@ def validate_layer(
         connection.close()
 
 
+def secondary_index_columns(
+    manifest_layer: ManifestLayer, policy: StagingPolicy
+) -> tuple[str, ...]:
+    """D-64: pure allowlist decision, no database. A manifest field
+    "launders to" an allowlist entry when GDAL's ``LAUNDER=YES`` would fold
+    it onto that entry -- here, comparing each declared field's name
+    casefolded against ``policy.index_columns`` (already lowercase,
+    D-58/``StagingPolicy.__post_init__``). Result order follows
+    ``policy.index_columns``' own order, not field-declaration order, so it
+    is deterministic and reproducible from the frozen manifest and policy
+    alone. A layer declaring none of the allowlisted columns returns an
+    empty tuple and this never raises. A non-spatial layer is treated
+    identically -- the allowlist is about ordinary columns, not geometry."""
+
+    declared = {field.name.casefold() for field in manifest_layer.profile.fields}
+    return tuple(column for column in policy.index_columns if column in declared)
+
+
+def apply_post_validation_ddl(
+    *,
+    validation: LayerValidation,
+    manifest_layer: ManifestLayer,
+    staging_table: str,
+    policy: StagingPolicy,
+    password: str,
+) -> tuple[str, ...]:
+    """D-62/D-63/D-64: constrain and index a staging table ``validate_layer``
+    has already returned without raising, against a table ``ogr2ogr`` has
+    already fully populated and then exited -- no concurrent writer, no
+    reason to have built the index during the load.
+
+    Everything here runs inside the one implicit transaction a fresh
+    ``psycopg`` connection opens (``_connect`` never sets ``autocommit``):
+    it commits once, at the end, or rolls back together on any failure, so
+    Phase 4 can never see a half-constrained table (T-03-33). Any
+    non-``StagingDdlFailed`` exception -- a real ``psycopg`` error -- is
+    re-raised as the closed ``StagingDdlFailed`` with no driver text.
+
+    Branches on ``validation.spatial`` (the same boolean the validation
+    profile used, per D-57) rather than re-deriving it, so the two can never
+    disagree: a non-spatial layer only gets the primary key and any
+    allowlisted secondary index, never geometry-related DDL.
+
+    Research Open Question 1 -- whether GDAL's PostgreSQL driver already
+    creates a typed ``geometry(Type, SRID)`` column, or always a bare
+    ``geometry`` column -- is answered here empirically by reading
+    ``geometry_columns`` rather than assuming either answer, live-confirmed
+    against the real 4,222,035-row ADDRESS staging table: GDAL's driver
+    (``FID=gid``, known geometry type, known ``-t_srs``) already created
+    both the primary key on ``gid`` and a fully typed ``geometry(Point,
+    7899)`` column with no ``ALTER`` needed for either -- see this plan's
+    SUMMARY for the full live record. A table whose column disagrees with
+    what ``validate_layer`` already asserted (the two functions would then
+    be reading different things) raises ``StagingDdlFailed`` rather than
+    silently re-typing it.
+
+    Returns the constraint and index names this call created, in creation
+    order -- an empty tuple when every constraint GDAL's own load already
+    satisfied and the manifest declares no allowlisted column."""
+
+    table_ref = sql.Identifier(policy.staging_schema, staging_table)
+    created: list[str] = []
+    connection = _connect(policy, password)
+    try:
+        with connection.cursor() as cursor:
+            # 1. Primary key on gid (D-63) -- unconditional unless GDAL's
+            # own FID=gid load option already created one.
+            cursor.execute(
+                "SELECT 1 FROM pg_constraint c "
+                "JOIN pg_class t ON t.oid = c.conrelid "
+                "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                "WHERE n.nspname = %s AND t.relname = %s AND c.contype = 'p'",
+                (policy.staging_schema, staging_table),
+            )
+            has_primary_key = cursor.fetchone() is not None
+            if not has_primary_key:
+                cursor.execute(
+                    sql.SQL("ALTER TABLE {table} ADD PRIMARY KEY (gid)").format(
+                        table=table_ref
+                    )
+                )
+                created.append(f"{staging_table}_pkey")
+
+            if validation.spatial:
+                # 2. Typed geometry column with its SRID (D-63) --
+                # conditionally, per Open Question 1: read geometry_columns,
+                # never assume.
+                cursor.execute(
+                    "SELECT type, srid FROM geometry_columns "
+                    "WHERE f_table_schema = %s AND f_table_name = %s "
+                    "AND f_geometry_column = 'geom'",
+                    (policy.staging_schema, staging_table),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise StagingDdlFailed()
+                observed_type, observed_srid = row
+                declared_type, _ = normalize_declared_geometry_type(
+                    manifest_layer.profile.geometry_type
+                )
+                declared_base = _geometry_type_base_name(declared_type)
+
+                if observed_type == "GEOMETRY":
+                    # Bare, untyped column -- Open Question 1's "no" branch
+                    # for this table.
+                    needs_alter = True
+                elif _geometry_type_base_name(observed_type) == declared_base:
+                    needs_alter = observed_srid != policy.target_srid
+                else:
+                    # geometry_columns disagrees with what validate_layer
+                    # already asserted -- the two read different things.
+                    raise StagingDdlFailed()
+
+                if needs_alter:
+                    cursor.execute(
+                        sql.SQL(
+                            "ALTER TABLE {table} ALTER COLUMN geom "
+                            "TYPE geometry({type}, {srid}) USING geom"
+                        ).format(
+                            table=table_ref,
+                            type=sql.SQL(declared_type),
+                            srid=sql.Literal(policy.target_srid),
+                        )
+                    )
+                    created.append(f"{staging_table}_geom_typed")
+
+                # 3. NOT NULL on the geometry column (D-63). 03-05 already
+                # proved no row holds a NULL geometry; this makes the
+                # constraint part of the published contract.
+                cursor.execute(
+                    sql.SQL(
+                        "ALTER TABLE {table} ALTER COLUMN geom SET NOT NULL"
+                    ).format(table=table_ref)
+                )
+                created.append(f"{staging_table}_geom_not_null")
+
+                # 4. GiST index (D-62), built once over the populated
+                # table, as an ordinary blocking CREATE INDEX inside this
+                # same transaction -- the non-blocking online-build variant
+                # is deliberately not used here: it cannot run inside a
+                # transaction block, and there is no concurrent reader to
+                # protect against in the first place.
+                gist_index_name = f"{staging_table}_geom_gist"
+                cursor.execute(
+                    sql.SQL(
+                        "CREATE INDEX {index} ON {table} USING GIST (geom)"
+                    ).format(index=sql.Identifier(gist_index_name), table=table_ref)
+                )
+                created.append(gist_index_name)
+
+            # 5. Secondary btree indexes from the allowlist (D-64) --
+            # applies to spatial and non-spatial layers alike.
+            for column in secondary_index_columns(manifest_layer, policy):
+                index_name = f"{staging_table}_{column}_idx"
+                cursor.execute(
+                    sql.SQL("CREATE INDEX {index} ON {table} ({column})").format(
+                        index=sql.Identifier(index_name),
+                        table=table_ref,
+                        column=sql.Identifier(column),
+                    )
+                )
+                created.append(index_name)
+        connection.commit()
+    except StagingDdlFailed:
+        connection.rollback()
+        raise
+    except Exception:
+        connection.rollback()
+        raise StagingDdlFailed() from None
+    finally:
+        connection.close()
+
+    return tuple(created)
+
+
 def run_staging(
     manifest: ImportManifest,
     policy: StagingPolicy,

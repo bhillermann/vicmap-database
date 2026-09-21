@@ -30,9 +30,9 @@ from unittest.mock import patch
 
 import read_mailbox
 from vicmap_acquire import staging
-from vicmap_acquire.discovery import LayerProfile
-from vicmap_acquire.evidence import SuccessEvent
-from vicmap_acquire.manifest import ManifestLayer
+from vicmap_acquire.discovery import FieldProfile, LayerProfile
+from vicmap_acquire.evidence import ProgressEvent, ReasonCode, SafeFailure, SuccessEvent
+from vicmap_acquire.manifest import ImportManifest, ManifestLayer
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -678,6 +678,80 @@ class ValidationQueryShapeTest(unittest.TestCase):
         self.assertIn("ST_MakeValid", rendered)
         self.assertIn("WHERE NOT ST_IsValid", rendered)
         self.assertIn('"vicmap_staging"."t"', rendered)
+
+
+def _profile_with_fields(**overrides) -> LayerProfile:
+    kwargs = dict(
+        dataset_relative_path="x.gdb",
+        dataset_stem="x",
+        layer_name="LAYER",
+        driver="OpenFileGDB",
+        spatial=True,
+        geometry_type="Point",
+        geometry_column="geom",
+        fid_column="gid",
+        feature_count=1,
+        source_wkt=None,
+        epsg=7899,
+        extent=None,
+        fields=(),
+    )
+    kwargs.update(overrides)
+    return LayerProfile(**kwargs)
+
+
+def _field(name: str) -> FieldProfile:
+    return FieldProfile(name=name, ogr_type="String", width=10, precision=None, nullable=True)
+
+
+class SecondaryIndexAllowlistTest(unittest.TestCase):
+    """No database. D-64's pure allowlist decision -- must never skip."""
+
+    def test_declared_field_matching_allowlist_yields_the_column(self):
+        layer = ManifestLayer(
+            profile=_profile_with_fields(fields=(_field("PFI"),)), target_table="x"
+        )
+        policy = _staging_policy(index_columns=("pfi",))
+        self.assertEqual(
+            ("pfi",), staging.secondary_index_columns(layer, policy)
+        )
+
+    def test_lowercase_declared_field_matches_the_same_way(self):
+        layer = ManifestLayer(
+            profile=_profile_with_fields(fields=(_field("pfi"),)), target_table="x"
+        )
+        policy = _staging_policy(index_columns=("pfi",))
+        self.assertEqual(
+            ("pfi",), staging.secondary_index_columns(layer, policy)
+        )
+
+    def test_no_matching_field_yields_empty_tuple_and_raises_nothing(self):
+        layer = ManifestLayer(
+            profile=_profile_with_fields(fields=(_field("EZI_ADDRESS"),)),
+            target_table="x",
+        )
+        policy = _staging_policy(index_columns=("pfi",))
+        self.assertEqual((), staging.secondary_index_columns(layer, policy))
+
+    def test_two_entry_allowlist_with_one_declared_yields_only_that_one(self):
+        layer = ManifestLayer(
+            profile=_profile_with_fields(fields=(_field("PFI"),)), target_table="x"
+        )
+        policy = _staging_policy(index_columns=("pfi", "ufi"))
+        self.assertEqual(("pfi",), staging.secondary_index_columns(layer, policy))
+
+    def test_non_spatial_layer_is_treated_identically(self):
+        layer = ManifestLayer(
+            profile=_profile_with_fields(
+                spatial=False,
+                geometry_type=None,
+                geometry_column=None,
+                fields=(_field("PFI"),),
+            ),
+            target_table="x",
+        )
+        policy = _staging_policy(index_columns=("pfi",))
+        self.assertEqual(("pfi",), staging.secondary_index_columns(layer, policy))
 
 
 class _LivePostgresMixin:
@@ -1509,6 +1583,369 @@ class ValidationOgrinfoOracleTest(_LivePostgresMixin, unittest.TestCase):
         identifier = layer_payload["geometryFields"][0]["coordinateSystem"]["projjson"]["id"]
         self.assertEqual("EPSG", identifier["authority"])
         self.assertEqual(result.srid, int(identifier["code"]))
+
+
+class PostValidationDdlTest(_LivePostgresMixin, unittest.TestCase):
+    """Skips without a server. D-62/D-63/D-64's full contract, exercised
+    against a throwaway table this test creates and drops itself, inside
+    ``vicmap_staging`` -- never a new schema (same reasoning as
+    ``ValidationTest``: ``vicmap_loader`` already holds ``CREATE`` there,
+    D-59, so no superuser DSN is needed)."""
+
+    def setUp(self):
+        self._connect().close()
+        self.params = self._connection_params()
+        self._table_counter = 0
+        self._created_tables: list[str] = []
+        self.addCleanup(self._drop_created_tables)
+
+    def _drop_created_tables(self) -> None:
+        if not self._created_tables:
+            return
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                for table_name in self._created_tables:
+                    cursor.execute(
+                        staging.sql.SQL("DROP TABLE IF EXISTS {table}").format(
+                            table=staging.sql.Identifier("vicmap_staging", table_name)
+                        )
+                    )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _new_table_name(self, case: str) -> str:
+        self._table_counter += 1
+        name = f"claude_ddl_test_{os.getpid()}_{self._table_counter}_{case}"
+        self._created_tables.append(name)
+        return name
+
+    def _policy(self, **overrides) -> staging.StagingPolicy:
+        kwargs = dict(
+            host=self.params["host"],
+            port=self.params["port"],
+            dbname=self.params["dbname"],
+            user=self.params["user"],
+            staging_schema="vicmap_staging",
+            publish_schema="vicmap",
+            target_srid=7899,
+            index_columns=("pfi",),
+            gt=20000,
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+            statement_timeout_seconds=3600,
+            lock_timeout_seconds=30,
+        )
+        kwargs.update(overrides)
+        return staging.StagingPolicy(**kwargs)
+
+    def _manifest_layer(self, **overrides) -> ManifestLayer:
+        kwargs = dict(
+            dataset_relative_path="x.gdb",
+            dataset_stem="x",
+            layer_name="LAYER",
+            driver="OpenFileGDB",
+            spatial=True,
+            geometry_type="Point",
+            geometry_column="geom",
+            fid_column="gid",
+            feature_count=1,
+            source_wkt=None,
+            epsg=7899,
+            extent=None,
+            fields=(_field("PFI"),),
+        )
+        kwargs.update(overrides)
+        return ManifestLayer(profile=LayerProfile(**kwargs), target_table="x")
+
+    def _create_table(
+        self,
+        table_name: str,
+        *,
+        typed_geometry: bool,
+        primary_key: bool,
+        include_pfi: bool = True,
+        spatial: bool = True,
+    ) -> None:
+        connection = self._connect()
+        try:
+            table_ref = staging.sql.Identifier("vicmap_staging", table_name)
+            gid_sql = "gid integer PRIMARY KEY" if primary_key else "gid integer"
+            columns = [gid_sql]
+            if spatial:
+                columns.append(
+                    "geom geometry(Point, 7899)" if typed_geometry else "geom geometry"
+                )
+            if include_pfi:
+                columns.append("pfi text")
+            create_sql = "CREATE TABLE {table} (" + ", ".join(columns) + ")"
+            insert_columns = ["gid"] + (["geom"] if spatial else []) + (
+                ["pfi"] if include_pfi else []
+            )
+            insert_values = ["1"] + (
+                ["ST_SetSRID(ST_MakePoint(144.9, -37.8), 7899)"] if spatial else []
+            ) + (["'x'"] if include_pfi else [])
+            insert_sql = (
+                "INSERT INTO {table} (" + ", ".join(insert_columns) + ") VALUES ("
+                + ", ".join(insert_values) + ")"
+            )
+            with connection.cursor() as cursor:
+                cursor.execute(staging.sql.SQL(create_sql).format(table=table_ref))
+                cursor.execute(staging.sql.SQL(insert_sql).format(table=table_ref))
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _has_primary_key(self, table_name: str) -> bool:
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.table_constraints "
+                    "WHERE table_schema = %s AND table_name = %s "
+                    "AND constraint_type = 'PRIMARY KEY'",
+                    ("vicmap_staging", table_name),
+                )
+                return cursor.fetchone() is not None
+        finally:
+            connection.close()
+
+    def _index_names(self, table_name: str) -> set[str]:
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT indexname FROM pg_indexes "
+                    "WHERE schemaname = %s AND tablename = %s",
+                    ("vicmap_staging", table_name),
+                )
+                return {row[0] for row in cursor.fetchall()}
+        finally:
+            connection.close()
+
+    def _gist_index_count(self, table_name: str) -> int:
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM pg_indexes "
+                    "WHERE schemaname = %s AND tablename = %s AND indexdef ILIKE %s",
+                    ("vicmap_staging", table_name, "%USING gist%"),
+                )
+                (count,) = cursor.fetchone()
+                return count
+        finally:
+            connection.close()
+
+    def _geometry_column_info(self, table_name: str):
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT type, srid FROM geometry_columns WHERE f_table_schema = %s "
+                    "AND f_table_name = %s AND f_geometry_column = 'geom'",
+                    ("vicmap_staging", table_name),
+                )
+                return cursor.fetchone()
+        finally:
+            connection.close()
+
+    def _geometry_column_not_null(self, table_name: str) -> bool:
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT is_nullable FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = %s AND column_name = 'geom'",
+                    ("vicmap_staging", table_name),
+                )
+                (is_nullable,) = cursor.fetchone()
+                return is_nullable == "NO"
+        finally:
+            connection.close()
+
+    def _validation(self, table_name: str, *, spatial: bool = True) -> staging.LayerValidation:
+        if not spatial:
+            return staging.LayerValidation(
+                staging_table=table_name,
+                spatial=False,
+                row_count=1,
+                geometry_type=staging.NOT_APPLICABLE,
+                srid=staging.NOT_APPLICABLE,
+                repaired_count=staging.NOT_APPLICABLE,
+                extent=staging.NOT_APPLICABLE,
+            )
+        return staging.LayerValidation(
+            staging_table=table_name,
+            spatial=True,
+            row_count=1,
+            geometry_type="POINT",
+            srid=7899,
+            repaired_count=0,
+            extent=(0.0, 0.0, 0.0, 0.0),
+        )
+
+    def test_primary_key_added_when_absent(self):
+        table = self._new_table_name("nopk")
+        self._create_table(table, typed_geometry=True, primary_key=False)
+        created = staging.apply_post_validation_ddl(
+            validation=self._validation(table),
+            manifest_layer=self._manifest_layer(),
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertIn(f"{table}_pkey", created)
+        self.assertTrue(self._has_primary_key(table))
+
+    def test_rerun_against_an_existing_primary_key_does_not_raise(self):
+        table = self._new_table_name("haspk")
+        self._create_table(table, typed_geometry=True, primary_key=True)
+        created = staging.apply_post_validation_ddl(
+            validation=self._validation(table),
+            manifest_layer=self._manifest_layer(),
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertNotIn(f"{table}_pkey", created)
+        self.assertTrue(self._has_primary_key(table))
+
+    def test_bare_geometry_column_is_typed_with_declared_type_and_srid(self):
+        table = self._new_table_name("bare")
+        self._create_table(table, typed_geometry=False, primary_key=False)
+        created = staging.apply_post_validation_ddl(
+            validation=self._validation(table),
+            manifest_layer=self._manifest_layer(),
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertIn(f"{table}_geom_typed", created)
+        observed_type, observed_srid = self._geometry_column_info(table)
+        self.assertEqual("POINT", observed_type)
+        self.assertEqual(7899, observed_srid)
+
+    def test_already_typed_column_needs_no_alter(self):
+        table = self._new_table_name("typed")
+        self._create_table(table, typed_geometry=True, primary_key=False)
+        created = staging.apply_post_validation_ddl(
+            validation=self._validation(table),
+            manifest_layer=self._manifest_layer(),
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertNotIn(f"{table}_geom_typed", created)
+        observed_type, observed_srid = self._geometry_column_info(table)
+        self.assertEqual("POINT", observed_type)
+        self.assertEqual(7899, observed_srid)
+
+    def test_geometry_column_is_not_null_afterwards(self):
+        table = self._new_table_name("notnull")
+        self._create_table(table, typed_geometry=True, primary_key=False)
+        staging.apply_post_validation_ddl(
+            validation=self._validation(table),
+            manifest_layer=self._manifest_layer(),
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertTrue(self._geometry_column_not_null(table))
+
+    def test_exactly_one_gist_index_created_after_the_load_not_during(self):
+        table = self._new_table_name("gist")
+        self._create_table(table, typed_geometry=True, primary_key=False)
+        created = staging.apply_post_validation_ddl(
+            validation=self._validation(table),
+            manifest_layer=self._manifest_layer(),
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertIn(f"{table}_geom_gist", created)
+        self.assertEqual(1, self._gist_index_count(table))
+        command = staging.build_ogr2ogr_command(
+            dataset_path="/tmp/x.gdb",
+            layer_name="LAYER",
+            staging_table=table,
+            policy=self._policy(),
+        )
+        self.assertIn("SPATIAL_INDEX=NONE", command)
+
+    def test_allowlisted_column_gets_a_btree_index_and_undeclared_does_not(self):
+        table = self._new_table_name("allowlist")
+        self._create_table(table, typed_geometry=True, primary_key=False, include_pfi=True)
+        created = staging.apply_post_validation_ddl(
+            validation=self._validation(table),
+            manifest_layer=self._manifest_layer(fields=(_field("PFI"),)),
+            staging_table=table,
+            policy=self._policy(index_columns=("pfi", "ufi")),
+            password=self.params["password"],
+        )
+        self.assertIn(f"{table}_pfi_idx", created)
+        self.assertNotIn(f"{table}_ufi_idx", created)
+        self.assertIn(f"{table}_pfi_idx", self._index_names(table))
+
+    def test_no_allowlisted_column_declared_creates_no_secondary_index(self):
+        table = self._new_table_name("noallowlist")
+        self._create_table(table, typed_geometry=True, primary_key=False, include_pfi=False)
+        created = staging.apply_post_validation_ddl(
+            validation=self._validation(table),
+            manifest_layer=self._manifest_layer(fields=()),
+            staging_table=table,
+            policy=self._policy(index_columns=("pfi",)),
+            password=self.params["password"],
+        )
+        self.assertNotIn(f"{table}_pfi_idx", created)
+
+    def test_non_spatial_layer_gets_only_primary_key_and_allowlisted_index(self):
+        table = self._new_table_name("nonspatial")
+        self._create_table(
+            table, typed_geometry=False, primary_key=False, include_pfi=True, spatial=False
+        )
+        created = staging.apply_post_validation_ddl(
+            validation=self._validation(table, spatial=False),
+            manifest_layer=self._manifest_layer(
+                spatial=False,
+                geometry_type=None,
+                geometry_column=None,
+                fields=(_field("PFI"),),
+            ),
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertIn(f"{table}_pkey", created)
+        self.assertIn(f"{table}_pfi_idx", created)
+        for name in created:
+            self.assertNotIn("geom", name)
+
+    def test_induced_failure_leaves_no_constraints_or_indexes(self):
+        # The table is already typed as Point, but the manifest declares
+        # Polygon -- a genuine disagreement with what validate_layer would
+        # already have asserted, so this must hard-stop rather than re-type.
+        # No primary key exists yet, so this also proves the whole call is
+        # one transaction: the PK step (which would otherwise succeed) is
+        # rolled back together with the aborted geometry step.
+        table = self._new_table_name("inducedfail")
+        self._create_table(table, typed_geometry=True, primary_key=False)
+        with self.assertRaises(staging.StagingDdlFailed):
+            staging.apply_post_validation_ddl(
+                validation=self._validation(table),
+                manifest_layer=self._manifest_layer(geometry_type="Polygon"),
+                staging_table=table,
+                policy=self._policy(),
+                password=self.params["password"],
+            )
+        self.assertFalse(self._has_primary_key(table))
+        self.assertEqual(set(), self._index_names(table))
+
+    def test_source_contains_no_concurrently(self):
+        import inspect
+
+        source = inspect.getsource(staging.apply_post_validation_ddl)
+        self.assertNotIn("CONCURRENTLY", source)
 
 
 if __name__ == "__main__":
