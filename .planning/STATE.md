@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.1
 current_phase: 03
 current_phase_name: Validated PostGIS Staging
-status: executing
-stopped_at: Completed 03-05-PLAN.md (live-verified DB-04 validation against real database)
-last_updated: "2026-09-21T08:27:30.775Z"
+status: verifying
+stopped_at: Completed 03-06-PLAN.md (last plan of Phase 03) -- DDL/index contract and sequential orchestration live-verified, grid question settled
+last_updated: "2026-09-21T09:14:10.671Z"
 last_activity: 2026-09-21
 last_activity_desc: Phase 03 execution started
-state_head: cb639626c245f457fd48d19efd8e5c66835b53ca
+state_head: 6d8c113aa4b3aa50a6d9e501b9b41a58eff4ce50
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 29
-  completed_plans: 28
+  completed_plans: 29
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
 **Current phase:** 03
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 
 ## Session Log
 
@@ -37,13 +37,13 @@ See: .planning/PROJECT.md
 
 Phase: 03 (Validated PostGIS Staging) — EXECUTING
 Plan: 6 of 6
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-21 — Phase 03 execution started
 
 ## Session
 
-**Last session:** 2026-09-21T08:27:30.730Z
-**Stopped at:** Completed 03-05-PLAN.md (live-verified DB-04 validation against real database)
+**Last session:** 2026-09-21T09:14:10.624Z
+**Stopped at:** Completed 03-06-PLAN.md (last plan of Phase 03) -- DDL/index contract and sequential orchestration live-verified, grid question settled
 **Resume file:** None
 
 ## Performance Metrics
@@ -78,6 +78,7 @@ Last activity: 2026-09-21 — Phase 03 execution started
 | Phase 03-validated-postgis-staging P03 | ~25min | 2 tasks | 4 files |
 | Phase 03 P04 | 95min | 3 tasks | 6 files |
 | Phase 03 P05 | 55min | 2 tasks | 2 files |
+| Phase 03 P06 | ~45min | 2 tasks | 4 files |
 
 ## Decisions
 
@@ -156,6 +157,8 @@ Last activity: 2026-09-21 — Phase 03 execution started
 - [Phase 03]: Live PostGIS GeometryType() never appends a Z/ZM suffix (only M); validate_layer compares base name + ST_Zmflag, never the suffixed string normalize_declared_geometry_type returns.
 - [Phase 03]: ValidationTest/ValidationOgrinfoOracleTest/LoadIntegrationTest use a throwaway table inside vicmap_staging (vicmap_loader already owns CREATE there, D-59) instead of a throwaway schema, so DB-04's live coverage runs without a superuser test DSN; closed WINDOWS.md #5.
 - [Phase 03]: PrivilegePreflightTest's 5 methods remain skipped: a real superuser role exists for the dev database but this session's tool-use sandbox blocked routing that credential through Bash; recorded as WINDOWS.md #6, owned by future test-DSN provisioning.
+- [Phase 03]: [Phase 03] apply_post_validation_ddl runs primary key, typed geometry column, NOT NULL, GiST index, and allowlisted btree indexes as one transaction; Open Question 1 answered empirically (GDAL already creates both the PK and typed column via FID=gid/known geometry type).
+- [Phase 03]: [Phase 03] GDA94/GDA2020 grid-vs-Helmert question settled with decisive live evidence: ogr2ogr's ONLY_BEST=YES transform matches a grid-free Helmert computation to 4dp, not the vendored ICSM grid, because PROJ's own accuracy metadata (0.01m Helmert vs 0.05m grid) ranks Helmert higher regardless of PROJ_DATA resolution. WINDOWS.md #3 (verification-method blindness) fixed; #2 (grid not selected) remains open with evidence, not a null result.
 
 ### Blockers
 

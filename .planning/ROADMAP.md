@@ -131,7 +131,7 @@ Plans:
 4. Blocking validation reports row counts, geometry columns and types, SRIDs, validity, and extents for all staging tables.
 5. A failed load or validation leaves all existing production tables unchanged.
 
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans executed
 
 Plans:
 
@@ -151,7 +151,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 03-06-PLAN.md — Constrain and index every validated table, run layers sequentially with named diagnostics, and prove production is untouched on failure.
+- [x] 03-06-PLAN.md — Constrain and index every validated table, run layers sequentially with named diagnostics, and prove production is untouched on failure.
 
 ### Phase 4: Transactional Publication and Access
 
@@ -194,7 +194,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Trusted Graph Acquisition | 14/14 | In Progress|  |
 | 2. Safe Geospatial Discovery | 9/9 | Complete    | 2026-09-17 |
-| 3. Validated PostGIS Staging | 5/6 | In Progress|  |
+| 3. Validated PostGIS Staging | 6/6 | In Progress|  |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
 | 5. Approved Legacy Cleanup | 0/TBD | Not started | — |
 
