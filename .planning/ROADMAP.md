@@ -131,14 +131,14 @@ Plans:
 4. Blocking validation reports row counts, geometry columns and types, SRIDs, validity, and extents for all staging tables.
 5. A failed load or validation leaves all existing production tables unchanged.
 
-**Plans:** 6 plans
+**Plans:** 2/6 plans executed
 
 Plans:
 
 **Wave 1**
 
 - [x] 03-01-PLAN.md — Gate the `psycopg` supply chain, correct D-50's missing `proj-data`, and put the driver, `psql`, the reprojection grid, and the password secret in the dev shell.
-- [ ] 03-02-PLAN.md — Add the `[database]` section, widen the policy contract to five sections, and make every database rule fail closed in one validator.
+- [x] 03-02-PLAN.md — Add the `[database]` section, widen the policy contract to five sections, and make every database rule fail closed in one validator.
 - [ ] 03-03-PLAN.md — Extend the closed evidence vocabulary with the database boundary and add a digest-verified reader for Phase 2's frozen manifest.
 
 **Wave 2** *(blocked on Wave 1 completion)*
@@ -194,7 +194,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Trusted Graph Acquisition | 14/14 | In Progress|  |
 | 2. Safe Geospatial Discovery | 9/9 | Complete    | 2026-09-17 |
-| 3. Validated PostGIS Staging | 0/6 | Planned | — |
+| 3. Validated PostGIS Staging | 2/6 | In Progress|  |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
 | 5. Approved Legacy Cleanup | 0/TBD | Not started | — |
 
