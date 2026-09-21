@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.1
-current_phase: 3 — Validated PostGIS Staging
+current_phase: 03
 current_phase_name: Validated PostGIS Staging
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-09-21T04:08:16.494Z"
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-09-21T05:06:23.725Z"
 last_activity: 2026-09-21
-last_activity_desc: Phase 03 planning complete
-state_head: 6e8b2e74d116b00ba79fcfb2fb12ef1e8f738731
+last_activity_desc: Phase 03 execution started
+state_head: 4b82b93edf6a076a5dd256e17e040501784a64f6
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 29
-  completed_plans: 23
+  completed_plans: 24
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md
 ## Position
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
-**Current phase:** 3 — Validated PostGIS Staging
+**Current phase:** 03
 **Status:** Ready to execute
 
 ## Session Log
@@ -35,16 +35,16 @@ See: .planning/PROJECT.md
 
 ## Current Position
 
-Phase: 03 (Validated PostGIS Staging) — READY TO EXECUTE
-Plan: Not started
+Phase: 03 (Validated PostGIS Staging) — EXECUTING
+Plan: 2 of 6
 Status: Ready to execute
-Last activity: 2026-09-21 — Phase 03 planning complete
+Last activity: 2026-09-21 — Phase 03 execution started
 
 ## Session
 
-**Last session:** 2026-09-21T02:22:13.427Z
-**Stopped at:** Phase 3 context gathered
-**Resume file:** .planning/phases/03-validated-postgis-staging/03-CONTEXT.md
+**Last session:** 2026-09-21T05:06:23.682Z
+**Stopped at:** Completed 03-01-PLAN.md
+**Resume file:** None
 
 ## Performance Metrics
 
@@ -73,6 +73,7 @@ Last activity: 2026-09-21 — Phase 03 planning complete
 | Phase 02-safe-geospatial-discovery P07 | ~15min | 3 tasks | 5 files |
 | Phase 02-safe-geospatial-discovery P08 | 12min | 2 tasks | 2 files |
 | Phase 02 P09 | 11min | 2 tasks | 2 files |
+| Phase 03-validated-postgis-staging P01 | ~55min | 3 tasks | 1 files |
 
 ## Decisions
 
@@ -140,7 +141,11 @@ Last activity: 2026-09-21 — Phase 03 planning complete
 - [Phase 02]: Kept the pre-pass identity key (Task 1) and the write-time exclusive create (Task 2) as two separate, complementary guards. — The pre-pass is order-independent and catches nearly everything before any write; the exclusive create is the filesystem's own truth against any identity-key edge case.
 - [Phase 02]: [Phase 02]: write_manifest's sidecar-write failure now rolls back the just-created manifest.json (nested try scoped after the manifest's own O_EXCL create returns), so a reported GEO-05 hard stop never leaves a manifest and a retry into the same run directory always succeeds, closing CR-02. — The rollback is provably scoped to a file this call itself created: manifest.json's O_EXCL create must have already returned without raising before the sidecar write is even attempted, so a pre-existing complete manifest is never touched.
 - [Phase 02]: [Phase 02]: Added ensure_ascii=False to write_manifest's json.dumps call, since the shipped default ASCII-escaped non-ASCII layer/companion names, making the required byte-identity digest property provably false; write_manifest now also fsyncs the run directory's own entry exactly once after both files exist, closing WR-02. — Discovered because the plan's own required non-ASCII regression failed against the pre-fix code (byte length equaled character length); evidence.py's similar-looking json.dumps idiom is left unchanged since its payload is already redacted, ASCII-safe operator output.
+- [Phase 03]: Task 1 checkpoint: operator approved psycopg 3.3.4 as a required runtime dependency after verifying PyPI, github.com/psycopg/psycopg, and nixpkgs 3.3.4.
+- [Phase 03]: Task 2 checkpoint: operator selected vendor-fetchurl (option A) for the GDA94/GDA2020 grid, superseding D-50's nonexistent proj-data package.
+- [Phase 03]: Research Open Question 2 settled empirically: colon-joined PROJ_DATA is not honored by PROJ 9.8.1/pyproj 3.7.2 for grid resolution; only a single merged directory works.
 
 ### Blockers
 
 - vicmap.toml's [extraction].max_compression_ratio=20 will hard-stop a real discover_order.py run against Order_OK0VUZ.zip (small OpenFileGDB index files compress up to ~139x); raise to 200+ before running discovery for real.
+- 03-04/03-06 must verify ogr2ogr -t_srs EPSG:7899 under OGR_CT_ONLY_BEST=YES/OGR_CT_ALLOW_BALLPARK=NO actually uses the vendored ICSM grid, not a grid-free Helmert transform (03-01 finding: pyproj TransformerGroup/only_best ranks the Helmert op as 'best' by declared accuracy, reproducing the same +0.5m/+1.5m shift research flagged).
