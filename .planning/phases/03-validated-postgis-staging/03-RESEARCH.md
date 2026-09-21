@@ -429,19 +429,54 @@ with psycopg.connect(**conn_kwargs) as conn:
 
 **If this table is empty:** N/A — see rows above.
 
-## Open Questions
+## Open Questions (CARRIED TO PLAN)
 
-1. **Does GDAL's PostgreSQL driver create a typed geometry column automatically when the OGR layer has a single known geometry type and `-t_srs` is set, or does it always create a bare `geometry` column requiring D-63's `ALTER`?**
+*None of the three was closed by research. All three were carried into the `/gsd-plan-phase 03`
+run that consumed this file, each as an empirical check inside a named plan task rather than as
+an assumption. The marker under each question names that task, the acceptance criterion that
+forces the answer to be written down, and where the answer will land.*
+
+1. **CARRIED TO PLAN (03-06 Task 1) — Does GDAL's PostgreSQL driver create a typed geometry column automatically when the OGR layer has a single known geometry type and `-t_srs` is set, or does it always create a bare `geometry` column requiring D-63's `ALTER`?**
+   > **Carried to:** `03-06-PLAN.md` Task 1, "Constrain and index every validated staging table".
+   > `apply_post_validation_ddl` reads the loaded table's actual entry from `geometry_columns` and
+   > compares its `type` and `srid` against the manifest's declared type and the configured
+   > `target_srid` before deciding whether an `ALTER` is needed, so neither answer is hard-coded —
+   > exactly the Common Pitfall 2 shape recommended above. The plan's acceptance criterion is
+   > *"The observed pre-`ALTER` `geometry_columns` type is recorded in the SUMMARY as the empirical
+   > answer to research Open Question 1."*
+   > **Status: still outstanding here** — the answer is produced when 03-06 executes and is
+   > recorded in `03-06-SUMMARY.md`, not in this file.
    - What we know: `GEOM_TYPE` layer creation option defaults to `geometry` (not `geography`); the driver is documented as capable of typed columns.
    - What's unclear: whether "capable of" means "does by default for a known single-type layer" in this exact GDAL 3.13.2 build, without a live load test against the real database.
    - Recommendation: the plan should include a one-time empirical check (`\d vicmap_staging.<table>` or `information_schema.columns` after a real `ADDRESS` load) as an early task, and write the post-load DDL idempotently regardless of the answer (Common Pitfall 2).
 
-2. **Does `PROJ_DATA` in this PROJ 9.8.1 build accept a colon-separated list of directories, or must vendored grid files live alongside `proj.db` in one directory?**
+2. **CARRIED TO PLAN (03-01 Task 3) — Does `PROJ_DATA` in this PROJ 9.8.1 build accept a colon-separated list of directories, or must vendored grid files live alongside `proj.db` in one directory?**
+   > **Carried to:** `03-01-PLAN.md` Task 3, "Add the database driver, the psql client, the chosen
+   > grid mechanism, and the password secret to the dev shell". The executor tries the colon-joined
+   > `PROJ_DATA` form first and falls back to a `symlinkJoin`-style merged directory holding both
+   > `${pkgs.proj}/share/proj`'s contents and the vendored grid. The acceptance criteria assert the
+   > observable outcome either way — the grid file resolves on some `PROJ_DATA` search path, and
+   > `TransformerGroup('EPSG:3111', 'EPSG:7899')` reports `best_available` true with no unavailable
+   > operations — rather than asserting a mechanism. The plan's acceptance criterion is *"The SUMMARY
+   > records which `PROJ_DATA` form worked (colon-joined list or merged directory) as the empirical
+   > answer to research Open Question 2."*
+   > **Status: still outstanding here** — the answer is produced when 03-01 executes and is recorded
+   > in `03-01-SUMMARY.md`. Applies only if 03-01 Task 2 selects the `vendor-fetchurl` option.
    - What we know: PROJ 9+ uses `PROJ_DATA` (not the pre-9.1 `PROJ_LIB`); the base package's `share/proj` holds `proj.db` and 15 other entries with no grids (D-50).
    - What's unclear: the exact multi-path search semantics for this build; whether `flake.nix`'s `shellHook` needs to symlink-merge the vendored `.tif` into a writable location instead.
    - Recommendation: verify with a throwaway `nix develop` shell setting `PROJ_DATA` to a `:`-joined path (or single merged directory) and running a real GDA94→GDA2020 transform, before finalizing the flake.nix change.
 
-3. **Is `PROJ_NETWORK=ON` actually functional in the pinned `proj` build (does its `curl` build input imply working network grid fetch), and if so, is it disqualified purely on policy grounds (new unreviewed outbound host) or also on reliability grounds?**
+3. **CARRIED TO PLAN, CONDITIONALLY (03-01 Task 2, then Task 3) — Is `PROJ_NETWORK=ON` actually functional in the pinned `proj` build (does its `curl` build input imply working network grid fetch), and if so, is it disqualified purely on policy grounds (new unreviewed outbound host) or also on reliability grounds?**
+   > **Carried to:** `03-01-PLAN.md` Task 2, "Choose the GDA94 to GDA2020 grid mechanism, correcting
+   > D-50" — a `checkpoint:decision` that puts network mode in front of the operator as option **B**
+   > (`proj-network`), with this question's unverified status stated in that option's own cons and
+   > the policy objection (a new runtime outbound host outside `vicmap.toml`'s reviewed
+   > `[download].allowed_hosts`) stated beside it. The functional half is answered empirically only
+   > if the operator selects B: Task 3 then proves it end to end before accepting it, and falls back
+   > to option A (`vendor-fetchurl`) if it does not work.
+   > **Status: expected to remain open.** If the operator selects A (research's primary
+   > recommendation) or C (`accept-hard-stop`), this phase never exercises network mode and the
+   > question is correctly left unanswered rather than silently resolved.
    - What we know: `curl` is a build input (this session, `nix eval`).
    - What's unclear: whether `ENABLE_CURL`/network mode was actually compiled in and enabled by default, without an end-to-end live test.
    - Recommendation: not needed for the plan if vendoring (this research's primary recommendation) is adopted; only relevant if the planner or operator prefers the network-fetch mechanism instead.
