@@ -77,7 +77,7 @@ No publication into `vicmap`, no reader grants, no run summary — those are Pha
 
 Recorded so downstream agents do not act on the earlier answers:
 
-- **D-39 (Phase 2) is superseded by D-49.** Phase 2 recorded native CRS and forbade reprojection; Phase 3 reprojects to a configured target SRID. D-39's EPSG-resolution hard stop survives unchanged.
+- **Phase 2's D-39 is superseded by D-49.** Phase 2 recorded native CRS and forbade reprojection; Phase 3 reprojects to a configured target SRID. D-39's EPSG-resolution hard stop survives unchanged.
 - **Column-level D-22 enforcement was proposed and then dropped.** Early in this discussion the operator chose normalized column names with hard stops on reserved words, collisions, and `geom`/`gid` clashes. On learning that GDAL's `LAUNDER` already produces those names and that keeping both would require post-load verification, the operator chose `ogr2ogr` alone. D-45 is the surviving decision; the column hard stops do not exist. D-46's `geom` and `gid` were separately reconfirmed and do survive.
 
 </decisions>
