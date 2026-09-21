@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from vicmap_acquire.discovery import FieldProfile, LayerProfile
 
 
 MANIFEST_SCHEMA_VERSION = 1
+
+_SIDECAR_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 class ManifestFailure(RuntimeError):
@@ -33,6 +36,14 @@ class ManifestFailure(RuntimeError):
 
 class ManifestWriteFailed(ManifestFailure):
     code = "manifest_write_failed"
+
+
+class ManifestUnreadable(ManifestFailure):
+    code = "manifest_unreadable"
+
+
+class ManifestDigestMismatch(ManifestFailure):
+    code = "manifest_digest_mismatch"
 
 
 @dataclass(frozen=True)
@@ -254,3 +265,118 @@ def write_manifest(manifest: ImportManifest, run_directory: Path) -> str:
         return digest
     except OSError:
         raise ManifestWriteFailed() from None
+
+
+def _extent_from_payload(value: list | None) -> tuple[float, ...] | None:
+    if value is None:
+        return None
+    return tuple(float(item) for item in value)
+
+
+def _field_profile_from_payload(payload: dict) -> FieldProfile:
+    return FieldProfile(
+        name=payload["name"],
+        ogr_type=payload["ogr_type"],
+        width=payload["width"],
+        precision=payload["precision"],
+        nullable=payload["nullable"],
+    )
+
+
+def _layer_profile_from_payload(payload: dict) -> LayerProfile:
+    fields_payload = payload["fields"]
+    if not isinstance(fields_payload, list):
+        raise TypeError("layer fields must be a list")
+    return LayerProfile(
+        dataset_relative_path=payload["dataset_relative_path"],
+        dataset_stem=payload["dataset_stem"],
+        layer_name=payload["layer_name"],
+        driver=payload["driver"],
+        spatial=payload["spatial"],
+        geometry_type=payload["geometry_type"],
+        geometry_column=payload["geometry_column"],
+        fid_column=payload["fid_column"],
+        feature_count=payload["feature_count"],
+        source_wkt=payload["source_wkt"],
+        epsg=payload["epsg"],
+        extent=_extent_from_payload(payload["extent"]),
+        fields=tuple(_field_profile_from_payload(field) for field in fields_payload),
+    )
+
+
+def _manifest_layer_from_payload(payload: dict) -> ManifestLayer:
+    return ManifestLayer(
+        profile=_layer_profile_from_payload(payload), target_table=payload["target_table"]
+    )
+
+
+def _companion_from_payload(payload: dict) -> CompanionFile:
+    return CompanionFile(
+        relative_path=payload["relative_path"],
+        byte_count=payload["byte_count"],
+        sha256=payload["sha256"],
+    )
+
+
+def read_manifest(run_directory: Path) -> ImportManifest:
+    """Read ``manifest.json`` back, verifying its digest before trusting a field.
+
+    The exact inverse of ``write_manifest``: recomputes the SHA-256 over the
+    canonical bytes (one trailing newline stripped, same as the sidecar's own
+    trailing newline) and compares it to the sidecar *before* the JSON is
+    even parsed, so a tampered file is rejected on identity, never on shape
+    (T-03-11). Every collection comes back as a ``tuple``, in the exact order
+    the file lists it, so the returned object is as frozen as the one
+    ``build_manifest`` produced and ``layers``/``companions`` load in D-42's
+    file order. Neither closed failure below carries file text, JSON text, or
+    a path -- mirrors ``discovery.read_field_schema``'s total-collapse
+    pattern: a specific failure is never masked by the catch-all.
+    """
+
+    try:
+        try:
+            manifest_text = (run_directory / "manifest.json").read_text(encoding="utf-8")
+            sidecar_text = (run_directory / "manifest.json.sha256").read_text(
+                encoding="utf-8"
+            )
+        except (OSError, UnicodeError):
+            raise ManifestUnreadable() from None
+
+        canonical = manifest_text[:-1] if manifest_text.endswith("\n") else manifest_text
+        actual_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        sidecar_digest = sidecar_text[:-1] if sidecar_text.endswith("\n") else sidecar_text
+
+        if _SIDECAR_DIGEST.fullmatch(sidecar_digest) is None:
+            raise ManifestDigestMismatch()
+        if sidecar_digest != actual_digest:
+            raise ManifestDigestMismatch()
+
+        payload = json.loads(canonical)
+        if not isinstance(payload, dict):
+            raise TypeError("manifest payload must be an object")
+        if payload["schema_version"] != MANIFEST_SCHEMA_VERSION:
+            raise ValueError("unsupported manifest schema_version")
+
+        provenance = payload["provenance"]
+        layers_payload = payload["layers"]
+        companions_payload = payload["companions"]
+        if not isinstance(layers_payload, list) or not isinstance(companions_payload, list):
+            raise TypeError("layers and companions must be lists")
+
+        return ImportManifest(
+            schema_version=payload["schema_version"],
+            order_id=provenance["order_id"],
+            run_timestamp=provenance["run_timestamp"],
+            run_directory=provenance["run_directory"],
+            artifact_sha256=provenance["artifact_sha256"],
+            artifact_byte_count=provenance["artifact_byte_count"],
+            message_fingerprint=provenance["message_fingerprint"],
+            layers=tuple(_manifest_layer_from_payload(layer) for layer in layers_payload),
+            companions=tuple(
+                _companion_from_payload(companion) for companion in companions_payload
+            ),
+        )
+    except ManifestFailure:
+        raise
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        raise ManifestUnreadable() from None

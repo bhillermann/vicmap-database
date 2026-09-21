@@ -489,6 +489,174 @@ class ManifestRoundTripTest(_TempDirMixin, unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 03-03 Task 2: digest-verified read_manifest
+#
+# Named distinctly from the ``ManifestRoundTripTest``/plain digest classes
+# above (which this file already defined for ``write_manifest``'s own
+# behaviour) to avoid rebinding those class names and silently hiding their
+# existing test methods from discovery.
+# ---------------------------------------------------------------------------
+
+
+class ManifestReadRoundTripTest(_TempDirMixin, unittest.TestCase):
+    def test_read_manifest_reconstructs_the_original_field_by_field(self):
+        spatial_profile = _layer_profile(
+            layer_name="ADRESSÉ",
+            dataset_stem="VMADDÉ",
+            extent=(1.0, 2.0, 3.0, 4.0),
+            fields=(_field("UFI", "Integer"), _field("PFI", "String", width=10)),
+        )
+        non_spatial_profile = _layer_profile(
+            layer_name="LOOKUP",
+            dataset_stem="LOOKUP",
+            spatial=False,
+            geometry_type=None,
+            geometry_column=None,
+            source_wkt=None,
+            epsg=None,
+            extent=None,
+            fields=(_field("CODE", "String", width=3),),
+        )
+        layers = (
+            manifest_module.ManifestLayer(
+                profile=spatial_profile, target_table="vmadd_adressé"
+            ),
+            manifest_module.ManifestLayer(
+                profile=non_spatial_profile, target_table="lookup_lookup"
+            ),
+        )
+        companions = (
+            manifest_module.CompanionFile(
+                relative_path="ライセンス.html", byte_count=42, sha256="a" * 64
+            ),
+        )
+        manifest = _manifest(layers=layers, companions=companions)
+        run_dir = self.make_temp_dir("manifest-read-roundtrip-")
+        manifest_module.write_manifest(manifest, run_dir)
+
+        read_back = manifest_module.read_manifest(run_dir)
+
+        self.assertEqual(manifest, read_back)
+        self.assertIsInstance(read_back.layers, tuple)
+        self.assertIsInstance(read_back.companions, tuple)
+        for layer in read_back.layers:
+            self.assertIsInstance(layer.profile.fields, tuple)
+            if layer.profile.extent is not None:
+                self.assertIsInstance(layer.profile.extent, tuple)
+
+    def test_layers_and_companions_preserve_file_order(self):
+        first = _layer_profile(layer_name="ZED")
+        second = _layer_profile(layer_name="ALPHA")
+        layers = (
+            manifest_module.ManifestLayer(profile=first, target_table="vmadd_zed"),
+            manifest_module.ManifestLayer(profile=second, target_table="vmadd_alpha"),
+        )
+        companions = (
+            manifest_module.CompanionFile(
+                relative_path="z.html", byte_count=1, sha256="a" * 64
+            ),
+            manifest_module.CompanionFile(
+                relative_path="a.html", byte_count=2, sha256="b" * 64
+            ),
+        )
+        manifest = _manifest(layers=layers, companions=companions)
+        run_dir = self.make_temp_dir("manifest-read-order-")
+        manifest_module.write_manifest(manifest, run_dir)
+
+        read_back = manifest_module.read_manifest(run_dir)
+
+        self.assertEqual(
+            ("ZED", "ALPHA"),
+            tuple(layer.profile.layer_name for layer in read_back.layers),
+        )
+        self.assertEqual(
+            ("z.html", "a.html"),
+            tuple(companion.relative_path for companion in read_back.companions),
+        )
+
+
+class ManifestReadDigestTest(_TempDirMixin, unittest.TestCase):
+    def _write_and_paths(self) -> tuple[Path, Path, Path]:
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-read-digest-")
+        manifest_module.write_manifest(manifest, run_dir)
+        return run_dir, run_dir / "manifest.json", run_dir / "manifest.json.sha256"
+
+    def test_flipping_one_byte_in_manifest_json_raises_digest_mismatch(self):
+        run_dir, manifest_path, _sidecar_path = self._write_and_paths()
+        mutated = bytearray(manifest_path.read_bytes())
+        mutated[0] ^= 0x01  # the opening brace -- never the trailing newline
+        manifest_path.write_bytes(bytes(mutated))
+
+        with self.assertRaises(manifest_module.ManifestDigestMismatch):
+            manifest_module.read_manifest(run_dir)
+
+    def test_replacing_sidecar_with_a_different_valid_digest_raises_digest_mismatch(self):
+        run_dir, _manifest_path, sidecar_path = self._write_and_paths()
+        sidecar_path.write_text("f" * 64 + "\n", encoding="utf-8")
+
+        with self.assertRaises(manifest_module.ManifestDigestMismatch):
+            manifest_module.read_manifest(run_dir)
+
+    def test_truncated_sidecar_raises_digest_mismatch(self):
+        run_dir, _manifest_path, sidecar_path = self._write_and_paths()
+        sidecar_path.write_text("0123456789\n", encoding="utf-8")
+
+        with self.assertRaises(manifest_module.ManifestDigestMismatch):
+            manifest_module.read_manifest(run_dir)
+
+    def test_deleting_manifest_json_raises_unreadable(self):
+        run_dir, manifest_path, _sidecar_path = self._write_and_paths()
+        manifest_path.unlink()
+
+        with self.assertRaises(manifest_module.ManifestUnreadable):
+            manifest_module.read_manifest(run_dir)
+
+    def test_deleting_sidecar_raises_unreadable(self):
+        run_dir, _manifest_path, sidecar_path = self._write_and_paths()
+        sidecar_path.unlink()
+
+        with self.assertRaises(manifest_module.ManifestUnreadable):
+            manifest_module.read_manifest(run_dir)
+
+    def test_schema_version_bump_with_a_matching_sidecar_raises_unreadable(self):
+        run_dir, manifest_path, sidecar_path = self._write_and_paths()
+        payload = json.loads(manifest_path.read_bytes().decode("utf-8"))
+        payload["schema_version"] = 2
+        mutated_canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        manifest_path.write_text(mutated_canonical + "\n", encoding="utf-8")
+        mutated_digest = hashlib.sha256(mutated_canonical.encode("utf-8")).hexdigest()
+        sidecar_path.write_text(mutated_digest + "\n", encoding="utf-8")
+
+        # The digest now matches the mutated file, so a failure here is
+        # provably the schema_version check, not the digest check.
+        with self.assertRaises(manifest_module.ManifestUnreadable):
+            manifest_module.read_manifest(run_dir)
+
+    def test_neither_closed_failure_carries_a_path_or_json_text(self):
+        run_dir, manifest_path, _sidecar_path = self._write_and_paths()
+        manifest_path.unlink()
+
+        with self.assertRaises(manifest_module.ManifestUnreadable) as ctx:
+            manifest_module.read_manifest(run_dir)
+        self.assertEqual("manifest_unreadable", str(ctx.exception))
+        self.assertNotIn(str(run_dir), str(ctx.exception))
+
+    def test_reader_imports_no_database_driver(self):
+        import inspect
+
+        source = inspect.getsource(manifest_module)
+        forbidden = [
+            name
+            for name in ("psycopg", "psycopg2", "sqlalchemy", "asyncpg", "pg8000")
+            if name in source
+        ]
+        self.assertEqual([], forbidden)
+
+
+# ---------------------------------------------------------------------------
 # Task 2: ordered run_discovery composition
 # ---------------------------------------------------------------------------
 
