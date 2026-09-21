@@ -324,6 +324,20 @@ max_compression_ratio = 20
 [discovery]
 supported_formats = ["OpenFileGDB"]
 ogrinfo_timeout_seconds = 60
+
+[database]
+host = "127.0.0.1"
+port = 5432
+dbname = "vicmap"
+user = "vicmap_loader"
+staging_schema = "vicmap_staging"
+publish_schema = "vicmap"
+target_srid = 7899
+index_columns = ["pfi"]
+gt = 20000
+connect_timeout_seconds = 10
+statement_timeout_seconds = 3600
+lock_timeout_seconds = 30
 """
 
 

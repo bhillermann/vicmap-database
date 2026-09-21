@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import logging
 import os
 import re
@@ -74,6 +75,20 @@ _DISCOVERY_KEYS = {
     "supported_formats",
     "ogrinfo_timeout_seconds",
 }
+_DATABASE_KEYS = {
+    "host",
+    "port",
+    "dbname",
+    "user",
+    "staging_schema",
+    "publish_schema",
+    "target_srid",
+    "index_columns",
+    "gt",
+    "connect_timeout_seconds",
+    "statement_timeout_seconds",
+    "lock_timeout_seconds",
+}
 _ORDER_ID = re.compile(r"[A-Za-z0-9]+")
 _HOSTNAME = re.compile(
     r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -81,6 +96,12 @@ _HOSTNAME = re.compile(
 )
 _ALLOWED_OUTPUT_NAMES = frozenset({"artifacts"})
 _ALLOWED_RUN_DIR_NAMES = frozenset({"runs"})
+# The 63-byte bound matches naming.py's _MAX_NAME_BYTES; the leading-letter
+# rule matches naming.py's leading-digit rejection. naming.py is a pure leaf
+# with an ast self-check proving it imports nothing, so this module does not
+# import it -- the dependency must not run the other way either.
+_PG_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,62}")
+_FORBIDDEN_SCHEMA_NAMES = frozenset({"public"})
 # D-34's initial single-entry format allowlist. Widening is a one-line change.
 _RECOGNIZED_DISCOVERY_FORMATS = frozenset({"OpenFileGDB"})
 
@@ -119,6 +140,27 @@ class DiscoveryRunConfig:
     max_compression_ratio: int
     supported_formats: tuple[str, ...]
     ogrinfo_timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class DatabaseRunConfig:
+    """Complete non-secret Phase 3 policy, reviewable in ``vicmap.toml``."""
+
+    run_root: Path
+    fingerprint_hex_chars: int
+    allowed_order_ids: tuple[str, ...]
+    host: str
+    port: int
+    dbname: str
+    user: str
+    staging_schema: str
+    publish_schema: str
+    target_srid: int
+    index_columns: tuple[str, ...]
+    gt: int
+    connect_timeout_seconds: int
+    statement_timeout_seconds: int
+    lock_timeout_seconds: int
 
 
 class AcquisitionFailure(RuntimeError):
@@ -403,6 +445,71 @@ def validate_discovery_policy(config: DiscoveryRunConfig) -> None:
     _positive_bounded_integer(config.ogrinfo_timeout_seconds, 1, 3600)
 
 
+def validate_database_policy(config: DatabaseRunConfig) -> None:
+    """The single semantic contract for Phase 3's database boundary.
+
+    Mirrors ``validate_discovery_policy``: every check here runs before any
+    connection is opened, so a directly constructed ``DatabaseRunConfig``
+    cannot bypass a rule the TOML loader would have enforced.
+    """
+
+    if (
+        not isinstance(config.run_root, Path)
+        or not config.run_root.is_absolute()
+        or config.run_root.name not in _ALLOWED_RUN_DIR_NAMES
+    ):
+        raise AcquisitionFailure("config_invalid")
+    _positive_bounded_integer(config.fingerprint_hex_chars, 8, 64)
+    if not isinstance(config.allowed_order_ids, tuple) or not config.allowed_order_ids:
+        raise AcquisitionFailure("config_invalid")
+
+    if not isinstance(config.host, str) or not config.host.strip():
+        raise AcquisitionFailure("config_invalid")
+    try:
+        ipaddress.ip_address(config.host)
+    except ValueError:
+        if _HOSTNAME.fullmatch(config.host) is None:
+            raise AcquisitionFailure("config_invalid") from None
+
+    _bounded_integer(config.port, 1, 65535)
+
+    for identifier in (
+        config.dbname,
+        config.user,
+        config.staging_schema,
+        config.publish_schema,
+    ):
+        if not isinstance(identifier, str) or _PG_IDENTIFIER.fullmatch(identifier) is None:
+            raise AcquisitionFailure("config_invalid")
+
+    if (
+        config.staging_schema in _FORBIDDEN_SCHEMA_NAMES
+        or config.publish_schema in _FORBIDDEN_SCHEMA_NAMES
+    ):
+        raise AcquisitionFailure("config_invalid")
+
+    if config.staging_schema == config.publish_schema:
+        raise AcquisitionFailure("config_invalid")
+
+    _bounded_integer(config.target_srid, 1024, 998999)
+
+    if not isinstance(config.index_columns, tuple) or not config.index_columns:
+        raise AcquisitionFailure("config_invalid")
+    for column in config.index_columns:
+        if not isinstance(column, str) or _PG_IDENTIFIER.fullmatch(column) is None:
+            raise AcquisitionFailure("config_invalid")
+    if len(set(config.index_columns)) != len(config.index_columns):
+        raise AcquisitionFailure("config_invalid")
+
+    _positive_bounded_integer(config.gt, 1, 1_000_000)
+
+    _positive_bounded_integer(config.connect_timeout_seconds, 1, 300)
+    _positive_bounded_integer(config.statement_timeout_seconds, 1, 86400)
+    _positive_bounded_integer(config.lock_timeout_seconds, 1, 3600)
+    if config.lock_timeout_seconds > config.statement_timeout_seconds:
+        raise AcquisitionFailure("config_invalid")
+
+
 def run_acquisition(
     config: AcquisitionConfig,
     credentials: Mapping[str, str],
@@ -660,15 +767,15 @@ def load_config(path: Path) -> AcquisitionConfig:
     extraction, ``Path`` construction, and output-root resolution. Every
     semantic check (format, closed sets, duplicates, bounds) is delegated to
     ``validate_acquisition_policy`` so there is exactly one place those rules
-    exist. The complete four-section key set -- ``mailbox``, ``download``,
-    ``extraction``, ``discovery`` -- must be present so one ``vicmap.toml`` is
-    the project's whole non-secret policy; a file missing the Phase 2
-    sections fails closed rather than half-loading.
+    exist. The complete five-section key set -- ``mailbox``, ``download``,
+    ``extraction``, ``discovery``, ``database`` -- must be present so one
+    ``vicmap.toml`` is the project's whole non-secret policy; a file missing
+    the Phase 2 or Phase 3 sections fails closed rather than half-loading.
     """
 
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
-        if set(raw) != {"mailbox", "download", "extraction", "discovery"}:
+        if set(raw) != {"mailbox", "download", "extraction", "discovery", "database"}:
             raise AcquisitionFailure("config_invalid")
         mailbox = raw["mailbox"]
         download = raw["download"]
@@ -736,7 +843,7 @@ def load_discovery_config(path: Path) -> DiscoveryRunConfig:
     """Load Phase 2's complete non-secret policy, then apply its contract.
 
     Reuses ``load_config`` for the shared TOML shape work and mailbox/download
-    semantics (including the complete four-section key-set check), then
+    semantics (including the complete five-section key-set check), then
     performs only TOML shape work for ``[extraction]``/``[discovery]`` --
     key-set equality, type extraction, ``Path`` construction, and run-root
     resolution against the config file's parent -- before delegating every
@@ -790,6 +897,60 @@ def load_discovery_config(path: Path) -> DiscoveryRunConfig:
             ),
         )
         validate_discovery_policy(config)
+        return config
+    except AcquisitionFailure:
+        raise
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+        raise AcquisitionFailure("config_invalid") from None
+
+
+def load_database_config(path: Path) -> DatabaseRunConfig:
+    """Load Phase 3's complete non-secret policy, then apply its contract.
+
+    Reuses ``load_discovery_config`` for the shared TOML shape work and every
+    Phase 1/Phase 2 semantic check (including the complete five-section
+    key-set check), then performs only TOML shape work for ``[database]`` --
+    key-set equality and type extraction -- before delegating every semantic
+    check to ``validate_database_policy``, exactly as ``load_discovery_config``
+    delegates to ``validate_discovery_policy``. There is deliberately no
+    password field on ``DatabaseRunConfig``: the one secret in this phase
+    reaches the process only through the ``VICMAP_DB_PASSWORD`` environment
+    variable, read separately by the caller.
+    """
+
+    discovery_config = load_discovery_config(path)
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        database = raw["database"]
+        if not isinstance(database, dict) or set(database) != _DATABASE_KEYS:
+            raise AcquisitionFailure("config_invalid")
+
+        index_columns = _string_list(database["index_columns"])
+
+        config = DatabaseRunConfig(
+            run_root=discovery_config.run_root,
+            fingerprint_hex_chars=discovery_config.fingerprint_hex_chars,
+            allowed_order_ids=discovery_config.allowed_order_ids,
+            host=_strict_string(database["host"]),
+            port=_bounded_integer(database["port"], 1, 65535),
+            dbname=_strict_string(database["dbname"]),
+            user=_strict_string(database["user"]),
+            staging_schema=_strict_string(database["staging_schema"]),
+            publish_schema=_strict_string(database["publish_schema"]),
+            target_srid=_bounded_integer(database["target_srid"], 1024, 998999),
+            index_columns=index_columns,
+            gt=_bounded_integer(database["gt"], 1, 1_000_000),
+            connect_timeout_seconds=_bounded_integer(
+                database["connect_timeout_seconds"], 1, 300
+            ),
+            statement_timeout_seconds=_bounded_integer(
+                database["statement_timeout_seconds"], 1, 86400
+            ),
+            lock_timeout_seconds=_bounded_integer(
+                database["lock_timeout_seconds"], 1, 3600
+            ),
+        )
+        validate_database_policy(config)
         return config
     except AcquisitionFailure:
         raise
