@@ -16,15 +16,25 @@ live-database checks skip, never fail.
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
+import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import read_mailbox
+from vicmap_acquire import staging
+from vicmap_acquire.evidence import SuccessEvent
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+FIXTURE_ARCHIVE = REPO_ROOT / "tests" / "fixtures" / "Order_TRACER1.zip"
 
 VALID_TOML = """\
 [mailbox]
@@ -257,3 +267,345 @@ class DatabaseConfigTest(unittest.TestCase):
             lowered = key.lower()
             for forbidden in ("passw", "secret", "token"):
                 self.assertNotIn(forbidden, lowered, f"{key!r} looks credential-shaped")
+
+
+def _staging_policy(**overrides) -> staging.StagingPolicy:
+    kwargs = dict(
+        host="127.0.0.1",
+        port=5432,
+        dbname="vicmap",
+        user="vicmap_loader",
+        staging_schema="vicmap_staging",
+        publish_schema="vicmap",
+        target_srid=7899,
+        index_columns=("pfi",),
+        gt=20000,
+        connect_timeout_seconds=10,
+        statement_timeout_seconds=3600,
+        lock_timeout_seconds=30,
+    )
+    kwargs.update(overrides)
+    return staging.StagingPolicy(**kwargs)
+
+
+class StagingTableNameTest(unittest.TestCase):
+    """No database. D-48's naming, and its two structural limits."""
+
+    def test_happy_path_composes_and_casefolds(self):
+        self.assertEqual(
+            staging.staging_table_name("vmadd_address", "20260918T041500Z"),
+            "vmadd_address_20260918t041500z",
+        )
+
+    def test_two_different_run_timestamps_produce_two_different_names(self):
+        first = staging.staging_table_name("vmadd_address", "20260918T041500Z")
+        second = staging.staging_table_name("vmadd_address", "20260919T041500Z")
+        self.assertNotEqual(first, second)
+
+    def test_over_length_result_raises_closed_failure(self):
+        with self.assertRaises(staging.StagingFailure):
+            staging.staging_table_name("a" * 60, "20260918T041500Z")
+
+    def test_uppercase_charset_violation_raises_closed_failure(self):
+        with self.assertRaises(staging.StagingFailure):
+            staging.staging_table_name("VMADD", "20260918T041500Z")
+
+    def test_hyphen_charset_violation_raises_closed_failure(self):
+        with self.assertRaises(staging.StagingFailure):
+            staging.staging_table_name("vm-add", "20260918T041500Z")
+
+
+class LoadCommandConstructionTest(unittest.TestCase):
+    """No database, no subprocess. Pure argv construction (D-41..D-52)."""
+
+    def test_command_contains_every_required_flag_and_value(self):
+        policy = _staging_policy()
+        command = staging.build_ogr2ogr_command(
+            dataset_path="/tmp/VMADD.gdb",
+            layer_name="ADDRESS",
+            staging_table="vmadd_address_20260918t041500z",
+            policy=policy,
+        )
+        needed = [
+            "SCHEMA=vicmap_staging",
+            "GEOMETRY_NAME=geom",
+            "FID=gid",
+            "SPATIAL_INDEX=NONE",
+            "LAUNDER=YES",
+            "PRECISION=YES",
+            "EPSG:7899",
+            "PG_USE_COPY",
+            "OGR_CT_ONLY_BEST",
+            "OGR_CT_ALLOW_BALLPARK",
+            "20000",
+        ]
+        for token in needed:
+            with self.subTest(token=token):
+                self.assertIn(token, command)
+
+    def test_nln_element_carries_the_bare_table_name_with_no_schema_dot(self):
+        policy = _staging_policy()
+        command = staging.build_ogr2ogr_command(
+            dataset_path="/tmp/VMADD.gdb",
+            layer_name="ADDRESS",
+            staging_table="vmadd_address_20260918t041500z",
+            policy=policy,
+        )
+        self.assertNotIn(".", command[command.index("-nln") + 1])
+
+    def test_no_credential_in_the_returned_argv(self):
+        sentinel = "sentinel-secret-9f3a"
+        policy = _staging_policy()
+        command = staging.build_ogr2ogr_command(
+            dataset_path="/tmp/VMADD.gdb",
+            layer_name="ADDRESS",
+            staging_table="vmadd_address_20260918t041500z",
+            policy=policy,
+        )
+        for element in command:
+            self.assertNotIn(sentinel, element)
+
+    def test_load_layer_passes_password_only_via_env_never_argv(self):
+        sentinel = "sentinel-secret-9f3a"
+        policy = _staging_policy()
+        captured: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as diagnostics_dir:
+            with patch.object(staging.subprocess, "run", side_effect=fake_run):
+                staging.load_layer(
+                    dataset_path="/tmp/VMADD.gdb",
+                    layer_name="ADDRESS",
+                    staging_table="vmadd_address_20260918t041500z",
+                    policy=policy,
+                    password=sentinel,
+                    diagnostics_dir=diagnostics_dir,
+                )
+
+        self.assertEqual(sentinel, captured["env"]["PGPASSWORD"])
+        for element in captured["command"]:
+            self.assertNotIn(sentinel, element)
+
+
+class DriverImportPolicyTest(unittest.TestCase):
+    """No database. T-03 structural proof: staging.py alone touches a driver."""
+
+    def test_staging_is_the_only_module_referencing_a_database_driver(self):
+        package_dir = REPO_ROOT / "vicmap_acquire"
+        forbidden_tokens = ("psycopg", "psycopg2", "sqlalchemy", "asyncpg", "pg8000")
+        offending = []
+        for path in sorted(package_dir.glob("*.py")):
+            if path.name == "staging.py":
+                continue
+            text = path.read_text(encoding="utf-8")
+            for token in forbidden_tokens:
+                if token in text:
+                    offending.append((path.name, token))
+        self.assertEqual([], offending)
+
+    def test_importing_staging_creates_no_runs_directory_and_completes_quickly(self):
+        """Importing ``vicmap_acquire.staging`` performs no connection,
+        subprocess, or filesystem work: no driver is loaded before the
+        import line runs, the driver is present immediately afterward
+        (proving the reference is real, not conditionally deferred), no
+        ``runs/`` directory is created in a fresh empty cwd, and the whole
+        import completes well inside a bounded timeout -- a real network
+        connection attempt would not."""
+
+        scratch_dir = Path(tempfile.mkdtemp(prefix="staging-import-"))
+        self.addCleanup(shutil.rmtree, scratch_dir, ignore_errors=True)
+        script = (
+            "import sys\n"
+            "assert 'psycopg' not in sys.modules, "
+            "'psycopg already imported before the import line'\n"
+            "import vicmap_acquire.staging\n"
+            "assert 'psycopg' in sys.modules, "
+            "'staging.py did not import its own declared driver'\n"
+            "print('staging imported cleanly')\n"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=scratch_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("staging imported cleanly", result.stdout)
+        self.assertFalse((scratch_dir / "runs").exists())
+
+
+class _LivePostgresMixin:
+    """Copied from ``tests.test_naming.PostgresKeywordOracleTest._connect`` --
+    same ``VICMAP_TEST_POSTGRES_DSN`` env var, same 2-second connect timeout,
+    same psycopg-then-psycopg2 import fallback, same ``skipTest`` on both the
+    missing-driver and unreachable-server paths. No test using this mixin may
+    require a reachable PostgreSQL server or an installed driver to pass."""
+
+    _DSN_ENV_VAR = "VICMAP_TEST_POSTGRES_DSN"
+    _CONNECT_TIMEOUT_SECONDS = 2
+
+    def _connect(self):
+        try:
+            import psycopg as _driver  # psycopg3, preferred if present
+        except ImportError:
+            try:
+                import psycopg2 as _driver  # type: ignore[no-redef]
+            except ImportError:
+                self.skipTest(
+                    "no PostgreSQL driver (psycopg or psycopg2) installed -- "
+                    "live staging check skipped, not failed"
+                )
+
+        dsn = os.environ.get(self._DSN_ENV_VAR)
+        try:
+            if dsn:
+                connection = _driver.connect(
+                    dsn, connect_timeout=self._CONNECT_TIMEOUT_SECONDS
+                )
+            else:
+                connection = _driver.connect(
+                    dbname="postgres", connect_timeout=self._CONNECT_TIMEOUT_SECONDS
+                )
+        except Exception as exc:  # noqa: BLE001 -- any connect failure just skips
+            self.skipTest(
+                f"no reachable PostgreSQL server for live staging check: {exc}"
+            )
+        return connection
+
+    def _connection_params(self) -> dict[str, object]:
+        """Structured host/port/dbname/user/password for a ``StagingPolicy``,
+        parsed from ``VICMAP_TEST_POSTGRES_DSN`` (or this mixin's own
+        local-default, mirroring ``_connect``). Only ever called after
+        ``_connect`` has already proven the driver is importable."""
+
+        from psycopg.conninfo import conninfo_to_dict
+
+        dsn = os.environ.get(self._DSN_ENV_VAR)
+        parsed = conninfo_to_dict(dsn) if dsn else {}
+        return {
+            "host": str(parsed.get("host") or "127.0.0.1"),
+            "port": int(parsed.get("port") or 5432),
+            "dbname": str(parsed.get("dbname") or "postgres"),
+            "user": str(parsed.get("user") or os.environ.get("USER") or "postgres"),
+            "password": str(parsed.get("password") or ""),
+        }
+
+
+class ConnectionIdentityTest(_LivePostgresMixin, unittest.TestCase):
+    """Skips without a server. DB-01/D-61."""
+
+    def test_identity_reports_all_six_fields_lowercase_and_no_fingerprint_key(self):
+        self._connect().close()
+        params = self._connection_params()
+        policy = _staging_policy(
+            host=params["host"],
+            port=params["port"],
+            dbname=params["dbname"],
+            user=params["user"],
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+        )
+        identity = staging.read_database_identity(policy, password=params["password"])
+
+        self.assertTrue(identity.host)
+        self.assertTrue(identity.port)
+        self.assertTrue(identity.dbname)
+        self.assertTrue(identity.role)
+        self.assertTrue(identity.server_version)
+        self.assertTrue(identity.postgis_version)
+        self.assertEqual(identity.dbname, identity.dbname.lower())
+        self.assertEqual(identity.role, identity.role.lower())
+
+        event = SuccessEvent.database_identity(
+            host=identity.host,
+            port=identity.port,
+            dbname=identity.dbname,
+            role=identity.role,
+            server_version=identity.server_version,
+            postgis_version=identity.postgis_version,
+        )
+        rendered = json.dumps(dict(event))
+        self.assertNotRegex(rendered, r'"[A-Za-z_]*fingerprint[A-Za-z_]*"')
+
+
+class LoadIntegrationTest(_LivePostgresMixin, unittest.TestCase):
+    """Skips without a server. DB-03/D-45/D-46/D-49, and production isolation."""
+
+    def setUp(self):
+        self.scratch_dir = Path(tempfile.mkdtemp(prefix="staging-load-"))
+        self.addCleanup(shutil.rmtree, self.scratch_dir, ignore_errors=True)
+        with zipfile.ZipFile(FIXTURE_ARCHIVE) as archive:
+            archive.extractall(self.scratch_dir)
+        candidates = list(self.scratch_dir.rglob("*.gdb"))
+        self.assertEqual(1, len(candidates))
+        self.dataset_path = candidates[0]
+
+    def _drop_schema(self, connection, schema_name: str) -> None:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE")
+            connection.commit()
+        finally:
+            connection.close()
+
+    def test_load_creates_table_with_expected_rows_columns_and_no_public_leak(self):
+        connection = self._connect()
+        params = self._connection_params()
+
+        schema_name = f"staging_load_test_{os.getpid()}"
+        with connection.cursor() as cursor:
+            cursor.execute(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE")
+            cursor.execute(f"CREATE SCHEMA {schema_name}")
+        connection.commit()
+        self.addCleanup(self._drop_schema, connection, schema_name)
+
+        policy = _staging_policy(
+            host=params["host"],
+            port=params["port"],
+            dbname=params["dbname"],
+            user=params["user"],
+            staging_schema=schema_name,
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+        )
+
+        staging.load_layer(
+            dataset_path=self.dataset_path,
+            layer_name="ADDRESS",
+            staging_table="vmadd_address_test",
+            policy=policy,
+            password=params["password"],
+            diagnostics_dir=self.scratch_dir,
+        )
+
+        with connection.cursor() as verify_cursor:
+            verify_cursor.execute(
+                f"SELECT COUNT(*) FROM {schema_name}.vmadd_address_test"
+            )
+            (row_count,) = verify_cursor.fetchone()
+            verify_cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (schema_name, "vmadd_address_test"),
+            )
+            columns = {row[0] for row in verify_cursor.fetchall()}
+            verify_cursor.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                "AND tablename = 'vmadd_address_test'"
+            )
+            public_hit = verify_cursor.fetchone()
+
+        self.assertEqual(2, row_count)
+        self.assertIn("geom", columns)
+        self.assertIn("gid", columns)
+        self.assertIsNone(public_hit)
+
+
+if __name__ == "__main__":
+    unittest.main()
