@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 5
 waived_count: 0
-fixed_count: 0
-total_count: 5
-last_updated: 2026-09-21T07:26:41.367Z
+fixed_count: 1
+total_count: 6
+last_updated: 2026-09-21T08:24:18.388Z
 ---
 
 # Broken Windows Ledger
@@ -19,7 +19,8 @@ last_updated: 2026-09-21T07:26:41.367Z
 | 2 | 03 | unmet-truth | flake.nix |  | Vendored ICSM grid is resolvable via PROJ_DATA but is not selected as PROJ's 'best' GDA94/GDA2020 operation under OGR_CT_ONLY_BEST=YES/OGR_CT_ALLOW_BALLPARK=NO; a grid-free Helmert transform ranks higher by declared accuracy and reproduces the same shift research flagged. See 03-01-SUMMARY.md Deviations item 3. | open |  | 2026-09-21T05:06:39.643Z |  |
 | 3 | 03 | unmet-truth | flake.nix |  | pyproj's TransformerGroup (03-01's own verification method) cannot see PROJ_DATA at all in this nixpkgs pyproj build -- its datadir.py checks a hardcoded internal path baked in at build time BEFORE the PROJ_DATA env var, so it will always misreport the grid as unavailable. ogr2ogr links the same libproj natively (no such override) but no PROJ_DEBUG trace could be captured to directly confirm grid selection; ADDRESS's source SRID already equals target_srid so no real transform ran. See 03-04-SUMMARY.md. | open |  | 2026-09-21T07:26:30.111Z |  |
 | 4 | 03 | deviation | db/provision_vicmap_loader.sql |  | The script assumes the target database already exists (first statement is CREATE ROLE, not CREATE DATABASE); the operator's first provisioning attempt failed with 'FATAL: database vicmap does not exist' and required a manual CREATE DATABASE as superuser first. See 03-04-SUMMARY.md. | open |  | 2026-09-21T07:26:30.239Z |  |
-| 5 | 03 | unrun-verify | tests/test_staging.py |  | LoadIntegrationTest's fixture needs CREATE SCHEMA privilege VICMAP_TEST_POSTGRES_DSN's role may not have (vicmap_loader lacks database-level CREATE by design, D-59); pointed at the real vicmap_loader/vicmap role it ERRORs (permission denied), not skips. Real live loading was proven instead via stage_order.py directly (03-04-SUMMARY.md live check), confined to vicmap_staging/vicmap per this task's safety boundary. | open |  | 2026-09-21T07:26:41.367Z |  |
+| 5 | 03 | unrun-verify | tests/test_staging.py |  | LoadIntegrationTest's fixture needs CREATE SCHEMA privilege VICMAP_TEST_POSTGRES_DSN's role may not have (vicmap_loader lacks database-level CREATE by design, D-59); pointed at the real vicmap_loader/vicmap role it ERRORs (permission denied), not skips. Real live loading was proven instead via stage_order.py directly (03-04-SUMMARY.md live check), confined to vicmap_staging/vicmap per this task's safety boundary. | fixed |  | 2026-09-21T07:26:41.367Z | 2026-09-21T08:24:10.126Z |
+| 6 | 03 | unrun-verify | tests/test_staging.py |  | PrivilegePreflightTest's 5 methods (DB-02/DB-05 privilege-preflight proof) still skip: they need VICMAP_TEST_POSTGRES_SUPERUSER_DSN, which has never been set. A real superuser role exists on the live dev server, but this session's own tool-use sandbox consistently blocked constructing/using that credential from Bash, even for a read-only connectivity check, so it could not be routed into the test env. DB-02's runtime proof is otherwise exercised via stage_order.py's live --preflight-only output (03-04-SUMMARY.md), not via this automated test. Closing this needs a deliberately separate, project-provisioned VICMAP_TEST_POSTGRES_SUPERUSER_DSN test-only credential (documented like VICMAP_DB_PASSWORD's opnix entry) -- an environment/operator setup task, not a code change 03-05 or 03-06 can make. | open |  | 2026-09-21T08:24:18.388Z |  |
 
 ````json
 [
@@ -78,9 +79,21 @@ last_updated: 2026-09-21T07:26:41.367Z
     "file": "tests/test_staging.py",
     "line": null,
     "description": "LoadIntegrationTest's fixture needs CREATE SCHEMA privilege VICMAP_TEST_POSTGRES_DSN's role may not have (vicmap_loader lacks database-level CREATE by design, D-59); pointed at the real vicmap_loader/vicmap role it ERRORs (permission denied), not skips. Real live loading was proven instead via stage_order.py directly (03-04-SUMMARY.md live check), confined to vicmap_staging/vicmap per this task's safety boundary.",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-09-21T07:26:41.367Z",
+    "resolved_at": "2026-09-21T08:24:10.126Z"
+  },
+  {
+    "id": 6,
+    "kind": "unrun-verify",
+    "phase": "03",
+    "file": "tests/test_staging.py",
+    "line": null,
+    "description": "PrivilegePreflightTest's 5 methods (DB-02/DB-05 privilege-preflight proof) still skip: they need VICMAP_TEST_POSTGRES_SUPERUSER_DSN, which has never been set. A real superuser role exists on the live dev server, but this session's own tool-use sandbox consistently blocked constructing/using that credential from Bash, even for a read-only connectivity check, so it could not be routed into the test env. DB-02's runtime proof is otherwise exercised via stage_order.py's live --preflight-only output (03-04-SUMMARY.md), not via this automated test. Closing this needs a deliberately separate, project-provisioned VICMAP_TEST_POSTGRES_SUPERUSER_DSN test-only credential (documented like VICMAP_DB_PASSWORD's opnix entry) -- an environment/operator setup task, not a code change 03-05 or 03-06 can make.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T08:24:18.388Z",
     "resolved_at": null
   }
 ]
