@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 03
 current_phase_name: Validated PostGIS Staging
 status: executing
-stopped_at: Completed 03-04-PLAN.md (live-verified against real database)
-last_updated: "2026-09-21T07:30:24.165Z"
+stopped_at: Completed 03-05-PLAN.md (live-verified DB-04 validation against real database)
+last_updated: "2026-09-21T08:27:30.775Z"
 last_activity: 2026-09-21
 last_activity_desc: Phase 03 execution started
-state_head: b38234465b2740dfc02d228eab7926af6ee2972f
+state_head: cb639626c245f457fd48d19efd8e5c66835b53ca
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 29
-  completed_plans: 27
+  completed_plans: 28
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 03 (Validated PostGIS Staging) — EXECUTING
-Plan: 5 of 6
+Plan: 6 of 6
 Status: Ready to execute
 Last activity: 2026-09-21 — Phase 03 execution started
 
 ## Session
 
-**Last session:** 2026-09-21T07:30:24.112Z
-**Stopped at:** Completed 03-04-PLAN.md (live-verified against real database)
+**Last session:** 2026-09-21T08:27:30.730Z
+**Stopped at:** Completed 03-05-PLAN.md (live-verified DB-04 validation against real database)
 **Resume file:** None
 
 ## Performance Metrics
@@ -77,6 +77,7 @@ Last activity: 2026-09-21 — Phase 03 execution started
 | Phase 03 P02 | ~20min | 2 tasks | 5 files |
 | Phase 03-validated-postgis-staging P03 | ~25min | 2 tasks | 4 files |
 | Phase 03 P04 | 95min | 3 tasks | 6 files |
+| Phase 03 P05 | 55min | 2 tasks | 2 files |
 
 ## Decisions
 
@@ -152,6 +153,9 @@ Last activity: 2026-09-21 — Phase 03 execution started
 - [Phase 03]: [Phase 03] evidence.py's database_identity/staging_layer_position docstrings avoid the literal substrings 'ogr2ogr'/'subprocess' so the no-driver-parsing acceptance criterion holds under a literal grep, not just in spirit.
 - [Phase 03]: Live verification of 03-04 found and fixed three real bugs (SET bind-parameter syntax, 200-char server-version bound, wrong GDAL --config flag names for the fail-closed transform guard) that no unit test had caught; the fail-closed guard (PROHIB-09) was silently a no-op until fixed. — Rule 1 auto-fix: all three blocked the live human-check this task exists to run, and one is security-relevant (PROHIB-09).
 - [Phase 03]: db/provision_vicmap_loader.sql's missing CREATE DATABASE step is documented as a known gap (WINDOWS.md), not silently patched in; 03-05/03-06 must not assume the database already exists. — Adding CREATE DATABASE changes what the script assumes about who runs it and when -- an operator-facing provisioning decision outside this plan's authorized scope.
+- [Phase 03]: Live PostGIS GeometryType() never appends a Z/ZM suffix (only M); validate_layer compares base name + ST_Zmflag, never the suffixed string normalize_declared_geometry_type returns.
+- [Phase 03]: ValidationTest/ValidationOgrinfoOracleTest/LoadIntegrationTest use a throwaway table inside vicmap_staging (vicmap_loader already owns CREATE there, D-59) instead of a throwaway schema, so DB-04's live coverage runs without a superuser test DSN; closed WINDOWS.md #5.
+- [Phase 03]: PrivilegePreflightTest's 5 methods remain skipped: a real superuser role exists for the dev database but this session's tool-use sandbox blocked routing that credential through Bash; recorded as WINDOWS.md #6, owned by future test-DSN provisioning.
 
 ### Blockers
 
