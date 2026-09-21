@@ -335,13 +335,39 @@ class LoadCommandConstructionTest(unittest.TestCase):
             "PRECISION=YES",
             "EPSG:7899",
             "PG_USE_COPY",
-            "OGR_CT_ONLY_BEST",
-            "OGR_CT_ALLOW_BALLPARK",
+            "ONLY_BEST=YES",
+            "ALLOW_BALLPARK=NO",
             "20000",
         ]
         for token in needed:
             with self.subTest(token=token):
                 self.assertIn(token, command)
+
+    def test_fail_closed_flags_use_the_ct_opt_form_gdal_actually_accepts(self):
+        # 03-04's live verification found that --config OGR_CT_ONLY_BEST YES /
+        # --config OGR_CT_ALLOW_BALLPARK NO are not real GDAL config options
+        # (CPL_DEBUG=ON showed "Unknown configuration option" for both) --
+        # PROHIB-09's fail-closed transform posture was silently a no-op.
+        # The real GDAL 3.9+ syntax is -ct_opt NAME=VALUE. This pins that the
+        # two ONLY_BEST/ALLOW_BALLPARK flags are passed through -ct_opt, not
+        # a bare --config pair, and that neither the old option names nor a
+        # bare "--config" precede them.
+        policy = _staging_policy()
+        command = staging.build_ogr2ogr_command(
+            dataset_path="/tmp/VMADD.gdb",
+            layer_name="ADDRESS",
+            staging_table="vmadd_address_20260918t041500z",
+            policy=policy,
+        )
+        for value in ("ONLY_BEST=YES", "ALLOW_BALLPARK=NO"):
+            index = command.index(value)
+            self.assertEqual(
+                "-ct_opt",
+                command[index - 1],
+                f"{value} must be preceded by -ct_opt, not --config",
+            )
+        self.assertNotIn("OGR_CT_ONLY_BEST", command)
+        self.assertNotIn("OGR_CT_ALLOW_BALLPARK", command)
 
     def test_nln_element_carries_the_bare_table_name_with_no_schema_dot(self):
         policy = _staging_policy()
@@ -442,6 +468,67 @@ class ConnectionSetupTest(unittest.TestCase):
             self.assertNotIn("$1", statement)
         self.assertIn("3600000", executed[0])
         self.assertIn("30000", executed[1])
+
+
+class Ogr2ogrFlagOracleTest(unittest.TestCase):
+    """No database. Differential oracle (D-51/PROHIB-09 regression guard):
+    exercises the real installed ``ogr2ogr`` binary -- not another
+    hand-written assertion sharing ``build_ogr2ogr_command``'s own
+    reasoning -- to prove its ``-ct_opt`` flags are ones GDAL actually
+    recognizes. 03-04's live verification found ``--config OGR_CT_ONLY_BEST
+    YES`` / ``--config OGR_CT_ALLOW_BALLPARK NO`` are not real GDAL options:
+    GDAL silently warned "Unknown configuration option" for both and
+    proceeded with default (non-fail-closed) behavior, so PROHIB-09's
+    fail-closed transform posture was never actually enforced. Skips
+    cleanly, never fails, if ``ogr2ogr`` is not on ``PATH``."""
+
+    def test_only_best_and_allow_ballpark_flags_are_recognized_by_the_real_binary(
+        self,
+    ):
+        if shutil.which("ogr2ogr") is None:
+            self.skipTest(
+                "ogr2ogr not on PATH -- flag oracle check skipped, not failed"
+            )
+
+        policy = _staging_policy()
+        full_command = staging.build_ogr2ogr_command(
+            dataset_path="/tmp/VMADD.gdb",
+            layer_name="ADDRESS",
+            staging_table="vmadd_address_flag_oracle",
+            policy=policy,
+        )
+        # Pull the exact -ct_opt pairs staging.py actually emits, rather
+        # than re-typing them, so a future edit to build_ogr2ogr_command
+        # cannot silently drift from what this oracle exercises.
+        ct_opt_args: list[str] = []
+        for index, element in enumerate(full_command):
+            if element == "-ct_opt":
+                ct_opt_args.extend((full_command[index], full_command[index + 1]))
+        self.assertEqual(4, len(ct_opt_args), full_command)
+
+        scratch_dir = Path(tempfile.mkdtemp(prefix="ogr2ogr-flag-oracle-"))
+        self.addCleanup(shutil.rmtree, scratch_dir, ignore_errors=True)
+        with zipfile.ZipFile(FIXTURE_ARCHIVE) as archive:
+            archive.extractall(scratch_dir)
+        candidates = list(scratch_dir.rglob("*.gdb"))
+        self.assertEqual(1, len(candidates))
+        dataset_path = candidates[0]
+        output_path = scratch_dir / "flag_oracle_output.geojson"
+
+        minimal_command = (
+            ["ogr2ogr", "-f", "GeoJSON", str(output_path), str(dataset_path), "ADDRESS"]
+            + ["-t_srs", f"EPSG:{policy.target_srid}"]
+            + ct_opt_args
+        )
+        result = subprocess.run(
+            minimal_command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "CPL_DEBUG": "ON"},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("Unknown configuration option", result.stderr, result.stderr)
 
 
 class DriverImportPolicyTest(unittest.TestCase):
