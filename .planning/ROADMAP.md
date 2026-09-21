@@ -139,7 +139,7 @@ Plans:
 
 - [x] 03-01-PLAN.md — Gate the `psycopg` supply chain, correct D-50's missing `proj-data`, and put the driver, `psql`, the reprojection grid, and the password secret in the dev shell.
 - [x] 03-02-PLAN.md — Add the `[database]` section, widen the policy contract to five sections, and make every database rule fail closed in one validator.
-- [ ] 03-03-PLAN.md — Extend the closed evidence vocabulary with the database boundary and add a digest-verified reader for Phase 2's frozen manifest.
+- [x] 03-03-PLAN.md — Extend the closed evidence vocabulary with the database boundary and add a digest-verified reader for Phase 2's frozen manifest.
 
 **Wave 2** *(blocked on Wave 1 completion)*
 

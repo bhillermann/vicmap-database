@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: 03
 current_phase_name: Validated PostGIS Staging
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-09-21T05:20:01.528Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-09-21T05:35:48.256Z"
 last_activity: 2026-09-21
 last_activity_desc: Phase 03 execution started
-state_head: 11aa7f51226c18e0a4ec116bf9edf54acf5d98d1
+state_head: b64f61db31e0f8a44b2ea24fa156eed4a6add1f3
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 29
-  completed_plans: 25
+  completed_plans: 26
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -36,14 +36,14 @@ See: .planning/PROJECT.md
 ## Current Position
 
 Phase: 03 (Validated PostGIS Staging) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 Status: Ready to execute
 Last activity: 2026-09-21 — Phase 03 execution started
 
 ## Session
 
-**Last session:** 2026-09-21T05:20:01.478Z
-**Stopped at:** Completed 03-02-PLAN.md
+**Last session:** 2026-09-21T05:35:48.212Z
+**Stopped at:** Completed 03-03-PLAN.md
 **Resume file:** None
 
 ## Performance Metrics
@@ -75,6 +75,7 @@ Last activity: 2026-09-21 — Phase 03 execution started
 | Phase 02 P09 | 11min | 2 tasks | 2 files |
 | Phase 03-validated-postgis-staging P01 | ~55min | 3 tasks | 1 files |
 | Phase 03 P02 | ~20min | 2 tasks | 5 files |
+| Phase 03-validated-postgis-staging P03 | ~25min | 2 tasks | 4 files |
 
 ## Decisions
 
@@ -146,6 +147,8 @@ Last activity: 2026-09-21 — Phase 03 execution started
 - [Phase 03]: Task 2 checkpoint: operator selected vendor-fetchurl (option A) for the GDA94/GDA2020 grid, superseding D-50's nonexistent proj-data package.
 - [Phase 03]: Research Open Question 2 settled empirically: colon-joined PROJ_DATA is not honored by PROJ 9.8.1/pyproj 3.7.2 for grid resolution; only a single merged directory works.
 - [Phase 03]: Widened load_config's exact section-set check from four to five names for vicmap.toml's new [database] section; host validation accepts ipaddress.ip_address() or the dotted-hostname pattern (bare localhost rejected).
+- [Phase 03]: [Phase 03] Renamed manifest.py's new test classes to ManifestReadRoundTripTest/ManifestReadDigestTest to avoid rebinding the existing 26-test ManifestRoundTripTest class in tests/test_manifest.py.
+- [Phase 03]: [Phase 03] evidence.py's database_identity/staging_layer_position docstrings avoid the literal substrings 'ogr2ogr'/'subprocess' so the no-driver-parsing acceptance criterion holds under a literal grep, not just in spirit.
 
 ### Blockers
 
