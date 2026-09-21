@@ -774,7 +774,17 @@ class ConnectionIdentityTest(_LivePostgresMixin, unittest.TestCase):
 
 
 class LoadIntegrationTest(_LivePostgresMixin, unittest.TestCase):
-    """Skips without a server. DB-03/D-45/D-46/D-49, and production isolation."""
+    """Skips without a server. DB-03/D-45/D-46/D-49, and production isolation.
+
+    Loads into a throwaway TABLE inside ``vicmap_staging`` -- never a new
+    schema. ``vicmap_loader`` owns ``vicmap_staging`` (D-59) and already
+    holds ``CREATE`` there; a throwaway *schema* needs database-level
+    ``CREATE``, which D-59/DB-05 deliberately denies ``vicmap_loader``.
+    Pointed at the real role, this test's earlier ``CREATE SCHEMA`` form
+    ERRORed with a permission-denied failure rather than skipping cleanly
+    (see 03-04-SUMMARY.md and WINDOWS.md's now-resolved entry) -- that was a
+    defect in the test's own fixture, not in the provisioning; this table-
+    scoped form needs no privilege ``vicmap_loader`` does not already have."""
 
     def setUp(self):
         self.scratch_dir = Path(tempfile.mkdtemp(prefix="staging-load-"))
@@ -785,10 +795,14 @@ class LoadIntegrationTest(_LivePostgresMixin, unittest.TestCase):
         self.assertEqual(1, len(candidates))
         self.dataset_path = candidates[0]
 
-    def _drop_schema(self, connection, schema_name: str) -> None:
+    def _drop_table(self, connection, table_name: str) -> None:
         try:
             with connection.cursor() as cursor:
-                cursor.execute(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE")
+                cursor.execute(
+                    staging.sql.SQL("DROP TABLE IF EXISTS {table}").format(
+                        table=staging.sql.Identifier("vicmap_staging", table_name)
+                    )
+                )
             connection.commit()
         finally:
             connection.close()
@@ -797,26 +811,28 @@ class LoadIntegrationTest(_LivePostgresMixin, unittest.TestCase):
         connection = self._connect()
         params = self._connection_params()
 
-        schema_name = f"staging_load_test_{os.getpid()}"
+        table_name = f"staging_load_test_{os.getpid()}"
         with connection.cursor() as cursor:
-            cursor.execute(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE")
-            cursor.execute(f"CREATE SCHEMA {schema_name}")
+            cursor.execute(
+                staging.sql.SQL("DROP TABLE IF EXISTS {table}").format(
+                    table=staging.sql.Identifier("vicmap_staging", table_name)
+                )
+            )
         connection.commit()
-        self.addCleanup(self._drop_schema, connection, schema_name)
+        self.addCleanup(self._drop_table, connection, table_name)
 
         policy = _staging_policy(
             host=params["host"],
             port=params["port"],
             dbname=params["dbname"],
             user=params["user"],
-            staging_schema=schema_name,
             connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
         )
 
         staging.load_layer(
             dataset_path=self.dataset_path,
             layer_name="ADDRESS",
-            staging_table="vmadd_address_test",
+            staging_table=table_name,
             policy=policy,
             password=params["password"],
             diagnostics_dir=self.scratch_dir,
@@ -824,18 +840,21 @@ class LoadIntegrationTest(_LivePostgresMixin, unittest.TestCase):
 
         with connection.cursor() as verify_cursor:
             verify_cursor.execute(
-                f"SELECT COUNT(*) FROM {schema_name}.vmadd_address_test"
+                staging.sql.SQL("SELECT COUNT(*) FROM {table}").format(
+                    table=staging.sql.Identifier("vicmap_staging", table_name)
+                )
             )
             (row_count,) = verify_cursor.fetchone()
             verify_cursor.execute(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema = %s AND table_name = %s",
-                (schema_name, "vmadd_address_test"),
+                ("vicmap_staging", table_name),
             )
             columns = {row[0] for row in verify_cursor.fetchall()}
             verify_cursor.execute(
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
-                "AND tablename = 'vmadd_address_test'"
+                "AND tablename = %s",
+                (table_name,),
             )
             public_hit = verify_cursor.fetchone()
 
@@ -1019,6 +1038,477 @@ class PrivilegePreflightTest(_LivePostgresMixin, unittest.TestCase):
             staging.preflight_staging_privileges(
                 self._policy(target_srid=unknown_srid), password=self.role_password
             )
+
+
+class ValidationTest(_LivePostgresMixin, unittest.TestCase):
+    """Skips without a server. DB-04: the full ``validate_layer`` contract,
+    exercised against real geometry this test writes into a throwaway
+    TABLE it creates and drops itself, inside ``vicmap_staging`` -- never a
+    new schema. ``validate_layer`` never calls
+    ``preflight_staging_privileges``, and ``vicmap_loader`` already holds
+    ``CREATE`` on its own staging schema (D-59); creating a table there
+    needs no elevated privilege, unlike a throwaway *schema* (see
+    ``LoadIntegrationTest``'s docstring and WINDOWS.md's now-resolved entry
+    for the identical defect that pattern used to hit). This class
+    therefore needs only ``VICMAP_TEST_POSTGRES_DSN``, not a superuser DSN."""
+
+    def setUp(self):
+        self._connect().close()  # proves driver + reachable server, or skips
+        self.params = self._connection_params()
+        self._table_counter = 0
+        self._created_tables: list[str] = []
+        self.addCleanup(self._drop_created_tables)
+
+    def _drop_created_tables(self) -> None:
+        if not self._created_tables:
+            return
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                for table_name in self._created_tables:
+                    cursor.execute(
+                        staging.sql.SQL("DROP TABLE IF EXISTS {table}").format(
+                            table=staging.sql.Identifier("vicmap_staging", table_name)
+                        )
+                    )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _policy(self, **overrides) -> staging.StagingPolicy:
+        kwargs = dict(
+            host=self.params["host"],
+            port=self.params["port"],
+            dbname=self.params["dbname"],
+            user=self.params["user"],
+            staging_schema="vicmap_staging",
+            publish_schema="vicmap",
+            target_srid=7899,
+            index_columns=("pfi",),
+            gt=20000,
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+            statement_timeout_seconds=3600,
+            lock_timeout_seconds=30,
+        )
+        kwargs.update(overrides)
+        return staging.StagingPolicy(**kwargs)
+
+    def _manifest_layer(self, **overrides) -> ManifestLayer:
+        kwargs = dict(
+            dataset_relative_path="x.gdb",
+            dataset_stem="x",
+            layer_name="LAYER",
+            driver="OpenFileGDB",
+            spatial=True,
+            geometry_type="Point",
+            geometry_column="geom",
+            fid_column="gid",
+            feature_count=1,
+            source_wkt=None,
+            epsg=7899,
+            extent=None,
+            fields=(),
+        )
+        kwargs.update(overrides)
+        profile = LayerProfile(**kwargs)
+        return ManifestLayer(profile=profile, target_table="x")
+
+    def _new_table_name(self, case: str) -> str:
+        self._table_counter += 1
+        name = f"claude_validation_test_{os.getpid()}_{self._table_counter}_{case}"
+        self._created_tables.append(name)
+        return name
+
+    def _create_geometry_table(
+        self, table_name: str, rows: list[tuple[str | None, int | None]]
+    ) -> None:
+        connection = self._connect()
+        try:
+            table_ref = staging.sql.Identifier("vicmap_staging", table_name)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    staging.sql.SQL(
+                        "CREATE TABLE {table} (gid serial PRIMARY KEY, geom geometry)"
+                    ).format(table=table_ref)
+                )
+                for wkt, srid in rows:
+                    if wkt is None:
+                        cursor.execute(
+                            staging.sql.SQL(
+                                "INSERT INTO {table} (geom) VALUES (NULL)"
+                            ).format(table=table_ref)
+                        )
+                    else:
+                        cursor.execute(
+                            staging.sql.SQL(
+                                "INSERT INTO {table} (geom) VALUES (ST_GeomFromText(%s, %s))"
+                            ).format(table=table_ref),
+                            (wkt, srid),
+                        )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _create_non_spatial_table(self, table_name: str, row_count: int) -> None:
+        connection = self._connect()
+        try:
+            table_ref = staging.sql.Identifier("vicmap_staging", table_name)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    staging.sql.SQL(
+                        "CREATE TABLE {table} (gid serial PRIMARY KEY, name text)"
+                    ).format(table=table_ref)
+                )
+                for index in range(row_count):
+                    cursor.execute(
+                        staging.sql.SQL(
+                            "INSERT INTO {table} (name) VALUES (%s)"
+                        ).format(table=table_ref),
+                        (f"row{index}",),
+                    )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def test_clean_spatial_layer_returns_full_record(self):
+        table = self._new_table_name("clean")
+        self._create_geometry_table(table, [("POINT(144.9 -37.8)", 7899)] * 3)
+        manifest_layer = self._manifest_layer(feature_count=3, geometry_type="Point")
+        result = staging.validate_layer(
+            manifest_layer=manifest_layer,
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertEqual(3, result.row_count)
+        self.assertEqual("POINT", result.geometry_type)
+        self.assertEqual(7899, result.srid)
+        self.assertEqual(0, result.repaired_count)
+        self.assertEqual(4, len(result.extent))
+
+    def test_row_count_mismatch_raises(self):
+        table = self._new_table_name("rowcount")
+        self._create_geometry_table(table, [("POINT(1 1)", 7899)] * 2)
+        manifest_layer = self._manifest_layer(feature_count=3, geometry_type="Point")
+        with self.assertRaises(staging.RowCountMismatch):
+            staging.validate_layer(
+                manifest_layer=manifest_layer,
+                staging_table=table,
+                policy=self._policy(),
+                password=self.params["password"],
+            )
+
+    def test_wrong_srid_raises(self):
+        table = self._new_table_name("wrongsrid")
+        self._create_geometry_table(table, [("POINT(1 1)", 4326)])
+        manifest_layer = self._manifest_layer(feature_count=1, geometry_type="Point")
+        with self.assertRaises(staging.SridMismatch):
+            staging.validate_layer(
+                manifest_layer=manifest_layer,
+                staging_table=table,
+                policy=self._policy(),
+                password=self.params["password"],
+            )
+
+    def test_mixed_srid_raises(self):
+        table = self._new_table_name("mixedsrid")
+        self._create_geometry_table(
+            table, [("POINT(1 1)", 7899), ("POINT(1 1)", 4326)]
+        )
+        manifest_layer = self._manifest_layer(feature_count=2, geometry_type="Point")
+        with self.assertRaises(staging.SridMismatch):
+            staging.validate_layer(
+                manifest_layer=manifest_layer,
+                staging_table=table,
+                policy=self._policy(),
+                password=self.params["password"],
+            )
+
+    def test_wrong_geometry_type_raises(self):
+        table = self._new_table_name("wrongtype")
+        self._create_geometry_table(table, [("POINT(1 1)", 7899)])
+        manifest_layer = self._manifest_layer(feature_count=1, geometry_type="Polygon")
+        with self.assertRaises(staging.GeometryTypeMismatch):
+            staging.validate_layer(
+                manifest_layer=manifest_layer,
+                staging_table=table,
+                policy=self._policy(),
+                password=self.params["password"],
+            )
+
+    def test_dimensionality_mismatch_raises(self):
+        # A POINTZ table declared as plain Point: GeometryType() alone
+        # cannot catch this (live verification found it reports bare
+        # 'POINT' for both), so this pins that ST_Zmflag is what actually
+        # raises the mismatch. See normalize_declared_geometry_type's
+        # docstring in staging.py for the full live finding.
+        table = self._new_table_name("dimension")
+        self._create_geometry_table(table, [("POINT Z (1 1 1)", 7899)])
+        manifest_layer = self._manifest_layer(feature_count=1, geometry_type="Point")
+        with self.assertRaises(staging.GeometryTypeMismatch):
+            staging.validate_layer(
+                manifest_layer=manifest_layer,
+                staging_table=table,
+                policy=self._policy(),
+                password=self.params["password"],
+            )
+
+    def test_null_geometry_raises(self):
+        table = self._new_table_name("nullgeom")
+        self._create_geometry_table(table, [("POINT(1 1)", 7899), (None, None)])
+        manifest_layer = self._manifest_layer(feature_count=2, geometry_type="Point")
+        with self.assertRaises(staging.GeometryTypeMismatch):
+            staging.validate_layer(
+                manifest_layer=manifest_layer,
+                staging_table=table,
+                policy=self._policy(),
+                password=self.params["password"],
+            )
+
+    def test_non_spatial_layer_reports_not_applicable(self):
+        table = self._new_table_name("nonspatial")
+        self._create_non_spatial_table(table, 2)
+        manifest_layer = self._manifest_layer(
+            feature_count=2,
+            geometry_type=None,
+            spatial=False,
+            geometry_column=None,
+        )
+        result = staging.validate_layer(
+            manifest_layer=manifest_layer,
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertEqual(2, result.row_count)
+        self.assertEqual(staging.NOT_APPLICABLE, result.geometry_type)
+        self.assertEqual(staging.NOT_APPLICABLE, result.srid)
+        self.assertEqual(staging.NOT_APPLICABLE, result.repaired_count)
+        self.assertEqual(staging.NOT_APPLICABLE, result.extent)
+
+    def _pick_repair_candidates(self) -> tuple[str | None, str | None]:
+        """Ask the server itself which known-invalid WKT candidates repair
+        type-preserving vs type-changing under ST_MakeValid, rather than
+        hard-coding the answer -- this plan's explicit instruction, since
+        GEOS's repair behavior for a given invalid shape is version-
+        dependent."""
+
+        candidates = [
+            "POLYGON((0 0, 0 10, 10 10, 10 0, 0 0),(0 0, 0 10, 10 10, 10 0, 0 0))",
+            "POLYGON((0 0, 1 1, 1 0, 0 1, 0 0))",
+            "POLYGON((0 0, 4 0, 4 4, 2 0, 0 4, 0 0))",
+            "POLYGON((0 0, 1 0, 2 0, 0 0))",
+        ]
+        preserving = None
+        changing = None
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                for wkt in candidates:
+                    cursor.execute(
+                        "SELECT ST_IsValid(g), "
+                        "GeometryType(ST_MakeValid(g)) = GeometryType(g) "
+                        "FROM (SELECT ST_GeomFromText(%s, 7899) AS g) AS t",
+                        (wkt,),
+                    )
+                    is_valid, preserves_type = cursor.fetchone()
+                    if is_valid:
+                        continue
+                    if preserves_type and preserving is None:
+                        preserving = wkt
+                    if not preserves_type and changing is None:
+                        changing = wkt
+        finally:
+            connection.close()
+        return preserving, changing
+
+    def test_repair_preserving_type_is_repaired_and_counted(self):
+        preserving, _ = self._pick_repair_candidates()
+        if preserving is None:
+            self.skipTest(
+                "no type-preserving invalid geometry candidate found on this server"
+            )
+        table = self._new_table_name("repairok")
+        self._create_geometry_table(table, [(preserving, 7899)])
+        manifest_layer = self._manifest_layer(feature_count=1, geometry_type="Polygon")
+        result = staging.validate_layer(
+            manifest_layer=manifest_layer,
+            staging_table=table,
+            policy=self._policy(),
+            password=self.params["password"],
+        )
+        self.assertEqual(1, result.repaired_count)
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    staging.sql.SQL(
+                        "SELECT COUNT(*) FROM {table} WHERE NOT ST_IsValid(geom)"
+                    ).format(table=staging.sql.Identifier("vicmap_staging", table))
+                )
+                (remaining,) = cursor.fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(0, remaining)
+
+    def test_repair_changing_type_raises_and_writes_nothing(self):
+        _, changing = self._pick_repair_candidates()
+        if changing is None:
+            self.skipTest(
+                "no type-changing invalid geometry candidate found on this server"
+            )
+        table = self._new_table_name("repairbad")
+        self._create_geometry_table(table, [(changing, 7899)])
+
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    staging.sql.SQL("SELECT ST_AsBinary(geom) FROM {table}").format(
+                        table=staging.sql.Identifier("vicmap_staging", table)
+                    )
+                )
+                before = cursor.fetchall()
+        finally:
+            connection.close()
+
+        manifest_layer = self._manifest_layer(feature_count=1, geometry_type="Polygon")
+        with self.assertRaises(staging.GeometryRepairChangedType):
+            staging.validate_layer(
+                manifest_layer=manifest_layer,
+                staging_table=table,
+                policy=self._policy(),
+                password=self.params["password"],
+            )
+
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    staging.sql.SQL("SELECT ST_AsBinary(geom) FROM {table}").format(
+                        table=staging.sql.Identifier("vicmap_staging", table)
+                    )
+                )
+                after = cursor.fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(before, after)
+
+
+class ValidationOgrinfoOracleTest(_LivePostgresMixin, unittest.TestCase):
+    """Skips without a server. The independent oracle CONTEXT.md names as
+    this phase's verification aid: after loading the real
+    ``Order_TRACER1.zip`` ADDRESS layer into a throwaway table inside
+    ``vicmap_staging`` through the real ``load_layer``, runs ``ogrinfo``
+    from the same pinned GDAL against the loaded table (via its ``PG:``
+    connection string) and asserts its reported feature count, geometry
+    type, and CRS agree with what ``validate_layer`` reported. A hand-
+    written assertion against ``validate_layer``'s own query set would
+    share that query set's blind spot; ``ogrinfo`` reads the table through
+    a different code path entirely -- the same differential-oracle
+    discipline ``test_discovery_differential.py`` and the live
+    ``pg_get_keywords()`` check already apply elsewhere in this repository."""
+
+    def setUp(self):
+        self._connect().close()
+        self.params = self._connection_params()
+        self.scratch_dir = Path(tempfile.mkdtemp(prefix="ogrinfo-oracle-"))
+        self.addCleanup(shutil.rmtree, self.scratch_dir, ignore_errors=True)
+        with zipfile.ZipFile(FIXTURE_ARCHIVE) as archive:
+            archive.extractall(self.scratch_dir)
+        candidates = list(self.scratch_dir.rglob("*.gdb"))
+        self.assertEqual(1, len(candidates))
+        self.dataset_path = candidates[0]
+        self.table_name = f"claude_ogrinfo_oracle_{os.getpid()}"
+        self.addCleanup(self._drop_table)
+
+    def _drop_table(self) -> None:
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    staging.sql.SQL("DROP TABLE IF EXISTS {table}").format(
+                        table=staging.sql.Identifier("vicmap_staging", self.table_name)
+                    )
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def test_ogrinfo_agrees_with_validate_layer(self):
+        if shutil.which("ogrinfo") is None:
+            self.skipTest("ogrinfo not on PATH -- oracle check skipped, not failed")
+
+        policy = staging.StagingPolicy(
+            host=self.params["host"],
+            port=self.params["port"],
+            dbname=self.params["dbname"],
+            user=self.params["user"],
+            staging_schema="vicmap_staging",
+            publish_schema="vicmap",
+            target_srid=7899,
+            index_columns=("pfi",),
+            gt=20000,
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+            statement_timeout_seconds=3600,
+            lock_timeout_seconds=30,
+        )
+        staging.load_layer(
+            dataset_path=self.dataset_path,
+            layer_name="ADDRESS",
+            staging_table=self.table_name,
+            policy=policy,
+            password=self.params["password"],
+            diagnostics_dir=self.scratch_dir,
+        )
+
+        manifest_layer = ManifestLayer(
+            profile=LayerProfile(
+                dataset_relative_path="ADDRESS.gdb",
+                dataset_stem="ADDRESS",
+                layer_name="ADDRESS",
+                driver="OpenFileGDB",
+                spatial=True,
+                geometry_type="Point",
+                geometry_column="geom",
+                fid_column="gid",
+                feature_count=2,
+                source_wkt=None,
+                epsg=7899,
+                extent=None,
+                fields=(),
+            ),
+            target_table="vmadd_address",
+        )
+        result = staging.validate_layer(
+            manifest_layer=manifest_layer,
+            staging_table=self.table_name,
+            policy=policy,
+            password=self.params["password"],
+        )
+
+        connection_string = (
+            f"PG:dbname={self.params['dbname']} host={self.params['host']} "
+            f"port={self.params['port']} user={self.params['user']} "
+            "active_schema=vicmap_staging"
+        )
+        oracle_command = ["ogrinfo", "-json", "-so", connection_string, self.table_name]
+        oracle_result = subprocess.run(
+            oracle_command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "PGPASSWORD": self.params["password"]},
+        )
+        self.assertEqual(0, oracle_result.returncode, oracle_result.stderr)
+        payload = json.loads(oracle_result.stdout)
+        layer_payload = payload["layers"][0]
+
+        self.assertEqual(result.row_count, layer_payload["featureCount"])
+        self.assertIn("Point", layer_payload["geometryFields"][0]["type"])
+        identifier = layer_payload["geometryFields"][0]["coordinateSystem"]["projjson"]["id"]
+        self.assertEqual("EPSG", identifier["authority"])
+        self.assertEqual(result.srid, int(identifier["code"]))
 
 
 if __name__ == "__main__":

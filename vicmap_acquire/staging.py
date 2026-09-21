@@ -598,6 +598,32 @@ def normalize_declared_geometry_type(declared: object) -> tuple[str, int]:
     return base + suffix_token, _ZM_SUFFIX_FLAGS[suffix_token]
 
 
+# Try the longest suffix first so "POINTZM" strips to "POINT" in one pass
+# rather than mis-stripping "M" and leaving "POINTZ" unresolved.
+_SUFFIX_TOKENS_BY_LENGTH = ("ZM", "Z", "M")
+
+_EXTENT_TEXT = re.compile(
+    r"BOX\(\s*(?P<xmin>[+-]?[0-9.eE]+)\s+(?P<ymin>[+-]?[0-9.eE]+)\s*,\s*"
+    r"(?P<xmax>[+-]?[0-9.eE]+)\s+(?P<ymax>[+-]?[0-9.eE]+)\s*\)"
+)
+
+
+def _geometry_type_base_name(name: str) -> str:
+    """Strip a trailing ZM/Z/M suffix from a geometry-type name, leaving it
+    unchanged if no such suffix is present or stripping it would not yield
+    one of the seven OGC base names. Used to compare
+    ``normalize_declared_geometry_type``'s suffixed contract against
+    PostGIS's own ``GeometryType(geom)`` output -- which, per the live
+    finding documented on that function, only ever carries an ``M`` suffix
+    in practice. The same helper handles both vocabularies so the
+    comparison never depends on which one produced a given string."""
+
+    for suffix in _SUFFIX_TOKENS_BY_LENGTH:
+        if name.endswith(suffix) and name[: -len(suffix)] in _BASE_GEOMETRY_NAMES:
+            return name[: -len(suffix)]
+    return name
+
+
 def build_validation_query(
     *, staging_schema: str, staging_table: str, spatial: bool
 ) -> "sql.Composed":
@@ -645,15 +671,36 @@ def build_repair_statement(
     *, staging_schema: str, staging_table: str
 ) -> "sql.Composed":
     """D-54's counted repair: ``UPDATE ... SET geom = ST_MakeValid(geom)
-    WHERE NOT ST_IsValid(geom)``. Pure, ``sql.Identifier``-composed. Never
-    ``ST_CollectionExtract`` -- D-55 explicitly rejected that salvage
-    because it discards geometry silently -- and never a hand-rolled
-    ``buffer(0)`` repair."""
+    WHERE NOT ST_IsValid(geom)``. Pure, ``sql.Identifier``-composed. D-55
+    explicitly rejected a geometry-collection-extracting salvage function
+    because it discards geometry silently, and rejected a hand-rolled
+    zero-distance-buffer repair too -- this module never calls either."""
 
     table_ref = sql.Identifier(staging_schema, staging_table)
     return sql.SQL(
         "UPDATE {table} SET geom = ST_MakeValid(geom) WHERE NOT ST_IsValid(geom)"
     ).format(table=table_ref)
+
+
+def _parse_extent(text: object) -> tuple[float, float, float, float]:
+    """Parse PostGIS's ``ST_Extent(geom)::text`` ``BOX(xmin ymin,xmax ymax)``
+    form into the four floats ``LayerValidation.extent`` holds. Never
+    called on a table this function's caller has not already proven holds
+    at least one row (an empty table's ``ST_Extent`` is ``NULL``, which
+    ``row_count``'s earlier ``RowCountMismatch`` check would already have
+    stopped the run over, for any manifest with a positive feature count)."""
+
+    if not isinstance(text, str):
+        raise LoadFailed()
+    match = _EXTENT_TEXT.fullmatch(text.strip())
+    if match is None:
+        raise LoadFailed()
+    return (
+        float(match["xmin"]),
+        float(match["ymin"]),
+        float(match["xmax"]),
+        float(match["ymax"]),
+    )
 
 
 def validate_layer(
@@ -663,35 +710,147 @@ def validate_layer(
     policy: StagingPolicy,
     password: str,
 ) -> LayerValidation:
-    """DB-04, row-count only for now (Task 2 of 03-04). Raises
-    ``RowCountMismatch`` when the staging table's row count differs from
-    ``manifest_layer.profile.feature_count`` (D-37's exact count, D-56's
-    baseline). 03-05 Task 2 fills in the spatial checks; the signature and
-    return type stay."""
+    """DB-04: validate the staging table this run just loaded, against the
+    manifest's own baseline (D-53/D-56/D-57). The subject is the staging
+    table after ``ogr2ogr``'s ``-t_srs`` transform -- never the source file.
+    The profile is selected by ``manifest_layer.profile.spatial`` (D-57),
+    not by probing the table or checking whether ``geometry_type`` is
+    ``None``. Every disagreement raises its own named ``StagingFailure``
+    subclass; an invalid geometry whose ``ST_MakeValid`` output changes
+    ``GeometryType`` is never written, and a repair that leaves a row
+    invalid is never committed (the connection's implicit rollback on close
+    undoes the partial ``UPDATE``)."""
 
+    spatial = manifest_layer.profile.spatial
+    table_ref = sql.Identifier(policy.staging_schema, staging_table)
     connection = _connect(policy, password)
     try:
-        with connection.cursor() as cursor:
-            table_ref = sql.Identifier(policy.staging_schema, staging_table)
-            cursor.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(table_ref))
-            (row_count,) = cursor.fetchone()
+        query = build_validation_query(
+            staging_schema=policy.staging_schema,
+            staging_table=staging_table,
+            spatial=spatial,
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(query)
+                row = cursor.fetchone()
+        except Exception:
+            raise LoadFailed() from None
+
+        if not spatial:
+            (row_count,) = row
+            if row_count != manifest_layer.profile.feature_count:
+                raise RowCountMismatch()
+            return LayerValidation(
+                staging_table=staging_table,
+                spatial=False,
+                row_count=row_count,
+                geometry_type=NOT_APPLICABLE,
+                srid=NOT_APPLICABLE,
+                repaired_count=NOT_APPLICABLE,
+                extent=NOT_APPLICABLE,
+            )
+
+        (
+            row_count,
+            null_geom_count,
+            invalid_count,
+            type_changed_count,
+            srids_seen,
+            geometry_types_seen,
+            zmflags_seen,
+            extent_text,
+        ) = row
+
+        # 1. Row count first (D-37/D-56) -- every later check is meaningless
+        # over the wrong row set.
+        if row_count != manifest_layer.profile.feature_count:
+            raise RowCountMismatch()
+
+        # 2. A NULL geometry matches no declared type, and D-63 requires
+        # NOT NULL on the column before promotion -- naming the cause here
+        # is more useful than letting 03-06's ALTER surface a raw error.
+        if null_geom_count:
+            raise GeometryTypeMismatch()
+
+        # 3. SRID: exactly one value, and it must be the configured target.
+        srids_seen = list(srids_seen or [])
+        if len(srids_seen) != 1 or srids_seen[0] != policy.target_srid:
+            raise SridMismatch()
+
+        # 4. Geometry type and ZM dimensionality: exactly one of each,
+        # matching the manifest's declaration. Compared via
+        # _geometry_type_base_name (see normalize_declared_geometry_type's
+        # docstring for why) so PostGIS's own inconsistent GeometryType()
+        # suffix behavior never produces a false mismatch; ST_Zmflag is the
+        # authoritative Z/M signal.
+        expected_type, expected_zmflag = normalize_declared_geometry_type(
+            manifest_layer.profile.geometry_type
+        )
+        expected_base = _geometry_type_base_name(expected_type)
+        geometry_types_seen = list(geometry_types_seen or [])
+        zmflags_seen = list(zmflags_seen or [])
+        if (
+            len(geometry_types_seen) != 1
+            or _geometry_type_base_name(geometry_types_seen[0]) != expected_base
+        ):
+            raise GeometryTypeMismatch()
+        if len(zmflags_seen) != 1 or zmflags_seen[0] != expected_zmflag:
+            raise GeometryTypeMismatch()
+
+        # 5. Repair: a type-changing candidate blocks with nothing written;
+        # otherwise repair, then re-check invalidity is actually zero before
+        # ever committing the UPDATE.
+        repaired_count = 0
+        if invalid_count > 0:
+            if type_changed_count > 0:
+                raise GeometryRepairChangedType()
+            repair_statement = build_repair_statement(
+                staging_schema=policy.staging_schema,
+                staging_table=staging_table,
+            )
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(repair_statement)
+                    repaired_count = cursor.rowcount
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        sql.SQL(
+                            "SELECT COUNT(*) FROM {table} WHERE NOT ST_IsValid(geom)"
+                        ).format(table=table_ref)
+                    )
+                    (remaining_invalid,) = cursor.fetchone()
+            except Exception:
+                raise LoadFailed() from None
+            if remaining_invalid > 0:
+                raise GeometryRepairIncomplete()
+            connection.commit()
+
+        # 6. Extent: reported, never blocking (D-56).
+        extent = _parse_extent(extent_text)
+
+        return LayerValidation(
+            staging_table=staging_table,
+            spatial=True,
+            row_count=row_count,
+            geometry_type=expected_type,
+            srid=policy.target_srid,
+            repaired_count=repaired_count,
+            extent=extent,
+        )
+    except (
+        RowCountMismatch,
+        SridMismatch,
+        GeometryTypeMismatch,
+        GeometryRepairChangedType,
+        GeometryRepairIncomplete,
+        LoadFailed,
+    ):
+        raise
     except Exception:
         raise LoadFailed() from None
     finally:
         connection.close()
-
-    if row_count != manifest_layer.profile.feature_count:
-        raise RowCountMismatch()
-
-    return LayerValidation(
-        staging_table=staging_table,
-        spatial=manifest_layer.profile.spatial,
-        row_count=row_count,
-        geometry_type=NOT_APPLICABLE,
-        srid=NOT_APPLICABLE,
-        repaired_count=NOT_APPLICABLE,
-        extent=NOT_APPLICABLE,
-    )
 
 
 def run_staging(
@@ -750,6 +909,18 @@ def run_staging(
                 target_table=layer.target_table,
                 staging_table=staging_table,
                 row_count=validation.row_count,
+            )
+        )
+        guard.emit(
+            SuccessEvent.staging_layer_validated(
+                order_id=manifest.order_id,
+                staging_table=staging_table,
+                spatial=validation.spatial,
+                row_count=validation.row_count,
+                geometry_type=validation.geometry_type,
+                srid=validation.srid,
+                repaired_count=validation.repaired_count,
+                extent=validation.extent,
             )
         )
         guard.emit(ProgressEvent.staging_layer_position(position=position, total=total))
