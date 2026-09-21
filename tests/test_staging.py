@@ -391,6 +391,59 @@ class LoadCommandConstructionTest(unittest.TestCase):
             self.assertNotIn(sentinel, element)
 
 
+class ConnectionSetupTest(unittest.TestCase):
+    """No database. Regression guard for a bug 03-04's live verification
+    found: PostgreSQL's ``SET`` is a utility statement, not DML, and rejects
+    a bind parameter outright (``syntax error at or near "$1"``) -- there is
+    no parameterized form of ``SET statement_timeout = %s``. Every real
+    connection attempt failed with ``DatabaseConnectionFailed`` until this
+    was fixed to compose the already-validated positive integer as an
+    ``sql.Literal`` instead."""
+
+    def test_set_statements_carry_no_bind_placeholder(self):
+        policy = _staging_policy(
+            statement_timeout_seconds=3600, lock_timeout_seconds=30
+        )
+        executed: list[str] = []
+
+        class _FakeCursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+            def execute(self, query, params=None):
+                # Mirrors psycopg.sql.Composed.as_string()'s job of turning
+                # a composed SET statement into literal SQL text with no
+                # driver-side parameter binding -- exactly what a real
+                # connection's wire protocol requires for a SET statement.
+                executed.append(query.as_string(None))
+                self.params = params
+
+        class _FakeConnection:
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        with patch.object(
+            staging.psycopg, "connect", return_value=_FakeConnection()
+        ):
+            staging._connect(policy, "sentinel-secret-9f3a")
+
+        self.assertEqual(2, len(executed))
+        for statement in executed:
+            self.assertNotIn("%s", statement)
+            self.assertNotIn("$1", statement)
+        self.assertIn("3600000", executed[0])
+        self.assertIn("30000", executed[1])
+
+
 class DriverImportPolicyTest(unittest.TestCase):
     """No database. T-03 structural proof: staging.py alone touches a driver."""
 

@@ -290,12 +290,21 @@ def _connect(policy: StagingPolicy, password: str) -> "psycopg.Connection":
 
     try:
         with connection.cursor() as cursor:
+            # PostgreSQL's SET is a utility statement, not DML, and rejects a
+            # bind parameter outright ("syntax error at or near $1") -- there
+            # is no parameterized form. Both values are already validated
+            # positive integers (StagingPolicy.__post_init__), so composing
+            # them as sql.Literal is exactly as safe as a bind parameter
+            # would have been, with no string-formatted SQL involved.
             cursor.execute(
-                "SET statement_timeout = %s",
-                (policy.statement_timeout_seconds * 1000,),
+                sql.SQL("SET statement_timeout = {}").format(
+                    sql.Literal(policy.statement_timeout_seconds * 1000)
+                )
             )
             cursor.execute(
-                "SET lock_timeout = %s", (policy.lock_timeout_seconds * 1000,)
+                sql.SQL("SET lock_timeout = {}").format(
+                    sql.Literal(policy.lock_timeout_seconds * 1000)
+                )
             )
         connection.commit()
     except Exception:
