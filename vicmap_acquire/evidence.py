@@ -35,6 +35,13 @@ _MAX_FINGERPRINT_HEX_CHARS = 64
 _SERVER_VERSION_TEXT = re.compile(r"[ -~]{1,1024}")
 _GEOMETRY_TYPE_NAME = re.compile(r"[A-Z]{1,32}")
 
+# D-43: staging.diagnostics_path's own deterministic shape
+# ("db_load_{staging_table}.stderr"), where {staging_table} is already a
+# safe scalar (_TARGET_TABLE below). This is a bare file *name*, never a
+# path -- SafeFailure.diagnostics_file exists precisely so the operator's
+# failure line can name the file without carrying its directory or content.
+_DIAGNOSTICS_FILENAME = re.compile(r"db_load_[a-z][a-z0-9_]*\.stderr")
+
 
 def _require_fingerprint_length(expected_length: int) -> int:
     if (
@@ -380,6 +387,12 @@ _TARGET_TABLE = re.compile(r"[a-z][a-z0-9_]*")
 def _require_target_table(value: str) -> str:
     if not isinstance(value, str) or _TARGET_TABLE.fullmatch(value) is None:
         raise ValueError("target table name is not a safe scalar")
+    return value
+
+
+def _require_diagnostics_filename(value: str) -> str:
+    if not isinstance(value, str) or _DIAGNOSTICS_FILENAME.fullmatch(value) is None:
+        raise ValueError("diagnostics file name is not a safe scalar")
     return value
 
 
@@ -775,6 +788,8 @@ class SafeFailure(_SafeEvent):
         order_id: str | None = None,
         message_fingerprint: str | None = None,
         path_fingerprint: str | None = None,
+        staging_table: str | None = None,
+        diagnostics_file: str | None = None,
         fingerprint_hex_chars: int = 16,
     ) -> None:
         if not isinstance(reason, ReasonCode):
@@ -795,6 +810,15 @@ class SafeFailure(_SafeEvent):
         if path_fingerprint is not None:
             fields["path_fingerprint"] = _require_fingerprint(
                 path_fingerprint, fingerprint_hex_chars
+            )
+        if staging_table is not None:
+            # D-43: names the failing layer without carrying any
+            # driver/subprocess/SQL text -- the same safe-scalar pattern
+            # SuccessEvent.staging_table_loaded already uses.
+            fields["staging_table"] = _require_target_table(staging_table)
+        if diagnostics_file is not None:
+            fields["diagnostics_file"] = _require_diagnostics_filename(
+                diagnostics_file
             )
         super().__init__(fields)
 

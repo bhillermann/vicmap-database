@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 import read_mailbox
@@ -28,7 +27,7 @@ from vicmap_acquire.evidence import (
     render_progress,
     render_success,
 )
-from vicmap_acquire.manifest import ManifestFailure, read_manifest
+from vicmap_acquire.manifest import ManifestFailure, ManifestUnreadable, read_manifest
 
 
 _REASON_BY_CODE = {reason.value: reason for reason in ReasonCode}
@@ -40,7 +39,11 @@ def _reason_for(code: str) -> ReasonCode:
 
 def _most_recent_run_directory(run_root: Path, order_id: str) -> Path:
     """Return the lexicographically greatest (D-32's ``%Y%m%dT%H%M%SZ``
-    timestamp sorts chronologically) run subdirectory for ``order_id``."""
+    timestamp sorts chronologically) run subdirectory for ``order_id`` --
+    the same directory ``extract_artifact`` created and ``manifest.json``
+    lives in. No such directory is the closed ``manifest_unreadable``
+    failure, not a configuration error: the order's Phase 2 run is simply
+    missing, not misconfigured."""
 
     order_root = run_root / order_id
     try:
@@ -49,9 +52,9 @@ def _most_recent_run_directory(run_root: Path, order_id: str) -> Path:
             key=lambda path: path.name,
         )
     except OSError:
-        raise read_mailbox.AcquisitionFailure("config_invalid") from None
+        raise ManifestUnreadable() from None
     if not candidates:
-        raise read_mailbox.AcquisitionFailure("config_invalid")
+        raise ManifestUnreadable()
     return candidates[-1]
 
 
@@ -122,7 +125,14 @@ def main(argv: list[str] | None = None) -> int:
 
         run_directory = _most_recent_run_directory(run_config.run_root, order_id)
         manifest = read_manifest(run_directory)
-        run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # D-48's suffix names the *discovery* run the manifest came from --
+        # the run directory's own timestamp component -- rather than the
+        # moment staging happened. Two staging attempts over the same
+        # manifest then reuse the same staging table name, and the second
+        # fails loudly on an existing table (ogr2ogr rejects a layer that
+        # already exists without -overwrite/-append) rather than silently
+        # creating a near-duplicate under a fresh now() timestamp.
+        run_timestamp = run_directory.name
 
         staging.run_staging(
             manifest,
@@ -142,7 +152,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except staging.StagingFailure as error:
         try:
-            render_failure(SafeFailure(_reason_for(error.code), order_id=order_id))
+            render_failure(
+                SafeFailure(
+                    _reason_for(error.code),
+                    order_id=order_id,
+                    staging_table=getattr(error, "staging_table", None),
+                    diagnostics_file=getattr(error, "diagnostics_file", None),
+                )
+            )
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception:

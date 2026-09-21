@@ -211,7 +211,18 @@ class PrivilegeDenied(StagingFailure):
 
 
 class LoadFailed(StagingFailure):
+    """D-43: on a non-zero ``ogr2ogr`` exit, ``diagnostics_file`` carries the
+    *name* (never the full path, never the stderr content) of the local file
+    ``load_layer`` already wrote the complete unredacted stderr to -- an
+    attribute for the operator-facing caller to surface, never interpolated
+    into ``str(self)``, which stays exactly ``self.code`` like every other
+    ``StagingFailure``."""
+
     code = "db_load_failed"
+
+    def __init__(self, *, diagnostics_file: str | None = None) -> None:
+        self.diagnostics_file = diagnostics_file
+        super().__init__()
 
 
 class RowCountMismatch(StagingFailure):
@@ -492,6 +503,18 @@ def build_ogr2ogr_command(
     ]
 
 
+_DIAGNOSTICS_FILENAME_TEMPLATE = "db_load_{staging_table}.stderr"
+
+
+def diagnostics_path(diagnostics_dir: str | Path, staging_table: str) -> Path:
+    """D-43's stderr file location: ``diagnostics_dir /
+    "db_load_{staging_table}.stderr"``. Pure -- no I/O, no environment read."""
+
+    return Path(diagnostics_dir) / _DIAGNOSTICS_FILENAME_TEMPLATE.format(
+        staging_table=staging_table
+    )
+
+
 def load_layer(
     *,
     dataset_path: str | Path,
@@ -506,9 +529,11 @@ def load_layer(
     environment variable -- never argv. A non-zero return code, a
     ``TimeoutExpired``, or an ``OSError`` all map to the one fixed
     ``LoadFailed``; the exit code value is never inspected. The complete
-    unredacted stderr is written to ``diagnostics_dir`` under a deterministic
-    name derived from ``staging_table`` -- never branched on for control
-    flow."""
+    unredacted stderr is written to ``diagnostics_path(diagnostics_dir,
+    staging_table)`` before ``LoadFailed`` is ever raised for a non-zero
+    exit -- never branched on for control flow, and never interpolated into
+    the raised exception's own text (D-43: the file gets everything, the
+    exception carries only its file *name* via ``diagnostics_file``)."""
 
     command = build_ogr2ogr_command(
         dataset_path=dataset_path,
@@ -527,14 +552,14 @@ def load_layer(
     except (subprocess.TimeoutExpired, OSError):
         raise LoadFailed() from None
 
-    diagnostics_path = Path(diagnostics_dir) / f"{staging_table}.load.stderr"
+    stderr_path = diagnostics_path(diagnostics_dir, staging_table)
     try:
-        diagnostics_path.write_text(result.stderr or "", encoding="utf-8")
+        stderr_path.write_text(result.stderr or "", encoding="utf-8")
     except OSError:
         pass
 
     if result.returncode != 0:
-        raise LoadFailed()
+        raise LoadFailed(diagnostics_file=stderr_path.name)
 
 
 # D-56: the ZM-suffix vocabulary a declared geometry-type name may carry,
@@ -1038,11 +1063,19 @@ def run_staging(
     event_sink,
 ) -> tuple[LayerValidation, ...]:
     """Compose read identity -> preflight -> (per layer) load -> validate ->
-    emit, in the manifest's own order (D-42). A failure at any layer
-    re-raises the original typed exception unchanged and no later layer is
-    attempted. Every emission is wrapped in ``read_mailbox._EmitOnce``,
-    exactly as ``discover_order.run_discovery`` does, so a faulty sink can
-    never turn a closed failure into a raw exception."""
+    apply post-validation DDL -> emit, in the manifest's own order (D-42).
+    One ``ogr2ogr`` invocation at a time -- sequentially, with no concurrent
+    execution framework and no batching. On the first failure at any step
+    for a layer, the original
+    typed exception is re-raised unchanged (now carrying a ``staging_table``
+    attribute so the operator's failure line can name the failing layer;
+    ``LoadFailed`` additionally carries ``diagnostics_file``) and no later
+    layer is attempted. A zero-layer manifest is unreachable in practice
+    (Phase 2's ``DeliveryEmpty`` hard-stops before a manifest exists) but is
+    still a no-op here, returning an empty tuple and raising nothing. Every
+    emission is wrapped in ``read_mailbox._EmitOnce``, exactly as
+    ``discover_order.run_discovery`` does, so a faulty sink can never turn a
+    closed failure into a raw exception."""
 
     guard = read_mailbox._EmitOnce(event_sink)
 
@@ -1063,42 +1096,72 @@ def run_staging(
     validations: list[LayerValidation] = []
     for position, layer in enumerate(manifest.layers, start=1):
         staging_table = staging_table_name(layer.target_table, run_timestamp)
-        dataset_path = Path(manifest.run_directory) / layer.profile.dataset_relative_path
-        load_layer(
-            dataset_path=dataset_path,
-            layer_name=layer.profile.layer_name,
-            staging_table=staging_table,
-            policy=policy,
-            password=password,
-            diagnostics_dir=diagnostics_dir,
-        )
-        validation = validate_layer(
-            manifest_layer=layer,
-            staging_table=staging_table,
-            policy=policy,
-            password=password,
-        )
-        guard.emit(
-            SuccessEvent.staging_table_loaded(
-                order_id=manifest.order_id,
-                target_table=layer.target_table,
-                staging_table=staging_table,
-                row_count=validation.row_count,
+        try:
+            # Per-layer progress (research Pitfall 4's option (a)): emitted
+            # before the ogr2ogr call, not derived from parsing its
+            # terminal output.
+            guard.emit(
+                ProgressEvent.staging_layer_position(position=position, total=total)
             )
-        )
-        guard.emit(
-            SuccessEvent.staging_layer_validated(
-                order_id=manifest.order_id,
-                staging_table=staging_table,
-                spatial=validation.spatial,
-                row_count=validation.row_count,
-                geometry_type=validation.geometry_type,
-                srid=validation.srid,
-                repaired_count=validation.repaired_count,
-                extent=validation.extent,
+            dataset_path = (
+                Path(manifest.run_directory) / layer.profile.dataset_relative_path
             )
-        )
-        guard.emit(ProgressEvent.staging_layer_position(position=position, total=total))
+            load_layer(
+                dataset_path=dataset_path,
+                layer_name=layer.profile.layer_name,
+                staging_table=staging_table,
+                policy=policy,
+                password=password,
+                diagnostics_dir=diagnostics_dir,
+            )
+            validation = validate_layer(
+                manifest_layer=layer,
+                staging_table=staging_table,
+                policy=policy,
+                password=password,
+            )
+            # staging_table_loaded is emitted here -- after the ogr2ogr
+            # call succeeds, as the plan requires -- using validate_layer's
+            # own counted row_count rather than the manifest's declared
+            # feature_count, so the event always reports what the database
+            # actually holds, not merely what was expected.
+            guard.emit(
+                SuccessEvent.staging_table_loaded(
+                    order_id=manifest.order_id,
+                    target_table=layer.target_table,
+                    staging_table=staging_table,
+                    row_count=validation.row_count,
+                )
+            )
+            # D-62/D-63: post-validation DDL goes after validation, never
+            # before -- an index over a populated table beats maintaining
+            # one during the COPY, and the typed column enforces at
+            # database level exactly what validation just asserted.
+            apply_post_validation_ddl(
+                validation=validation,
+                manifest_layer=layer,
+                staging_table=staging_table,
+                policy=policy,
+                password=password,
+            )
+            guard.emit(
+                SuccessEvent.staging_layer_validated(
+                    order_id=manifest.order_id,
+                    staging_table=staging_table,
+                    spatial=validation.spatial,
+                    row_count=validation.row_count,
+                    geometry_type=validation.geometry_type,
+                    srid=validation.srid,
+                    repaired_count=validation.repaired_count,
+                    extent=validation.extent,
+                )
+            )
+        except StagingFailure as error:
+            # Names the failing layer for the operator without carrying any
+            # driver/subprocess/SQL text -- staging_table is already a safe
+            # scalar (evidence._require_target_table).
+            error.staging_table = staging_table
+            raise
         validations.append(validation)
 
     return tuple(validations)

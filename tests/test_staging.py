@@ -1948,5 +1948,422 @@ class PostValidationDdlTest(_LivePostgresMixin, unittest.TestCase):
         self.assertNotIn("CONCURRENTLY", source)
 
 
+class SequentialOrderTest(unittest.TestCase):
+    """No database. Mocks ``load_layer``/``validate_layer``/
+    ``apply_post_validation_ddl`` plus the pre-flight identity/privilege
+    calls, and pins D-42's sequential, manifest-ordered, stop-at-first-
+    failure orchestration. Must never skip."""
+
+    _RUN_TIMESTAMP = "20260918T041500Z"
+
+    @staticmethod
+    def _identity() -> staging.DatabaseIdentity:
+        return staging.DatabaseIdentity(
+            host="127.0.0.1",
+            port=5432,
+            dbname="vicmap",
+            role="vicmap_loader",
+            server_version="PostgreSQL",
+            postgis_version="POSTGIS",
+        )
+
+    @staticmethod
+    def _manifest(layer_count: int) -> ImportManifest:
+        layers = tuple(
+            ManifestLayer(
+                profile=_profile_with_fields(
+                    dataset_relative_path=f"x{index}.gdb",
+                    dataset_stem=f"x{index}",
+                    layer_name=f"LAYER{index}",
+                    feature_count=1,
+                ),
+                target_table=f"layer{index}",
+            )
+            for index in range(layer_count)
+        )
+        return ImportManifest(
+            schema_version=1,
+            order_id="OK0VUZ",
+            run_timestamp="20260918T030000Z",
+            run_directory="/tmp/run",
+            artifact_sha256="a" * 64,
+            artifact_byte_count=1,
+            message_fingerprint="f" * 16,
+            layers=layers,
+            companions=(),
+        )
+
+    @staticmethod
+    def _fake_validate(*, staging_table, **kwargs) -> staging.LayerValidation:
+        return staging.LayerValidation(
+            staging_table=staging_table,
+            spatial=True,
+            row_count=1,
+            geometry_type="POINT",
+            srid=7899,
+            repaired_count=0,
+            extent=(0.0, 0.0, 0.0, 0.0),
+        )
+
+    def test_three_layer_manifest_loads_in_manifest_order_with_progress(self):
+        manifest = self._manifest(3)
+        load_calls: list[str] = []
+        events: list[object] = []
+        expected = [
+            staging.staging_table_name(layer.target_table, self._RUN_TIMESTAMP)
+            for layer in manifest.layers
+        ]
+
+        with patch.object(
+            staging, "read_database_identity", return_value=self._identity()
+        ), patch.object(
+            staging, "preflight_staging_privileges", return_value=None
+        ), patch.object(
+            staging,
+            "load_layer",
+            side_effect=lambda *, staging_table, **kwargs: load_calls.append(
+                staging_table
+            ),
+        ), patch.object(
+            staging, "validate_layer", side_effect=self._fake_validate
+        ), patch.object(
+            staging, "apply_post_validation_ddl", return_value=()
+        ):
+            result = staging.run_staging(
+                manifest,
+                _staging_policy(),
+                password="x",
+                run_timestamp=self._RUN_TIMESTAMP,
+                diagnostics_dir="/tmp",
+                event_sink=events.append,
+            )
+
+        self.assertEqual(expected, load_calls)
+        self.assertEqual(3, len(result))
+        progress = [
+            (event["layer_position"], event["layer_total"])
+            for event in events
+            if isinstance(event, ProgressEvent)
+        ]
+        self.assertEqual([(1, 3), (2, 3), (3, 3)], progress)
+
+    def test_load_failed_on_second_layer_stops_after_two_load_calls(self):
+        manifest = self._manifest(3)
+        load_calls: list[str] = []
+        ddl_calls: list[str] = []
+
+        def fake_load(*, staging_table, **kwargs):
+            load_calls.append(staging_table)
+            if len(load_calls) == 2:
+                raise staging.LoadFailed()
+
+        with patch.object(
+            staging, "read_database_identity", return_value=self._identity()
+        ), patch.object(
+            staging, "preflight_staging_privileges", return_value=None
+        ), patch.object(
+            staging, "load_layer", side_effect=fake_load
+        ), patch.object(
+            staging, "validate_layer", side_effect=self._fake_validate
+        ), patch.object(
+            staging,
+            "apply_post_validation_ddl",
+            side_effect=lambda *, staging_table, **kwargs: ddl_calls.append(
+                staging_table
+            )
+            or (),
+        ):
+            with self.assertRaises(staging.LoadFailed) as caught:
+                staging.run_staging(
+                    manifest,
+                    _staging_policy(),
+                    password="x",
+                    run_timestamp=self._RUN_TIMESTAMP,
+                    diagnostics_dir="/tmp",
+                    event_sink=lambda event: None,
+                )
+
+        self.assertEqual(2, len(load_calls))
+        self.assertLessEqual(len(ddl_calls), 1)
+        expected_second = staging.staging_table_name(
+            manifest.layers[1].target_table, self._RUN_TIMESTAMP
+        )
+        self.assertEqual(expected_second, caught.exception.staging_table)
+
+    def test_one_layer_manifest_produces_exactly_one_load_call(self):
+        manifest = self._manifest(1)
+        load_calls: list[str] = []
+
+        with patch.object(
+            staging, "read_database_identity", return_value=self._identity()
+        ), patch.object(
+            staging, "preflight_staging_privileges", return_value=None
+        ), patch.object(
+            staging,
+            "load_layer",
+            side_effect=lambda *, staging_table, **kwargs: load_calls.append(
+                staging_table
+            ),
+        ), patch.object(
+            staging, "validate_layer", side_effect=self._fake_validate
+        ), patch.object(
+            staging, "apply_post_validation_ddl", return_value=()
+        ):
+            result = staging.run_staging(
+                manifest,
+                _staging_policy(),
+                password="x",
+                run_timestamp=self._RUN_TIMESTAMP,
+                diagnostics_dir="/tmp",
+                event_sink=lambda event: None,
+            )
+
+        self.assertEqual(1, len(load_calls))
+        self.assertEqual(1, len(result))
+
+    def test_zero_layer_manifest_produces_zero_calls_and_returns_empty_tuple(self):
+        manifest = self._manifest(0)
+        load_calls: list[str] = []
+
+        with patch.object(
+            staging, "read_database_identity", return_value=self._identity()
+        ), patch.object(
+            staging, "preflight_staging_privileges", return_value=None
+        ), patch.object(
+            staging,
+            "load_layer",
+            side_effect=lambda *, staging_table, **kwargs: load_calls.append(
+                staging_table
+            ),
+        ), patch.object(
+            staging, "validate_layer", side_effect=self._fake_validate
+        ), patch.object(
+            staging, "apply_post_validation_ddl", return_value=()
+        ):
+            result = staging.run_staging(
+                manifest,
+                _staging_policy(),
+                password="x",
+                run_timestamp=self._RUN_TIMESTAMP,
+                diagnostics_dir="/tmp",
+                event_sink=lambda event: None,
+            )
+
+        self.assertEqual((), result)
+        self.assertEqual([], load_calls)
+
+
+class LoadDiagnosticsTest(unittest.TestCase):
+    """No database. Mocks ``subprocess.run``. D-43's stderr-to-file
+    contract: the file gets everything, the exception and the rendered
+    failure event get only the closed code and the file's bare name. Must
+    never skip."""
+
+    def test_failed_load_writes_diagnostics_file_and_leaks_nothing(self):
+        policy = _staging_policy()
+        stderr_text = (
+            "ERROR: connection failed\n"
+            "PGPASSWORD=sentinel-secret-9f3a\n"
+            "detail: credential-shaped-token-abc123\n"
+        )
+
+        def fake_run(command, **kwargs):
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr=stderr_text)
+
+        with tempfile.TemporaryDirectory() as diagnostics_dir:
+            with patch.object(staging.subprocess, "run", side_effect=fake_run):
+                with self.assertRaises(staging.LoadFailed) as caught:
+                    staging.load_layer(
+                        dataset_path="/tmp/VMADD.gdb",
+                        layer_name="ADDRESS",
+                        staging_table="vmadd_address_20260918t041500z",
+                        policy=policy,
+                        password="sentinel-secret-9f3a",
+                        diagnostics_dir=diagnostics_dir,
+                    )
+            error = caught.exception
+            self.assertEqual("db_load_failed", str(error))
+            self.assertNotIn("sentinel-secret-9f3a", str(error))
+            self.assertNotIn("credential-shaped-token-abc123", str(error))
+
+            expected_path = staging.diagnostics_path(
+                diagnostics_dir, "vmadd_address_20260918t041500z"
+            )
+            self.assertTrue(expected_path.exists())
+            self.assertEqual(stderr_text, expected_path.read_text(encoding="utf-8"))
+            self.assertEqual(expected_path.name, error.diagnostics_file)
+
+            failure_event = SafeFailure(
+                ReasonCode.DB_LOAD_FAILED, diagnostics_file=error.diagnostics_file
+            )
+            rendered = json.dumps(dict(failure_event))
+            self.assertNotIn("sentinel-secret-9f3a", rendered)
+            self.assertNotIn("credential-shaped-token-abc123", rendered)
+            self.assertIn(expected_path.name, rendered)
+
+
+class ProductionIsolationTest(_LivePostgresMixin, unittest.TestCase):
+    """Skips without a server. Proves PROHIB-10 empirically: an induced
+    ``RowCountMismatch`` and an induced ``LoadFailed`` both leave every
+    table outside ``vicmap_staging`` unchanged. This class must not drop
+    anything it did not create."""
+
+    def setUp(self):
+        self._connect().close()
+        self.params = self._connection_params()
+        self.scratch_dir = Path(tempfile.mkdtemp(prefix="production-isolation-"))
+        self.addCleanup(shutil.rmtree, self.scratch_dir, ignore_errors=True)
+        with zipfile.ZipFile(FIXTURE_ARCHIVE) as archive:
+            archive.extractall(self.scratch_dir)
+        candidates = list(self.scratch_dir.rglob("*.gdb"))
+        self.assertEqual(1, len(candidates))
+        self.dataset_path = candidates[0]
+        self._created_tables: list[str] = []
+        self.addCleanup(self._drop_created_tables)
+
+    def _drop_created_tables(self) -> None:
+        if not self._created_tables:
+            return
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                for table_name in self._created_tables:
+                    cursor.execute(
+                        staging.sql.SQL("DROP TABLE IF EXISTS {table}").format(
+                            table=staging.sql.Identifier("vicmap_staging", table_name)
+                        )
+                    )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _catalog_snapshot(self):
+        """Full (schema, table) list outside vicmap_staging -- catches a
+        stray new table anywhere -- plus row counts scoped to public and
+        the publish schema only, so an unrelated pg_catalog/information_
+        schema row-count fluctuation (e.g. from this very test creating and
+        dropping objects inside vicmap_staging, which pg_class also tracks)
+        can never masquerade as a DB-05 violation."""
+
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT schemaname, tablename FROM pg_tables "
+                    "WHERE schemaname != 'vicmap_staging' ORDER BY schemaname, tablename"
+                )
+                tables = tuple(cursor.fetchall())
+                counts = {}
+                for schema, table in tables:
+                    if schema not in ("public", "vicmap"):
+                        continue
+                    cursor.execute(
+                        staging.sql.SQL("SELECT COUNT(*) FROM {table}").format(
+                            table=staging.sql.Identifier(schema, table)
+                        )
+                    )
+                    (count,) = cursor.fetchone()
+                    counts[(schema, table)] = count
+        finally:
+            connection.close()
+        return tables, counts
+
+    def _policy(self) -> staging.StagingPolicy:
+        return staging.StagingPolicy(
+            host=self.params["host"],
+            port=self.params["port"],
+            dbname=self.params["dbname"],
+            user=self.params["user"],
+            staging_schema="vicmap_staging",
+            publish_schema="vicmap",
+            target_srid=7899,
+            index_columns=("pfi",),
+            gt=20000,
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+            statement_timeout_seconds=3600,
+            lock_timeout_seconds=30,
+        )
+
+    def _manifest(self, target_table: str, **layer_overrides) -> ImportManifest:
+        kwargs = dict(
+            dataset_relative_path=str(self.dataset_path.relative_to(self.scratch_dir)),
+            dataset_stem=self.dataset_path.stem,
+            layer_name="ADDRESS",
+            driver="OpenFileGDB",
+            spatial=True,
+            geometry_type="Point",
+            geometry_column="geom",
+            fid_column="gid",
+            feature_count=2,
+            source_wkt=None,
+            epsg=7899,
+            extent=None,
+            fields=(),
+        )
+        kwargs.update(layer_overrides)
+        layer = ManifestLayer(profile=LayerProfile(**kwargs), target_table=target_table)
+        return ImportManifest(
+            schema_version=1,
+            order_id="OK0VUZ",
+            run_timestamp="20260918T041500Z",
+            run_directory=str(self.scratch_dir),
+            artifact_sha256="a" * 64,
+            artifact_byte_count=1,
+            message_fingerprint="f" * 16,
+            layers=(layer,),
+            companions=(),
+        )
+
+    def test_induced_row_count_mismatch_leaves_catalog_unchanged(self):
+        target_table = f"claude_isolation_rowcount_{os.getpid()}"
+        run_timestamp = "20260918T041500Z"
+        self._created_tables.append(
+            staging.staging_table_name(target_table, run_timestamp)
+        )
+        before_tables, before_counts = self._catalog_snapshot()
+
+        manifest = self._manifest(target_table, feature_count=999999)
+        with self.assertRaises(staging.RowCountMismatch):
+            staging.run_staging(
+                manifest,
+                self._policy(),
+                password=self.params["password"],
+                run_timestamp=run_timestamp,
+                diagnostics_dir=self.scratch_dir,
+                event_sink=lambda event: None,
+            )
+
+        after_tables, after_counts = self._catalog_snapshot()
+        self.assertEqual(before_tables, after_tables)
+        self.assertEqual(before_counts, after_counts)
+
+    def test_induced_load_failure_leaves_catalog_unchanged(self):
+        target_table = f"claude_isolation_loadfail_{os.getpid()}"
+        run_timestamp = "20260918T041500Z"
+        self._created_tables.append(
+            staging.staging_table_name(target_table, run_timestamp)
+        )
+        before_tables, before_counts = self._catalog_snapshot()
+
+        manifest = self._manifest(
+            target_table,
+            dataset_relative_path="does/not/exist.gdb",
+            feature_count=2,
+        )
+        with self.assertRaises(staging.LoadFailed):
+            staging.run_staging(
+                manifest,
+                self._policy(),
+                password=self.params["password"],
+                run_timestamp=run_timestamp,
+                diagnostics_dir=self.scratch_dir,
+                event_sink=lambda event: None,
+            )
+
+        after_tables, after_counts = self._catalog_snapshot()
+        self.assertEqual(before_tables, after_tables)
+        self.assertEqual(before_counts, after_counts)
+
+
 if __name__ == "__main__":
     unittest.main()
