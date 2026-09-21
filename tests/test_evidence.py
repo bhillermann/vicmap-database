@@ -1722,11 +1722,32 @@ class DatabaseIdentityEventTest(unittest.TestCase):
                 **self._kwargs(server_version="PostgreSQL\n18.6")
             )
 
-    def test_server_version_over_two_hundred_characters_is_rejected(self):
+    def test_server_version_over_the_bound_is_rejected(self):
         with self.assertRaises(ValueError):
             evidence.SuccessEvent.database_identity(
-                **self._kwargs(server_version="x" * 201)
+                **self._kwargs(server_version="x" * 1025)
             )
+
+    def test_postgis_version_at_real_world_length_is_accepted(self):
+        # 03-04's live verification observed a real PostGIS_Full_Version()
+        # string of 345 characters against PostgreSQL 17.5/PostGIS 3.5.2 --
+        # the original 200-character bound rejected genuine server output as
+        # a raw ValueError. This pins the regression: a string in that shape
+        # and length must be accepted, not just anything under the new cap.
+        real_world_postgis_version = (
+            'POSTGIS="3.5.2 dea6d0a" [EXTENSION] PGSQL="170" '
+            'GEOS="3.9.0-CAPI-1.16.2" PROJ="7.2.1 NETWORK_ENABLED=OFF '
+            "URL_ENDPOINT=https://cdn.proj.org "
+            "USER_WRITABLE_DIRECTORY=/var/lib/postgresql/.local/share/proj "
+            'DATABASE_PATH=/usr/share/proj/proj.db" (compiled against PROJ '
+            '7.2.1) LIBXML="2.9.10" LIBJSON="0.15" LIBPROTOBUF="1.3.3" '
+            'WAGYU="0.5.0 (Internal)"'
+        )
+        self.assertEqual(345, len(real_world_postgis_version))
+        event = evidence.SuccessEvent.database_identity(
+            **self._kwargs(postgis_version=real_world_postgis_version)
+        )
+        self.assertEqual(real_world_postgis_version, dict(event)["postgis_version"])
 
     def test_port_zero_is_rejected(self):
         with self.assertRaises(ValueError):

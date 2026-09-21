@@ -25,8 +25,14 @@ _MAX_FINGERPRINT_HEX_CHARS = 64
 # D-61: server-controlled identity text (version(), PostGIS_Full_Version())
 # rendered in clear, bounded to printable ASCII with no control characters
 # so a hostile or malformed server banner cannot inject newlines into the
-# JSON Lines stream or smuggle unbounded text into operator output.
-_SERVER_VERSION_TEXT = re.compile(r"[ -~]{1,200}")
+# JSON Lines stream or smuggle unbounded text into operator output. 1024 (not
+# the original 200) is the bound: a real PostGIS_Full_Version() string on a
+# live PostgreSQL 17.5/PostGIS 3.5.2 server observed during 03-04's live
+# verification is 345 characters (it enumerates GEOS/PROJ/LIBXML/LIBJSON/
+# LIBPROTOBUF/WAGYU versions plus PROJ's writable-directory and DB paths) --
+# 200 rejected genuine server output as a raw ValueError, not a closed
+# failure. 1024 stays a finite bound, just one wide enough for real banners.
+_SERVER_VERSION_TEXT = re.compile(r"[ -~]{1,1024}")
 _GEOMETRY_TYPE_NAME = re.compile(r"[A-Z]{1,32}")
 
 
