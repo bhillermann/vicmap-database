@@ -671,6 +671,7 @@ class SuccessEvent(_SafeEvent):
         srid: int | str,
         repaired_count: int | str,
         extent: tuple[float, float, float, float] | str,
+        ddl_objects_created: tuple[str, ...] = (),
     ) -> "SuccessEvent":
         """D-57: a non-spatial layer reports geometry fields as ``not_applicable``,
         never as passed; a spatial layer must never carry ``not_applicable``."""
@@ -699,6 +700,14 @@ class SuccessEvent(_SafeEvent):
             else list(validated_extent)
         )
 
+        if not isinstance(ddl_objects_created, tuple) or not all(
+            isinstance(name, str) for name in ddl_objects_created
+        ):
+            raise ValueError("ddl_objects_created must be a tuple of strings")
+        validated_ddl_objects_created = [
+            _require_target_table(name) for name in ddl_objects_created
+        ]
+
         return cls(
             {
                 "event": "staging_layer_validated",
@@ -710,6 +719,7 @@ class SuccessEvent(_SafeEvent):
                 "srid": validated_srid,
                 "repaired_count": validated_repaired_count,
                 "extent": rendered_extent,
+                "ddl_objects_created": validated_ddl_objects_created,
             }
         )
 

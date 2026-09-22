@@ -1137,7 +1137,7 @@ def run_staging(
             # before -- an index over a populated table beats maintaining
             # one during the COPY, and the typed column enforces at
             # database level exactly what validation just asserted.
-            apply_post_validation_ddl(
+            ddl_objects_created = apply_post_validation_ddl(
                 validation=validation,
                 manifest_layer=layer,
                 staging_table=staging_table,
@@ -1154,6 +1154,7 @@ def run_staging(
                     srid=validation.srid,
                     repaired_count=validation.repaired_count,
                     extent=validation.extent,
+                    ddl_objects_created=ddl_objects_created,
                 )
             )
         except StagingFailure as error:
