@@ -8,7 +8,7 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 
 - [x] **Phase 1: Trusted Graph Acquisition** — Select one trusted ready-order message and download its bounded, checksummed artifact.
 - [x] **Phase 2: Safe Geospatial Discovery** — Safely unpack the artifact and build a complete, collision-free layer manifest. (completed 2026-09-17)
-- [ ] **Phase 3: Validated PostGIS Staging** — Preflight the live database and load every selected layer into validated isolated staging tables.
+- [x] **Phase 3: Validated PostGIS Staging** — Preflight the live database and load every selected layer into validated isolated staging tables. (completed 2026-09-22)
 - [ ] **Phase 4: Transactional Publication and Access** — Atomically publish the order into `vicmap` and prove non-owner access with redacted evidence.
 - [ ] **Phase 5: Approved Legacy Cleanup** — Inventory suspected abandoned WFS tables and delete only exact, revalidated, explicitly approved targets.
 
@@ -131,7 +131,7 @@ Plans:
 4. Blocking validation reports row counts, geometry columns and types, SRIDs, validity, and extents for all staging tables.
 5. A failed load or validation leaves all existing production tables unchanged.
 
-**Plans:** 6/6 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 
@@ -194,7 +194,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Trusted Graph Acquisition | 14/14 | In Progress|  |
 | 2. Safe Geospatial Discovery | 9/9 | Complete    | 2026-09-17 |
-| 3. Validated PostGIS Staging | 6/6 | In Progress|  |
+| 3. Validated PostGIS Staging | 6/6 | Complete    | 2026-09-22 |
 | 4. Transactional Publication and Access | 0/TBD | Not started | — |
 | 5. Approved Legacy Cleanup | 0/TBD | Not started | — |
 

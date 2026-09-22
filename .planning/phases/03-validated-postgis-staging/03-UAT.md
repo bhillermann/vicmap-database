@@ -1,12 +1,16 @@
 ---
-status: testing
+status: passed
 phase: 03-validated-postgis-staging
 source: [03-VERIFICATION.md]
 started: 2026-09-21T09:40:00Z
-updated: 2026-09-21T09:40:00Z
+updated: 2026-09-22T00:00:00Z
 ---
 
 ## Current Test
+
+none — all tests complete
+
+## Completed Test
 
 number: 1
 name: DB-02 privilege preflight fails closed on a role lacking privilege
@@ -17,7 +21,7 @@ expected: |
     - a role holding CREATE on `public`
     - a superuser role
     - an SRID not registered in `spatial_ref_sys`
-awaiting: user response
+result: passed 2026-09-22
 
 ## Tests
 
@@ -77,15 +81,41 @@ Option B — manually verify at least one negative case: create a throwaway role
 without CREATE on `vicmap_staging`, point `preflight_staging_privileges` at it,
 and confirm it raises rather than proceeding.
 
-result: [pending]
+result: PASSED 2026-09-22
+
+Operator supplied VICMAP_TEST_POSTGRES_SUPERUSER_DSN per-shell via `op read`
+references and ran the five methods. All five passed, zero skips, zero errors:
+
+  test_fail_path_create_on_public ................................ ok
+  test_fail_path_no_create_on_staging_schema ..................... ok
+  test_fail_path_superuser ....................................... ok
+  test_fail_path_unknown_srid .................................... ok
+  test_pass_path_proves_capability_and_leaves_nothing_behind ..... ok
+  Ran 5 tests in 0.416s -- OK
+
+All four fail-closed branches of `preflight_staging_privileges` have now
+executed and raised as designed. This is their first execution ever.
+
+Teardown verified independently against the live catalogue after the run: no
+`staging_preflight%` role and no `staging_preflight%` schema remain, and
+`public` holds only PostGIS's own `geography_columns`, `geometry_columns`,
+`spatial_ref_sys`. The rolled-back probe leaves nothing behind, as claimed.
+
+Defect found and fixed to get here (ba3ef2b): the fixture's `CREATE ROLE {}
+LOGIN PASSWORD %s` used a bind parameter, which PostgreSQL rejects in a utility
+statement. All five methods errored on `syntax error at or near "$1"` the first
+time they were ever run. Same defect class as 616d50a in `staging._connect`;
+uncaught because this fixture had executed zero times.
 
 ## Summary
 
 total: 1
-passed: 0
+passed: 1
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 
 ## Gaps
+
+None. All human verification items pass.
