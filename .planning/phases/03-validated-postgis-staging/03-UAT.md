@@ -44,17 +44,34 @@ verification that looked green and proved nothing.
 
 How to close it, either way:
 
-Option A — provision a throwaway test-only superuser DSN so the five skipped
-methods actually run:
+Option A (agreed method) — supply the superuser DSN per-shell, by reference,
+and let it die with the shell:
 
 ```
-export VICMAP_TEST_POSTGRES_SUPERUSER_DSN="host=127.0.0.1 port=5432 dbname=vicmap user=<superuser> password=<value>"
-export VICMAP_TEST_POSTGRES_DSN="host=127.0.0.1 port=5432 dbname=vicmap user=vicmap_loader password=$VICMAP_DB_PASSWORD"
+export VICMAP_TEST_POSTGRES_SUPERUSER_DSN="host=127.0.0.1 port=5432 dbname=vicmap user=$(op read op://nixos-services/postgis/username) password=$(op read op://nixos-services/postgis/password)"
 nix develop --command python -m unittest tests.test_staging.PrivilegePreflightTest -v
+unset VICMAP_TEST_POSTGRES_SUPERUSER_DSN
 ```
 
-Expect 5 passes and 0 skips. Do not write either password to a file, and do not
-pass either as a command argument — `ps` can read argv.
+Expect 5 passes and 0 skips.
+
+Credential handling — the rule is that no literal secret ever appears in text
+you type; an `op://` reference is fine anywhere:
+  - The command above puts only `op://` paths in `~/.zsh_history`, never values.
+  - `$VICMAP_DB_PASSWORD` is likewise a reference, already resolved by the
+    devshell, so `VICMAP_TEST_POSTGRES_DSN` needs no special handling.
+  - `export` itself is NOT the exposure. An env var is readable via
+    `/proc/<pid>/environ` only by you and root — the same trust boundary as the
+    file the secret already lives in. The two channels that genuinely leak are
+    argv (any process can read it via `ps`) and the history file on disk.
+  - `histignorespace` is set in this shell, so a leading space keeps a command
+    out of history. Use it as a second layer, never as the fix.
+
+DELIBERATELY NOT DONE: this reference is not added to `flake.nix`'s
+`opnixEnvConfig`. That config feeds every `nix develop`, so a superuser entry
+there would hand superuser access to every process in the devshell — directly
+contradicting D-59/DB-05, the invariant this phase exists to establish. The
+elevated credential stays scoped to the one shell that runs this test.
 
 Option B — manually verify at least one negative case: create a throwaway role
 without CREATE on `vicmap_staging`, point `preflight_staging_privileges` at it,

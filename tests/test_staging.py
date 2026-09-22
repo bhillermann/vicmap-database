@@ -1002,11 +1002,23 @@ class PrivilegePreflightTest(_LivePostgresMixin, unittest.TestCase):
                     staging.sql.Identifier(self.role_name)
                 )
             )
+            # PostgreSQL rejects a bind parameter in a utility statement, and
+            # CREATE ROLE is one -- `LOGIN PASSWORD %s` raises `syntax error at
+            # or near "$1"`. The password must be composed as a literal. This is
+            # the same defect 616d50a fixed in `staging._connect`'s SET
+            # statement_timeout; it was reintroduced here because this fixture
+            # had never once executed (it skipped for want of
+            # VICMAP_TEST_POSTGRES_SUPERUSER_DSN), so nothing caught it.
+            #
+            # The literal reaches the server inside the statement text rather
+            # than as a bound value, so it can appear in the server log under
+            # log_statement. Acceptable only because this is an ephemeral
+            # throwaway role dropped in tearDown, never a real credential.
             cursor.execute(
-                staging.sql.SQL("CREATE ROLE {} LOGIN PASSWORD %s").format(
-                    staging.sql.Identifier(self.role_name)
-                ),
-                (self.role_password,),
+                staging.sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                    staging.sql.Identifier(self.role_name),
+                    staging.sql.Literal(self.role_password),
+                )
             )
             cursor.execute(
                 staging.sql.SQL("CREATE SCHEMA {} AUTHORIZATION {}").format(
