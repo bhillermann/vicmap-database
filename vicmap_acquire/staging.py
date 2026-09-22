@@ -612,6 +612,21 @@ _BASE_GEOMETRY_NAMES = frozenset(
     }
 )
 
+# WR-04: the exact closed vocabulary normalize_declared_geometry_type can
+# ever return as its ``declared_type`` -- every base name concatenated with
+# every ZM suffix token, 7 x 4 = 28 members. apply_post_validation_ddl
+# asserts membership here immediately before composing ``declared_type``
+# into raw SQL text via ``sql.SQL(declared_type)`` (PostGIS's type-modifier
+# syntax rejects a quoted ``sql.Identifier`` here), so that composition's
+# safety is proved locally rather than resting silently on an invariant
+# enforced only in this different function.
+_VALID_TYPED_COLUMN_NAMES = frozenset(
+    base + suffix
+    for base in _BASE_GEOMETRY_NAMES
+    for suffix in _ZM_SUFFIX_FLAGS
+)
+
+
 def _split_declared_geometry_type(declared: object) -> tuple[str, str]:
     """Split a ``LayerProfile.geometry_type`` string into its base name and
     ZM suffix token, validating both against D-38's closed vocabulary.
@@ -1027,6 +1042,14 @@ def apply_post_validation_ddl(
                     raise StagingDdlFailed()
 
                 if needs_alter:
+                    # WR-04: declared_type is composed into raw SQL text
+                    # below (sql.Identifier can't be used -- PostGIS's
+                    # type-modifier syntax rejects a quoted identifier
+                    # here), so its safety is asserted locally rather than
+                    # resting silently on normalize_declared_geometry_type's
+                    # invariant alone.
+                    if declared_type not in _VALID_TYPED_COLUMN_NAMES:
+                        raise StagingDdlFailed()
                     cursor.execute(
                         sql.SQL(
                             "ALTER TABLE {table} ALTER COLUMN geom "
