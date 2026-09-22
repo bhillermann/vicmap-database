@@ -1,87 +1,92 @@
 # Testing Patterns
 
-**Analysis Date:** 2026-09-18
+**Analysis Date:** 2026-09-22
 
 ## Test Framework
 
 **Runner:**
-- `unittest` (Python standard library)
-- Test discovery via `python -m unittest discover` or direct module execution
-- No pytest/nose configuration detected
+- unittest (Python standard library)
+- Discovery and execution via `python -m unittest discover -s tests -p 'test_*.py' -v`
+- Individual test modules via `python -m unittest tests.test_<module_name> -v`
+- Single test class via `python -m unittest tests.test_<module_name>.<ClassName> -v`
 
 **Assertion Library:**
-- `unittest.TestCase` assertion methods: `assertEqual()`, `assertTrue()`, `assertRaises()`, `assertIn()`, `assertIsNone()`
+- unittest built-in assertions (`assertEqual`, `assertRaises`, `assertIsNone`, etc.)
+- Standard Python `assert` statements in some helper functions
 
 **Run Commands:**
 ```bash
-python -m unittest discover tests/       # Run all tests
-python -m unittest tests.test_discovery  # Run specific test module
-python -m unittest tests.test_discovery.FindDatasetsTest  # Run specific test class
+# Run all tests
+python -m unittest discover -s tests -p 'test_*.py' -v
+
+# Watch mode
+# (Not configured - manual re-run required)
+
+# Run a specific module
+python -m unittest tests.test_staging -v
+
+# Run a specific test class
+python -m unittest tests.test_staging.DatabaseConfigTest -v
+
+# Coverage
+# (No coverage configuration detected)
 ```
 
 ## Test File Organization
 
 **Location:**
-- Tests co-located in separate `tests/` directory (not in source tree)
-- Test files mirror source structure by naming: `tests/test_discovery.py` tests `vicmap_acquire/discovery.py`
-- Fixtures in `tests/fixtures/` subdirectory
-- Fixture builders in `tests/fixtures/build_fixtures.py`
+- Test files co-located in `tests/` directory (separate from source)
+- Pattern: `tests/test_<module_name>.py` mirrors `vicmap_acquire/<module_name>.py`
+- Examples:
+  - `tests/test_evidence.py` → `vicmap_acquire/evidence.py`
+  - `tests/test_staging.py` → `vicmap_acquire/staging.py`
+  - `tests/test_discovery.py` → `vicmap_acquire/discovery.py`
+  - `tests/test_candidates.py` → `vicmap_acquire/candidates.py`
 
 **Naming:**
-- Test modules: `test_<module_name>.py` (e.g., `test_discovery.py`)
-- Test classes: `<ComponentName>Test` or `<ComponentName>Test<Aspect>` (e.g., `FindDatasetsTest`, `NormalizeTargetTableNameTest`)
-- Test methods: `test_<behavior_description>()` (e.g., `test_finds_the_single_vmadd_dataset()`)
+- Test files: `test_<module>.py`
+- Test classes: `<Description>Test` (e.g., `DatabaseConfigTest`, `FindDatasetsTest`, `CandidateRecognitionTest`)
+- Test methods: `test_<specific_behavior>` (e.g., `test_happy_path_loads_every_field`, `test_missing_database_key_in_turn`)
 
-**Structure:**
-```
-tests/
-├── __init__.py
-├── test_discovery.py         # Tests for discovery.py
-├── test_discovery_differential.py  # Cross-check vs oracle
-├── test_discovery_tracer.py
-├── test_discovery_config.py
-├── test_manifest.py
-├── test_naming.py
-├── test_extraction.py
-├── test_download.py
-├── test_evidence.py
-├── test_candidates.py
-├── test_origin.py
-├── test_graph.py
-├── test_provenance.py
-├── test_repository_policy.py
-├── test_html_visibility_differential.py  # Differential oracle test
-├── fixtures/
-│   ├── Order_TRACER1.zip              # Real fixture data
-│   ├── geometryless_gdb.zip
-│   ├── point_z_gdb.zip
-│   └── build_fixtures.py
-```
+**Fixture Location:**
+- `tests/fixtures/` directory contains archived test data
+- Example: `tests/fixtures/Order_TRACER1.zip`, `tests/fixtures/geometryless_gdb.zip`
+- Fixtures referenced via `REPO_ROOT` constant at module level
 
 ## Test Structure
 
 **Suite Organization:**
-- Each test class inherits from `unittest.TestCase`
-- `setUp()` method initializes test fixtures and temporary resources
-- Test methods are independent; setUp runs before each test
-- Example from `tests/test_discovery.py`:
-
 ```python
-class FindDatasetsTest(_TempDirMixin, unittest.TestCase):
-    def setUp(self):
-        self.run_dir = self.make_temp_dir("find-datasets-")
-        _extract(ORDER_TRACER1, self.run_dir)
+from __future__ import annotations
 
-    def test_finds_the_single_vmadd_dataset(self):
-        datasets = discovery.find_datasets(self.run_dir, DEFAULT_POLICY)
-        self.assertEqual(1, len(datasets))
-        path, driver = datasets[0]
-        self.assertTrue(str(path).endswith("VMADD.gdb"))
-        self.assertEqual("OpenFileGDB", driver)
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+class SomeTest(unittest.TestCase):
+    def setUp(self):
+        # Per-test setup
+        pass
+    
+    def tearDown(self):
+        # Per-test cleanup
+        pass
+    
+    def test_specific_behavior(self):
+        # Test implementation
+        pass
 ```
 
 **Patterns:**
-- **Cleanup via context managers**: `addCleanup()` used to register cleanup functions (e.g., `shutil.rmtree`)
+- **Setup pattern** (from `tests/test_discovery.py`):
+  ```python
+  def setUp(self):
+      self.run_dir = self.make_temp_dir("find-datasets-")
+      _extract(ORDER_TRACER1, self.run_dir)
+  ```
+
+- **Teardown/Cleanup pattern** (using `addCleanup`):
   ```python
   def make_temp_dir(self, prefix: str) -> Path:
       temp_dir = Path(tempfile.mkdtemp(prefix=prefix))
@@ -89,164 +94,271 @@ class FindDatasetsTest(_TempDirMixin, unittest.TestCase):
       return temp_dir
   ```
 
-- **Mixins for shared setup**: `_TempDirMixin` shared by multiple test classes
-  
-- **Exception testing with context managers**: `assertRaises()` captures and inspects exceptions
+- **Assertion pattern**:
   ```python
-  with self.assertRaises(discovery.UnsupportedFormat):
-      discovery.find_datasets(empty_dir, DEFAULT_POLICY)
-  ```
-
-- **Exception message inspection**: Captured context object inspected for redacted output
-  ```python
-  with self.assertRaises(discovery.LayerUnreadable) as ctx:
-      discovery.find_datasets(lying_dir, DEFAULT_POLICY)
-  self.assertNotIn("pyogrio", str(ctx.exception))
-  self.assertEqual("layer_unreadable", str(ctx.exception))
-  ```
-
-- **Parametric testing via `subTest()`**: Not unittest's `subTest` in traditional use; instead loops test multiple cases
-  ```python
-  invalid_inputs = [("", "ADDRESS"), ("VMADD", ""), ...]
-  for dataset_stem, layer_name in invalid_inputs:
-      with self.subTest(dataset_stem=dataset_stem, layer_name=layer_name):
-          try:
-              normalize_target_table_name(dataset_stem, layer_name)
-          except TableNameInvalid:
-              pass
-          except Exception as exc:
-              self.fail(f"expected TableNameInvalid, got {type(exc).__name__}")
-          else:
-              self.fail("expected TableNameInvalid, no exception raised")
+  def test_loads_config(self):
+      config = read_mailbox.load_database_config(path)
+      self.assertEqual("127.0.0.1", config.host)
+      self.assertEqual(5432, config.port)
   ```
 
 ## Mocking
 
-**Framework:** `unittest.mock` (Python standard library)
+**Framework:** `unittest.mock` (built-in)
 
 **Patterns:**
-- `patch.object()` to mock specific module attributes/functions
-- `MagicMock()` for fake return values
-- `side_effect` to raise exceptions on call
-- Mocking only external seams (pyogrio, subprocess, file I/O)
 
-**Example from `test_discovery.py`:**
+- **Patch specific methods** (from `tests/test_discovery.py`):
+  ```python
+  with patch.object(discovery.pyogrio, "list_layers", return_value=[]):
+      with self.assertRaises(discovery.DeliveryEmpty):
+          discovery.find_datasets(empty_gdb_dir, DEFAULT_POLICY)
+  ```
+
+- **Patch with side effects**:
+  ```python
+  with patch.object(
+      discovery.pyogrio,
+      "list_layers",
+      side_effect=RuntimeError("some pyogrio/GDAL diagnostic text"),
+  ):
+      with self.assertRaises(discovery.LayerUnreadable) as ctx:
+          discovery.find_datasets(lying_dir, DEFAULT_POLICY)
+  ```
+
+- **MagicMock for complex objects** (from `tests/test_discovery.py`):
+  ```python
+  with patch.object(discovery.pyogrio, "read_info") as mock_info:
+      mock_info.return_value = {"driver": "GPKG"}
+      ...
+  ```
+
+**Import Pattern:**
 ```python
-def test_injected_list_layers_exception_surfaces_as_layer_unreadable(self):
-    lying_dir = self.make_temp_dir("list-layers-raises-")
-    (lying_dir / "FAKE.gdb").mkdir()
-    with patch.object(
-        discovery.pyogrio,
-        "list_layers",
-        side_effect=RuntimeError("some pyogrio/GDAL diagnostic text"),
-    ):
-        with self.assertRaises(discovery.LayerUnreadable) as ctx:
-            discovery.find_datasets(lying_dir, DEFAULT_POLICY)
-    self.assertNotIn("pyogrio", str(ctx.exception))
+from unittest.mock import Mock, patch, MagicMock
+
+# In test:
+with patch("module.function", return_value=value):
+    ...
 ```
 
 **What to Mock:**
-- External libraries/drivers: `pyogrio`, `pyproj`, `subprocess`
-- File system operations when determinism is needed
-- Network calls (none in this codebase)
-- Do NOT mock standard library primitives like `Path` unless absolutely necessary
+- External I/O (file system, network, database)
+- Third-party library calls with hard-to-control behavior (pyogrio, psycopg)
+- Timestamp generation (use datetime fixtures instead)
+- Environment variables
 
 **What NOT to Mock:**
-- Internal vicmap_acquire modules (unit test boundaries instead)
-- Data structures and value objects
+- Internal functions (test them directly)
+- Data validation logic
+- Pure functions (they're deterministic)
 - Exception classes
-- Pure functions (call directly instead)
 
 ## Fixtures and Factories
 
 **Test Data:**
-- Real data in `tests/fixtures/`: `Order_TRACER1.zip`, `geometryless_gdb.zip`, `point_z_gdb.zip`
-- ZIP archives extracted to temporary directories for each test via `_extract()` helper
-- Lightweight stand-in objects created on-the-fly for isolated unit tests
 
-**Factory Pattern from `test_manifest.py`:**
-```python
-def _field(name: str, ogr_type: str, *, width=None, precision=None, nullable=True):
-    return discovery.FieldProfile(
-        name=name, ogr_type=ogr_type, width=width, precision=precision, nullable=nullable
-    )
+- **Constant test data** (module-level):
+  ```python
+  AUTH_RESULTS_PASS = (
+      "spf=pass smtp.mailfrom=maps.vic.gov.au;"
+      "dkim=pass (signature was verified) header.d=maps.vic.gov.au;"
+      ...
+  )
+  ```
 
-def _layer_profile(**overrides) -> discovery.LayerProfile:
-    defaults = dict(
-        dataset_relative_path="gda2020_vicgrid/filegdb/whole_of_dataset/victoria/VMADD.gdb",
-        dataset_stem="VMADD",
-        ...
-    )
-    return discovery.LayerProfile(**{**defaults, **overrides})
-```
+- **Helper factory functions** (prefixed with `_`):
+  ```python
+  def _policy_kwargs(output_dir: Path, **overrides: object) -> dict[str, object]:
+      """Build a complete, valid ``AcquisitionConfig`` kwargs mapping.
+      
+      ``overrides`` replaces individual fields so malformed-policy tests can
+      mutate exactly one field while every other field remains valid.
+      """
+      base: dict[str, object] = dict(
+          mailbox="automations@vegetationlink.com.au",
+          folder="Inbox",
+          allowed_senders=("noreply@datashare.maps.vic.gov.au",),
+          ...
+      )
+      base.update(overrides)
+      return base
+  ```
+
+- **Parameterized fixture data** (from `tests/test_evidence.py`):
+  ```python
+  _POLICY_MALFORMED_CASES: dict[str, tuple[dict[str, object], str | None]] = {
+      "non-inbox folder": ({"folder": "Archive"}, None),
+      "sender missing exactly one at-sign": (
+          {"allowed_senders": ("not-an-email",)},
+          None,
+      ),
+      ...
+  }
+  ```
 
 **Location:**
-- Fixtures directory: `tests/fixtures/`
-- Factories and helpers at top of test modules or in test classes as static methods
-- Shared helpers (e.g., `_extract()`, `_TempDirMixin`) defined in test modules
+- Archive fixtures: `tests/fixtures/`
+- Shared constants: module-level in test file
+- Helper builders: private functions prefixed with `_`
 
 ## Coverage
 
-**Requirements:** Not explicitly configured
-- No `.coverage` configuration file detected
-- Coverage not enforced in the build
+**Requirements:** No coverage tool configured; no target enforced
 
-**View Coverage:**
-```bash
-python -m coverage run -m unittest discover tests/
-python -m coverage report
-python -m coverage html
-```
+**View Coverage:** Not applicable
 
 ## Test Types
 
-**Unit Tests (Primary):**
-- Scope: Single function or closely related functions
-- Approach: Fast, deterministic, no external dependencies
-- Example: `NormalizeTargetTableNameTest` tests pure naming normalization without geodatabases
-- Files: `test_naming.py`, `test_origin.py` (pure functions with no I/O)
+**Unit Tests (primary):**
+- Scope: Single function or class method
+- Approach: Pure function tests with fixtures; isolated from I/O
+- Database connection tests: skip gracefully if PostgreSQL unavailable
+- Examples: `test_happy_path_loads_every_field`, `test_fingerprint_length_is_configurable_within_bounds`
 
 **Integration Tests:**
-- Scope: Multiple modules working together or with real fixtures
-- Approach: Use real fixture data and isolated temporary directories
-- Example: `ReadFieldSchemaTest` in `test_discovery.py` uses real `Order_TRACER1.zip` fixture
-- Files: `test_discovery.py`, `test_extraction.py`, `test_manifest.py` (composition tests)
+- Scope: Multiple functions/modules working together
+- Approach: Use real fixtures (archived data) but mock external services
+- Examples: end-to-end discovery tests using fixture archives
+- Location: Same test file as unit tests, denoted by descriptive names like `LiveDeliveryRegressionTest`
 
-**Differential/Oracle Tests:**
-- Scope: Implementation cross-checked against independent oracle
-- Approach: Oracle is hand-written, completely independent of implementation
-- Constraint: Oracles MUST NOT import implementation functions, only public data containers
-- Example: `test_discovery_differential.py` compares `discover_layers()` output against independent `ogrinfo -json` parsing
-  - Oracle functions: `_run_ogrinfo_json()`, `_oracle_layer()`, `_oracle_geometry_normalized()`
-  - Module imports ONLY: `discover_layers`, `DiscoveryPolicy` (data container)
-  - Never imports: `read_field_schema`, `profile_layer`, geometry normalization helpers
-- Enforced by: `ImportIndependenceTest` uses `ast` module to verify import constraint at runtime
-- Files: `test_discovery_differential.py`, `test_html_visibility_differential.py`
+**E2E Tests:**
+- Not used in this codebase
+- Database-dependent tests skip if PostgreSQL is unavailable
 
 ## Common Patterns
 
 **Async Testing:**
-- Not applicable (synchronous Python project)
+Not applicable (synchronous codebase)
 
 **Error Testing:**
-- All error testing uses `assertRaises()` context manager
-- Exception code/message validated by inspecting `ctx.exception`
-- Pattern ensures exceptions are closed (no raw subprocess/driver text exposed)
-- Example:
+
+- **Expected exception pattern**:
+  ```python
+  def test_missing_database_section_entirely(self):
+      text = VALID_TOML.replace("\n" + _DATABASE_SECTION, "\n")
+      with tempfile.TemporaryDirectory() as directory:
+          path = _write_policy(directory, text)
+          with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+              read_mailbox.load_database_config(path)
+      self.assertEqual("config_invalid", caught.exception.code)
+  ```
+
+- **Exception message validation** (from `tests/test_discovery.py`):
   ```python
   with self.assertRaises(discovery.LayerUnreadable) as ctx:
       discovery.find_datasets(lying_dir, DEFAULT_POLICY)
+  self.assertNotIn("pyogrio", str(ctx.exception))
   self.assertNotIn("GDAL", str(ctx.exception))
-  self.assertEqual("layer_unreadable", str(ctx.exception))
   ```
 
-**Module Independence Verification:**
-- `ast` module used to inspect source code imports at test time
-- Verifies layer/dependency constraints are maintained
-- Examples:
-  - `NamingModulePurityTest` in `test_naming.py` confirms `naming` has no database/socket imports
-  - `ImportIndependenceTest` in `test_discovery_differential.py` confirms differential oracle stays independent
+**Parametrized Testing (using subTest):**
+
+- **Single parameter iteration**:
+  ```python
+  for sender in near_misses:
+      with self.subTest(sender=sender):
+          candidate = recognize_candidate(
+              _metadata(sender=sender),
+              lambda: loaded.append(True) or _mime(plain=f"Download {_url()}"),
+              allowed_senders=(SENDER,),
+              allowed_order_ids=("OK0VUZ",),
+          )
+          self.assertIsNone(candidate)
+  ```
+
+- **Multiple parameter iteration**:
+  ```python
+  for key in _DATABASE_KEY_NAMES:
+      with self.subTest(key=key):
+          lines = _DATABASE_SECTION.splitlines(keepends=True)
+          remaining = [line for line in lines if not line.startswith(f"{key} ")]
+          text = VALID_TOML.replace(_DATABASE_SECTION, "".join(remaining))
+          self._assert_rejected(text)
+  ```
+
+**Mixin Pattern for Test Utilities:**
+
+- **Reusable test helper mixin** (from `tests/test_discovery.py`):
+  ```python
+  class _TempDirMixin:
+      def make_temp_dir(self, prefix: str) -> Path:
+          temp_dir = Path(tempfile.mkdtemp(prefix=prefix))
+          self.addCleanup(shutil.rmtree, temp_dir, ignore_errors=True)
+          return temp_dir
+  
+  class FindDatasetsTest(_TempDirMixin, unittest.TestCase):
+      def setUp(self):
+          self.run_dir = self.make_temp_dir("find-datasets-")
+  ```
+
+**Private Test Helper Functions:**
+
+- Prefix with `_` to indicate internal to test module
+- Examples from `tests/test_candidates.py`:
+  ```python
+  def _metadata(...) -> MessageMetadata:
+      return MessageMetadata(...)
+  
+  def _url(filename: str = "Order_OK0VUZ.zip") -> str:
+      return BASE_URL.format(filename=filename)
+  
+  def _mime(*, plain: str | None = None, html: str | None = None) -> bytes:
+      message = EmailMessage()
+      ...
+      return message.as_bytes()
+  
+  def _recognize(...):
+      return recognize_candidate(
+          metadata,
+          lambda: mime_bytes,
+          allowed_senders=(SENDER,),
+          ...
+      )
+  ```
+
+**Test Organization by Concern:**
+
+- Related test classes in same file
+- Example from `tests/test_discovery.py`:
+  - `FindDatasetsTest` - tests dataset enumeration
+  - `ProfileLayerTest` - tests layer profiling
+  - `DiscoverLayersTest` - tests full discovery flow
+
+**Regression Documentation:**
+
+- Test docstrings reference design checkpoints
+- Example from `tests/test_discovery.py`:
+  ```python
+  def test_uppercase_geodatabase_extension_is_recognized(self):
+      # At HEAD (pre-02-07) this ends in DeliveryEmpty: the uppercase
+      # directory is never examined because the extension lookup is
+      # case-sensitive (WR-01).
+      ...
+  ```
+
+## Test Data Conventions
+
+**TOML Configuration:**
+- Store complete valid TOML in module constants
+- Example from `tests/test_staging.py`:
+  ```python
+  VALID_TOML = """\
+  [mailbox]
+  address = "automations@vegetationlink.com.au"
+  ...
+  """
+  ```
+
+**Archived Fixtures:**
+- Version control as `.zip` files in `tests/fixtures/`
+- Extract to temp directory in test setup
+- Clean up using `addCleanup(shutil.rmtree, ...)`
+
+**Identifier Constants:**
+- Reuse in test helpers and assertions
+- Examples: `SENDER`, `READY`, `BASE_URL`, `AUTH_RESULTS_PASS`
 
 ---
 
-*Testing analysis: 2026-09-18*
+*Testing analysis: 2026-09-22*

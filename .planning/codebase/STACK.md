@@ -1,92 +1,141 @@
 # Technology Stack
 
-**Analysis Date:** 2026-09-18
+**Analysis Date:** 2026-09-22
 
 ## Languages
 
 **Primary:**
-- Python 3 - Complete acquisition pipeline, CLI orchestration, geospatial processing, and testing
+- Python 3.x - All core application logic and CLI entry points
+
+**Configuration/Data:**
+- TOML - Configuration files (`vicmap.toml`)
+- JSON - Data formats (provenance sidecars, discovery results)
+- SQL - Database schemas and queries (PostgreSQL)
 
 ## Runtime
 
 **Environment:**
-- Python 3.14.7 (via Nix flakes)
+- Python 3 (via nixpkgs)
+- Linux x86_64, Linux aarch64, macOS x86_64, macOS aarch64 (via Nix multi-platform support)
 
 **Package Manager:**
-- Nix flakes only — no pip, `requirements.txt`, or `pyproject.toml` in this repo. Python
-  dependencies are declared in `flake.nix` via `python3.withPackages`.
-- Lockfile: `flake.lock` pins the reproducible environment
+- Nix Flakes - Development environment and dependency management
+- Lockfile: `flake.lock` (present)
 
-## Frameworks
+## Frameworks & Core Libraries
 
-**Core:**
-- O365 2.1 - Microsoft Graph API client for Office 365 mailbox access and OAuth integration
-- requests - HTTP client for artifact downloads and API calls
-- GDAL/OGR - Geospatial vector data reading and processing
+**Geographic Data Processing:**
+- `pyogrio` [version managed by nixpkgs] - Reading/writing geographic file formats (Shapefile, GeoPackage, GeoJSON, OpenFileGDB)
+- `pyproj` [version managed by nixpkgs] - Cartographic projection transformations
+- `PROJ` [9.8.1+] - Projection library with vendored ICSM GDA94<->GDA2020 grid
 
-**Geospatial:**
-- pyogrio - Python bindings for OGR for layer discovery and metadata extraction (`vicmap_acquire/discovery.py`)
-- pyproj - Coordinate system transformations and projections (`vicmap_acquire/discovery.py`)
+**Database:**
+- `psycopg` [3.3.4] - PostgreSQL connection and query execution
+- PostgreSQL client tools - CLI (`psql`) for administrative tasks
 
-**Data Processing:**
-- beautifulsoup4 - HTML parsing for email content validation
-- html5lib - HTML5 parser for email origin verification (`vicmap_acquire/candidates.py`)
-- python-dateutil - Date/time parsing and manipulation
+**Authentication & Office Integration:**
+- `python-o365` [2.1] - Microsoft 365/Exchange API client (built locally in flake)
+- `msal` [dependency of python-o365] - Microsoft Authentication Library
+- `requests-oauthlib` [dependency of python-o365] - OAuth 1/2 support
 
-**Authentication:**
-- msal (Microsoft Authentication Library) - OAuth 2.0 token acquisition for O365
-- requests-oauthlib - OAuth support in requests library
-- O365.utils.token.MemoryTokenBackend - In-memory OAuth token storage (`vicmap_acquire/graph.py`)
+**HTTP & Data Handling:**
+- `requests` [version via nixpkgs] - HTTP client for S3 downloads
+- `html5lib` [version via nixpkgs] - HTML parsing (used by python-o365)
+- `beautifulsoup4` [dependency of python-o365] - HTML/XML parsing
+- `python-dateutil` [dependency of python-o365] - Date parsing utilities
+- `tzdata`, `tzlocal` [dependencies of python-o365] - Timezone handling
 
-**Testing:**
-- unittest (Python standard library) - Test framework for all test modules (`tests/test_*.py`)
+**Archive Handling:**
+- `zipfile` [stdlib] - ZIP archive extraction
 
-**Build/Dev:**
-- Nix Flakes - Declarative development environment and dependency management (`flake.nix`)
-- direnv - Automatic environment activation via `.envrc`
+**Command-Line & CLI:**
+- `argparse` [stdlib] - CLI argument parsing
+
+**Archive/Compression:**
+- `GDAL`/`ogr2ogr` [via nixpkgs] - Geographic data format conversion and loading CLI tools
 
 ## Key Dependencies
 
-**Critical:**
-- O365 2.1 - Provides authenticated access to Office 365 mailbox; blocks entire acquisition pipeline if unavailable. Dependencies: requests, requests-oauthlib, msal, tzlocal, tzdata, beautifulsoup4, python-dateutil
-- requests - HTTP client for downloading artifacts from AWS S3 and handling redirects/timeouts
-- pyogrio - Vector data discovery without materializing full datasets; critical for layer enumeration in `vicmap_acquire/discovery.py`
-- pyproj - Coordinate system metadata extraction from geospatial datasets
+**Critical (directly imported):**
+- `psycopg` - PostgreSQL access; only module permitted to import a PostgreSQL driver (enforced via test policy)
+- `pyogrio` - Geographic format discovery and reading
+- `pyproj` - CRS resolution and coordinate transformations
+- `python-o365` - Microsoft 365 mailbox integration
+- `requests` - HTTP downloads from AWS S3
+- `PROJ` - Cartographic transformation engine with vendor-specific grids
 
-**Infrastructure:**
-- GDAL - System-level library providing OGR tools (ogrinfo CLI) and spatial data driver support
-- tzdata - Timezone database for date normalization across UTC contexts
+**Supporting:**
+- `html5lib` - Office document parsing
+- `GDAL/ogr2ogr` - CLI for geographic data loading into PostGIS
+- `tzdata` - Timezone database for datetime handling
 
 ## Configuration
 
-**Environment:**
-- Configuration file: `vicmap.toml` - TOML-based configuration for mailbox, download policy, extraction policy, and discovery settings
-- Environment variables: `O365_AUTH_ID`, `O365_AUTH_SECRET`, `TENANT_ID` - Microsoft entra credentials for OAuth, managed via opnix secrets integration
-- Secrets management: opnix (`flake.nix` lines 13-18) - External secrets provider pulling from 1Password vaults
-- Token file: `.config/opnix/token` - opnix authentication token for secrets retrieval
+**Environment Variables (Required at Runtime):**
+- `O365_AUTH_ID` - Microsoft 365 application client ID (from opnix/1Password)
+- `O365_AUTH_SECRET` - Microsoft 365 application client secret (from opnix/1Password)
+- `TENANT_ID` - Microsoft 365 tenant ID (from opnix/1Password)
+- `VICMAP_DB_PASSWORD` - PostgreSQL `vicmap_loader` user password (from opnix/1Password)
+- `OPNIX_ENV_TOKEN_FILE` - Path to opnix token for secrets management (default: `$HOME/.config/opnix/token`)
 
-**Build:**
-- `flake.nix` - Nix flakes manifest defining Python environment, dependencies, shell hooks, and secrets configuration
-- `flake.lock` - Nix flakes lockfile ensuring reproducible builds
+**Configuration Files:**
+- `vicmap.toml` - Single source of truth for all operational policies:
+  - `[mailbox]` - Email source (address, folder, sender allowlist, order ID filters, authentication requirements)
+  - `[download]` - S3 download policy (allowed hosts, size limits, timeouts, fingerprint length)
+  - `[extraction]` - Archive extraction limits (total/member size, compression ratio)
+  - `[discovery]` - Geographic format discovery (supported formats, timeout)
+  - `[database]` - PostgreSQL connection and schema configuration (host, port, schema names, target SRID, index configuration)
+
+**Build/Dev Configuration:**
+- `flake.nix` - Nix development environment and dependency declarations
+- `.envrc` - direnv configuration pointing to Nix flake and opnix token file
+
+## Secrets Management
+
+**Secrets Provider:**
+- 1Password - via opnix integration
+- Secrets are injected as environment variables only, never stored in configuration files or versioned code
+- `opnix` tool retrieves secrets from 1Password item references at shell startup
+
+**Development Shell Setup:**
+- Shell hook in `flake.nix` runs `opnix env` to populate `O365_AUTH_ID`, `O365_AUTH_SECRET`, `TENANT_ID`, and `VICMAP_DB_PASSWORD`
+- Token file path: `$HOME/.config/opnix/token`
+
+## PROJ Data & Geographic Grids
+
+**Special Handling:**
+- Vendored ICSM GDA94<->GDA2020 transformation grid via `pkgs.fetchurl` with pinned hash
+- Single merged `PROJ_DATA` directory (`projDataDir` in `flake.nix`) containing both `proj.db` and the vendored grid
+- `PROJ_DATA` environment variable explicitly set in shell hook (required for pyproj to locate grid files)
+- PROJ 9.8.1 does not support colon-joined `PROJ_DATA` lists; only single directory works
 
 ## Platform Requirements
 
 **Development:**
-- Nix (with flakes support enabled)
-- direnv (optional, enabled via `.envrc`)
-- Git (for version control)
-- 1Password CLI or opnix token access (for secrets)
+- Nix package manager with Flakes support
+- direnv (for `.envrc` integration)
+- 1Password account access + opnix token
+- Supported architectures: x86_64-linux, aarch64-linux, aarch64-darwin, x86_64-darwin
 
-**Runtime:**
-- Python 3.x
-- GDAL system library (liboct, libproj)
-- Network access to Microsoft Graph API (graph.microsoft.com)
-- Network access to AWS S3 (s3.ap-southeast-2.amazonaws.com)
+**Production/Runtime:**
+- Python 3
+- PostgreSQL 11+ (for PostGIS)
+- Network access to:
+  - Microsoft 365 Graph API (`login.microsoft.com`, `graph.microsoft.com`)
+  - AWS S3 (`s3.ap-southeast-2.amazonaws.com`)
+- PostGIS-enabled database schema
 
-**Testing:**
-- Python unittest runner (built-in)
-- Test fixtures stored in `tests/fixtures/`
+## Testing Framework
+
+**Test Runner:**
+- `unittest` [stdlib] - Standard library test framework
+- `unittest.mock` - Mocking framework (MagicMock, Mock, patch)
+- No external test framework (pytest/pytest not used)
+
+**Test Execution:**
+- Standard Python unittest discovery: `python -m unittest discover`
+- Tests skip gracefully when optional dependencies unavailable (e.g., psycopg when PostgreSQL unreachable)
 
 ---
 
-*Stack analysis: 2026-09-18*
+*Stack analysis: 2026-09-22*

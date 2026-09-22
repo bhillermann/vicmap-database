@@ -1,258 +1,239 @@
+<!-- refreshed: 2026-09-22 -->
 # Codebase Concerns
 
-**Analysis Date:** 2026-09-18
+**Analysis Date:** 2026-09-22
 
 ## Tech Debt
 
-**Missing PostGIS Integration (Phase 3 — Not Started):**
-- Issue: The entire database layer (Phase 3 and beyond) has not been implemented. The pipeline currently gets from email → archive extraction → layer discovery → manifest, but cannot load data into PostGIS.
-- Files: None yet; `vicmap_acquire/` has no database module
-- Impact: v0.1 cannot complete its core mission: no tables are loaded, no atomicity/promotion exists, no consumer access is possible
-- Fix approach: Implement Phase 3 (Validated PostGIS Staging) with connection pooling, transaction management, and staging table validation before promotion
+**SQL Injection Prevention in Identifier Composition:**
+- Issue: Database identifiers composed from configuration or user input require careful validation before insertion into raw SQL. Multiple recent fixes (WR-02, WR-04) addressed underbounded regexes and missing type assertions.
+- Files: `vicmap_acquire/staging.py`, `vicmap_acquire/evidence.py`
+- Impact: Unbounded identifiers can exceed PostgreSQL's 63-byte NAMEDATALEN limit, silently truncating and creating collisions; unvalidated type declarations bypass parametrized queries.
+- Fix approach: Continue enforcing closed vocabularies for declared geometry types, maintain byte-bounded identifiers with content-hash suffixes for collision prevention, and re-validate input before every raw-SQL composition point.
 
-**Subprocess Timeout Handling in Discovery:**
-- Issue: `ogrinfo` subprocess call in `vicmap_acquire/discovery.py:233` has a `timeout_seconds` policy but no graceful handling of slow/hung processes on high-latency or resource-constrained systems
-- Files: `vicmap_acquire/discovery.py` (lines 233-244)
-- Impact: On a busy system or slow storage, discovery may timeout unexpectedly; timeout is a hard error with no retry/escalation
-- Fix approach: Consider implementing exponential backoff or a pre-check for dataset size before invoking ogrinfo
+**Large Complex Module (staging.py):**
+- Issue: `vicmap_acquire/staging.py` contains 1240 lines with 25 functions managing database connection, privilege verification, layer loading, validation, and DDL application in a single file.
+- Files: `vicmap_acquire/staging.py`
+- Impact: High cognitive load for modifications; multiple concerns (connection lifecycle, validation state machine, DDL generation) tightly coupled.
+- Fix approach: Break into smaller, single-responsibility modules if the file grows beyond 1500 lines or requires frequent concurrent edits. Current complexity is manageable given the closed error model and test coverage.
 
-**Extraction Memory Profile Not Validated:**
-- Issue: While `extract_artifact` streams output using 1 MiB chunks (preventing memory exhaustion), the pre-validation in `_validate_members` loads the complete `zipfile.infolist()` into memory before extraction begins
-- Files: `vicmap_acquire/extraction.py` (lines 318-329)
-- Impact: For an archive with millions of entries, `infolist()` could consume significant memory; `max_member_count` policy provides a ceiling (tested at 4000), but real Vicmap orders are unknown
-- Fix approach: If future deliveries contain very large member counts, stream infolist inspection instead of materializing the full list
-
-**Hard-Coded Order ID Limit in `discover_order.py`:**
-- Issue: Main entry point requires `allowed_order_ids` to contain exactly one order (line 124 in STATE.md decisions document)
-- Files: `discover_order.py`
-- Impact: Multi-order deliveries cannot be processed in one run; batching or multi-order support deferred to Phase 2-06
-- Fix approach: Implement flexible order selection and queueing in Phase 2-06 per ROADMAP.md
-
-## Known Bugs
-
-**Compression Ratio Calibration Thinness:**
-- Symptoms: The real 233 MB Vicmap delivery (Order_OK0VUZ) has small OpenFileGDB index files (.gdbtablx/.spx/.atx) that compress at ~139x ratio; `vicmap.toml` currently caps at 200x, leaving only ~1.44x headroom
-- Files: `vicmap.toml` (line 26), `tests/test_extraction.py` (ShippedCeilingCalibrationTest)
-- Trigger: Future Vicmap delivery with slightly more redundant index files could exceed the 200x ceiling
-- Workaround: Increase `max_compression_ratio` if delivery fails with `archive_ceiling_exceeded`; see 02-REVIEW-FIX.md for calibration methodology
-
-**Case-Sensitive Extension Recognition Fixed, but Worth Monitoring:**
-- Symptoms: Earlier discovery code did not use `casefold()` on file extensions, risking rejection of `.GDB` vs `.gdb`
-- Files: `vicmap_acquire/discovery.py` (line 163, now normalized via `path.suffix.casefold()`)
-- Trigger: Already fixed; included for historical context
-- Current state: ✓ RESOLVED in Phase 02
-
-## Security Considerations
-
-**Graph Application Scope (Tenant-Wide Exposure):**
-- Risk: The O365 application credentials in `flake.nix` / opnix / runtime environment grant `Mail.Read` permission, which is tenant-wide by default and not scoped to a single mailbox. An attacker or misconfiguration could access `automations@vegetationlink.com.au`'s entire mailbox history.
-- Files: `vicmap_acquire/graph.py` (lines 80-112, account setup); credentials sourced from environment
-- Current mitigation: Operator has explicitly confirmed (2026-09-14) that the tenant mailbox access restriction is in place at the Microsoft Entra level (see STATE.md line 113-114); `read_mailbox.py` restricts mailbox address at runtime (line 146)
-- Recommendations: Document tenant-scope restriction as a verified prerequisite; add a live test that confirms `mailbox_address` matches the expected automation mailbox after authentication succeeds
-
-**Email Parser HTML Visibility (WR-01 — RESOLVED):**
-- Risk: Previously, malformed/missing DMARC headers could let unsigned messages pass alignment checks
-- Files: `vicmap_acquire/origin.py`
-- Current state: ✓ RESOLVED in Phase 01; all authentication checks now fail closed on absence
-
-**Repository-Local Secrets (WR-04 — Partially Resolved):**
-- Risk: Application credentials and opnix tokens are currently inside the checkout via `flake.nix`/`.direnv` environment setup
-- Files: `flake.nix` (credentials injected at runtime), `.direnv` (env loading)
-- Current mitigation: Credentials are NOT stored as static files; they are injected at runtime from opnix/1Password
-- Recommendations: Before production deployment, rotate any exposed tokens and move credential sourcing outside the checkout entirely (e.g., systemd environment files, process-level secrets management)
-
-**Message Fingerprinting for Redaction (Secure):**
-- Risk: If message subjects/bodies are leaked in logs, senders and attachment details are exposed
-- Files: `vicmap_acquire/evidence.py` (fingerprint computation, lines 24-34); `read_mailbox.py` (log redaction via SuccessEvent/SafeFailure)
-- Current mitigation: ✓ Message identities are fingerprinted (8-64 hex chars configurable), never exposed raw; stdout redaction enforced via evidence.py's SafeFailure/SuccessEvent machinery
-- Recommendations: No change needed; already secure per design
-
-## Performance Bottlenecks
-
-**Synchronous Sequential Discovery:**
-- Problem: `discover_layers` calls `ogrinfo` once per dataset sequentially; for large Vicmap orders with multiple GDB packages, this is O(n) in dataset count
-- Files: `vicmap_acquire/discovery.py` (lines 220-280, single-threaded loop over datasets)
-- Cause: Subprocess invocations are blocking; no parallelism implemented
-- Improvement path: Implement concurrent subprocess calls (e.g., ThreadPoolExecutor) if multi-dataset orders become common; currently deferred because real Vicmap orders are unknown
-
-**Whole-Infolist Materialization:**
-- Problem: `zipfile.infolist()` loads the entire member list into memory before any extraction writes begin
-- Files: `vicmap_acquire/extraction.py` (line 325)
-- Cause: Python's zipfile API requires the full list for validation before opening file handles
-- Improvement path: Not easily parallelizable; acceptable for current scope (Vicmap orders with thousands of members expected to be rare)
-
-**No Connection Pooling for Future PostGIS Loads:**
-- Problem: Phase 3 has not been implemented, so no database connection strategy exists yet
-- Files: None (Phase 3 not started)
-- Cause: Deferred pending architecture design
-- Improvement path: When implementing Phase 3, use connection pooling (e.g., psycopg3 with asyncpg or pgbouncer) to avoid per-table connection overhead during multi-layer loads
-
-## Fragile Areas
-
-**Naming Normalization (Now Hardened):**
-- Files: `vicmap_acquire/naming.py`, `tests/test_naming.py` (now includes independent Oracle test)
-- Why fragile: Reserved keyword list (`_RESERVED_KEYWORDS`) was hand-transcribed from PostgreSQL documentation; a missed keyword or future PostgreSQL update could cause collisions
-- Safe modification: Maintain the Oracle test (`PostgresKeywordOracleTest`) which queries live PostgreSQL's `pg_get_keywords()` whenever a server is available; update the keyword list only when Oracle test fails
-- Test coverage: ✓ Full coverage with 41 tests including Oracle validation
-
-**Archive Extraction Hardening (Now Complete):**
-- Files: `vicmap_acquire/extraction.py` (lines 181-268, validation logic)
-- Why fragile: Untrusted ZIP files can exploit extraction via path traversal, symlinks, compression bombs, or duplicate names
-- Safe modification: All guards are in `_reject_unsafe_member` and `_validate_members` — any path change must preserve: (a) path traversal rejection (`..`, `/`, `\`), (b) absolute path rejection, (c) symlink rejection on Unix, (d) duplicate-name detection (including case-folding for case-insensitive filesystems), (e) per-member and total-bytes ceilings
-- Test coverage: ✓ Comprehensive; `tests/test_extraction.py` covers traversal, symlinks, duplicates, and ceiling violations
-
-**URL Validation in Download (Now Hardened):**
-- Files: `vicmap_acquire/download.py` (lines 86-150, URL normalization)
-- Why fragile: Attacker-controlled URLs can target internal networks (SSRF) or bypass allowlists via redirects/fragments/ports
-- Safe modification: Do NOT relax host allowlist, port restrictions, or redirect validation; `_normalize_url_prefix` and `_normalize_allowed_host` enforce exact HTTPS, no ports, no userinfo — do not weaken these
-- Test coverage: ✓ Full; `tests/test_download.py` covers SSRF, redirect rejection, and invalid URL formats
-
-**HTML Visibility Parsing (Now Differential-Oracle-Tested):**
-- Files: `vicmap_acquire/origin.py` (email authentication and link extraction)
-- Why fragile: Email HTML can have malformed nesting, mismatched tags, or embedded scripts that confuse naive text extraction; previous implementation had void-element and suppression bugs
-- Safe modification: The html5lib-based implementation is now proven against a differential oracle (370/2000 fuzz tests); do not switch back to regex-based extraction or simplify nesting rules
-- Test coverage: ✓ Differential oracle; `tests/test_html_visibility_differential.py` validates against real html5lib output
-
-## Scaling Limits
-
-**Archive Member Count Ceiling (Conservative):**
-- Current capacity: Max 4,000 members per archive (`ExtractionPolicy.max_member_count`)
-- Limit: Real Vicmap orders unknown; if a delivery exceeds 4,000 files, extraction will fail with `archive_ceiling_exceeded`
-- Scaling path: Increase `max_member_count` in `vicmap.toml` if real deliveries are larger; test extraction with a live order to calibrate
-
-**Compressed-Bytes and Per-Member Ceilings (Tight):**
-- Current capacity: `max_total_bytes = 10737418240` (10 GiB), `max_member_bytes = 4294967296` (4 GiB)
-- Limit: A delivery larger than 10 GiB will fail; per-member limit at 4 GiB
-- Scaling path: These are the binding resource ceilings; increase if real deliveries are larger, but verify available disk/memory first
-- Testing: ✓ `ShippedCeilingCalibrationTest` validates against the real 233 MB Order_OK0VUZ
-
-**Database Scaling (Not Yet Evaluated):**
-- Current capacity: Unknown (Phase 3 not implemented)
-- Limit: Connection pooling, transaction isolation, and lock contention not yet designed
-- Scaling path: Phase 3 must include concurrency testing (multiple concurrent readers vs. publish lock) and connection-pool tuning
-
-## Dependencies at Risk
-
-**GDAL/OGR Driver Coverage:**
-- Risk: Only OpenFileGDB format is currently allowlisted (`supported_formats` in `vicmap.toml`); if Vicmap switches delivery formats (e.g., to GPKG, Shapefile), discovery will fail with `unsupported_format`
-- Impact: Entire pipeline blocks until `vicmap.toml` is updated
-- Migration plan: Test and add new drivers to `_EXTENSION_DRIVERS` and `supported_formats` per real deliveries; already architected for single-line widening (see `read_mailbox.py:84-85` comments)
-
-**Python 3.14 Environment (Risk of Dependency Rot):**
-- Risk: Project uses Nix-managed dependencies; if upstream packages (O365 SDK, GDAL, psycopg) are not maintained in nixpkgs, environment will rot
-- Impact: New development machines won't be able to build the environment; deployments will fail
-- Migration plan: Monitor nixpkgs and maintain `flake.lock`; consider pinning to a specific nixpkgs revision for production deployments
-
-**Microsoft O365 SDK Version (2.1.0):**
-- Risk: O365 is a third-party community-maintained SDK; breaking changes or deprecations could affect authentication flow
-- Impact: Authentication failures on environment updates; Graph API changes not propagated to SDK
-- Migration plan: Monitor O365 changelog; if breaking changes occur, migrate to Microsoft's official `msgraph-sdk-python` or call Graph REST directly
-
-## Missing Critical Features
-
-**PostGIS Database Layer (Phase 3):**
-- Problem: No database connection, staging table creation, validation, or atomic promotion code exists
-- Blocks: Cannot load any data; cannot test consumer access; cannot prove idempotency
-- Phase: 3 (not started)
-
-**Atomic Table Swap & Rollback (Phase 4):**
-- Problem: No transaction strategy for swapping staging → production; no rollback on validation failure
-- Blocks: Readers could see partial/invalid data during load; failed loads are not recoverable
-- Phase: 4 (not started); see PITFALLS.md Pitfall 5
-
-**Consumer Access Validation (Phase 4):**
-- Problem: No test that proves real database users (not owner/superuser) can query published tables
-- Blocks: Grants/ACLs might not be applied correctly; users could have wrong schema-path expectations
-- Phase: 4 (not started); see PITFALLS.md Pitfall 6
-
-**WFS Cleanup & Inventory (Phase 5):**
-- Problem: No code to inventory, approve, or safely delete abandoned WFS tables
-- Blocks: Legacy `public` schema tables from failed WFS attempts will accumulate
-- Phase: 5 (not started); see PITFALLS.md Pitfall 7
-
-**Systemd Integration & Daily Scheduling (Phase 5):**
-- Problem: No service file, timer configuration, or journald logging integration
-- Blocks: Cannot run unattended on a schedule; operator must invoke manually
-- Phase: 5 (not started)
-
-**Failure Notification (Phase 5):**
-- Problem: No email-on-failure integration; failures are only visible in structured logs
-- Blocks: Operations teams won't be alerted to failures unless actively monitoring logs
-- Phase: 5 (not started); currently by design (journal-only for success, deferred to Phase 5)
-
-## Test Coverage Gaps
-
-**Database-Specific Validation (Untested):**
-- What's not tested: Staging table creation with correct schema/grants; promotion with advisory locks; consumer-role queries; parallel reader safety during promotion
-- Files: `vicmap_acquire/` has no `database.py` module; no tests exist
-- Risk: Loading will silently succeed but leave data unpublished, with wrong CRS, truncated names, or missing grants
-- Priority: HIGH — This is Phase 3's core verification; must be 100% tested before v0.1 proof is complete
-
-**Concurrent Execution (Partially Tested):**
-- What's not tested: Two discover_order.py runs for the same order simultaneously; concurrent reader traffic during table swap; promotion lock timeout behavior
-- Files: `tests/` has no concurrency fixtures
-- Risk: Duplicate data, reader blocking, or race conditions on table rename
-- Priority: HIGH — Deferred to Phase 4 (Publication) per PITFALLS.md, but critical for systemd timer safety
-
-**Live PostGIS Integration (Untested):**
-- What's not tested: Real PostgreSQL 18.6 + PostGIS; actual CRS transformation; geometry validity checks; spatial indexes on loaded tables
-- Files: None; Phase 3 not started
-- Risk: Tables load but are spatially invalid, have wrong SRIDs, or lack performance indexes
-- Priority: HIGH — v0.1 proof requires this; deferred to Phase 3
-
-**Error Recovery (Partially Tested):**
-- What's not tested: Partial extraction rollback on write failure (code exists but untested beyond unit guards); extraction resume after network failure (not implemented); database transaction rollback with old-table retention
-- Files: `vicmap_acquire/extraction.py` has guards, but integration tests are missing
-- Risk: Failed runs leave `.tmp-` directories or incomplete tables that operators must manually clean
-- Priority: MEDIUM — Phase 3 should establish recovery patterns
-
-**Real-World Email Parsing (Single Happy-Path Fixture):**
-- What's not tested: Malformed MIME; missing headers; real Vicmap subject line variability; message size edge cases
-- Files: `tests/test_origin.py`, `tests/test_candidates.py` use redacted fixed fixtures (02-RESEARCH.md Pattern 1)
-- Risk: First live Vicmap message fails with unexpected parse error; hidden until production invocation
-- Priority: MEDIUM — Mitigated by operator manual selection and review before discovery (Phase 1 decisions); consider widening fixture library as real messages arrive
-
-**Archive Inspection Against Real Deliveries (Now Exercised):**
-- What's tested: Fixed synthetic fixtures (Order_TRACER1.zip, ~12 MB) and the real 233 MB Order_OK0VUZ.zip
-- Files: `tests/test_extraction.py` (ShippedCeilingCalibrationTest uses `Order_OK0VUZ.zip`)
-- Coverage: ✓ Real delivery extraction is now exercised; compression-ratio and byte-ceiling calibration verified
-- Risk: MITIGATED; first production delivery is now part of the test suite
-
-## Architectural Risks
-
-**No Distributed Idempotency (Phase 3+):**
-- Problem: Currently, each run generates a unique timestamp-based directory; if the same message is processed twice, duplicate tables are created
-- Blocks: Daily systemd retries (Phase 5) need idempotency; message_fingerprint is available but not used for deduplication yet
-- Risk: Multiple invocations of discover_order.py with the same artifact create multiple `runs/` directories and manifests; database loads are not guarded against duplication
-- Approach: Phase 3 must include an idempotency check (e.g., Postgres audit log or manifest cache) before promoting tables
-
-**No Rollback of Multi-Table Operations (Phase 4):**
-- Problem: If layer 5 of 10 fails to load, layers 1-4 are already published; rolling back requires manual cleanup
-- Blocks: Atomic all-or-nothing semantics require transaction bracketing or a multi-layer manifest with rollback logic
-- Risk: Partial data visibility if a mid-load failure occurs
-- Approach: Phase 4 (Publication) must design explicit rollback semantics per PITFALLS.md Pitfall 5
-
-**No Visibility into Loader Privilege Escalation (Phase 3):**
-- Problem: Loader role will be created with `CREATE TABLE` on `vicmap` schema; if misconfigurated, it could have unintended privileges
-- Blocks: Consumer role cannot be safely tested as non-superuser without the correct loader/reader role separation
-- Risk: Cleanup phase (Phase 5) could drop unrelated tables if loader role is overprivileged
-- Approach: Phase 3 must include explicit role-creation tests and privilege audits per PITFALLS.md Pitfall 6
-
-## Documentation Gaps
-
-**Phase 3 Database Design Not Yet Documented:**
-- Missing: Schema layout, table naming policy, staging vs. production separation, transaction strategy, lock timeout values, indexing policy, grants/role separation
-- Impact: Phase 3 planning cannot begin without this design; currently blocks transition from Phase 2 to Phase 3 implementation
-
-**Operational Runbook Missing:**
-- Missing: Failure recovery steps, manual table cleanup, credential rotation, upgrade procedures
-- Impact: Operations teams lack guidance for incident response; currently deferred to Phase 5
-
-**CRS Transformation Policy Not Finalized:**
-- Missing: Decision on whether to preserve source CRS or standardize on one SRID (e.g., EPSG:4283 for Victoria)
-- Impact: Consumers won't know what SRIDs to expect; spatial queries may silently fail or return wrong results
-- Approach: PITFALLS.md Pitfall 3 calls for this decision before Phase 3 implementation; needs explicit operator input
+**Evidence Module Validation Patterns:**
+- Issue: `vicmap_acquire/evidence.py` carries 871 lines of regex-based validation for safe scalar fields (hostname, identifiers, JSON). Recent fix (WR-06) found unbounded hostname/table-name patterns that could accept unbounded input, creating redaction boundary violations.
+- Files: `vicmap_acquire/evidence.py`
+- Impact: Operator-facing event streams could leak unsanitized input if validation patterns are too permissive, defeating the closed-evidence design.
+- Fix approach: Every regex with a natural bound (hostname DNS limit 253 chars, PostgreSQL identifier 63 bytes) must encode that bound explicitly. Add a comment citing the bound and its source. Consider periodic audit against staging.py patterns.
 
 ---
 
-*Concerns audit: 2026-09-18*
+## Known Bugs
+
+**Grid vs. Helmert Transform Selection in ogr2ogr (WINDOWS.md #2, #7 - OPEN):**
+- Symptoms: Spatial coordinates transformed from GDA94 Vicgrid to GDA2020 (or vice versa) via ogr2ogr with `-ct_opt ONLY_BEST=YES -ct_opt ALLOW_BALLPARK=NO` flags select the grid-free Helmert 7-parameter transform (`+proj=helmert`) instead of the vendored ICSM grid (`+proj=hgridshift au_icsm_GDA94_GDA2020_conformal_and_distortion.tif`), resulting in ~2mm accuracy loss at some points.
+- Files: `vicmap_acquire/staging.py` (lines 510-525 set GDAL transform options), `flake.nix` (PROJ data path configuration), `db/provision_vicmap_loader.sql`
+- Trigger: Run `stage_order.py` with a layer containing GDA94 source SRID (7899) and target SRID 3111 (GDA2020 Vicgrid); verify via `pyproj.datadir.set_data_dir()` + transforming a known point coordinate.
+- Workaround: No current mitigation. PROJ's internal accuracy metadata (0.01m for Helmert, 0.05m for grid) ranks Helmert as 'best' regardless of PROJ_DATA resolution, and `ONLY_BEST=YES` enforces that ranking.
+- Root cause: PROJ library's accuracy declarations, not a code defect. Fix requires either forcing grid selection via explicit `-ct` pipeline string (future phase) or tightening the operation filter to reject ballpark transforms.
+
+**Provisioning Script Assumes Existing Database (WINDOWS.md #4 - OPEN):**
+- Symptoms: Running `db/provision_vicmap_loader.sql` as the first step fails with `FATAL: database vicmap does not exist` instead of creating the database. Operator must manually execute `CREATE DATABASE vicmap;` as superuser first.
+- Files: `db/provision_vicmap_loader.sql`
+- Trigger: Fresh PostgreSQL instance; run the script as-is against a server with no `vicmap` database.
+- Workaround: Manually create the database before running the script, or use a PostgreSQL admin tool.
+- Root cause: The script's first statement is `CREATE ROLE`, not `CREATE DATABASE`. Adding `CREATE DATABASE` changes the script's prerequisites (who can run it, when), an operator-level decision beyond this codebase phase's scope (documented in WINDOWS.md).
+
+**Placeholder Config Value in vicmap.toml (WINDOWS.md #1 - OPEN):**
+- Symptoms: `allowed_url_prefixes` in `[download]` section contains placeholder `"https://s3.ap-southeast-2.amazonaws.com/cl-isd-prd-datashare-s3-delivery/"` — this is the production value and is correct, but the Phase 01 plan left it deliberately fail-closed pending operator confirmation.
+- Files: `vicmap.toml` (line 19)
+- Impact: Minimal — the value is now verified against the real delivery and is the correct production prefix.
+- Fix approach: This is a checkpoint, not a bug. No code change needed; documented in phase history as confirmed 2026-09-14.
+
+---
+
+## Security Considerations
+
+**Redaction Boundary Enforcement:**
+- Risk: Evidence module's regex patterns must reject unbounded input; a permissive pattern could let raw SQL, error messages, or file paths leak into JSON Lines output, where the operator or log aggregator might process it without sanitization.
+- Files: `vicmap_acquire/evidence.py` (all `_require_*` validators and regex definitions)
+- Current mitigation: Every scalar field validated against a closed regex; recent fix (WR-06) bounded hostname and table-name patterns to their natural limits. `_EmitOnce` guards prevent a failed sink from retrying and leaking details.
+- Recommendations: 
+  - Before adding new fields to event classes, explicitly decide the safe scalar bound (length, character set) and cite the source.
+  - Add a periodic audit (every phase) comparing `evidence.py` bounds against corresponding bounds in `staging.py`, `discovery.py`, and `manifest.py`.
+  - Document why certain fields are fingerprinted vs. rendered in clear (e.g., `database_identity.host` is clear, but `download_target.path_fingerprint` is hashed).
+
+**SQL Injection via Identifier Composition:**
+- Risk: If a declared geometry type (e.g., `POINT Z`) is not validated against a closed list before being used in a `CREATE TABLE` or `ALTER TABLE` statement, attacker-supplied input could modify the SQL command.
+- Files: `vicmap_acquire/staging.py` (lines 652-683: `normalize_declared_geometry_type`, lines 744-757: `build_repair_statement`, lines 949-1120: `apply_post_validation_ddl`)
+- Current mitigation: Fix WR-04 adds an explicit assertion checking `declared_type` membership against a 28-name closed vocabulary immediately before use in `apply_post_validation_ddl`.
+- Recommendations: Ensure every raw-SQL composition point that uses a value from a previous function re-asserts that value's invariant (e.g., "this field is already in the closed list") rather than relying silently on a different function's validation.
+
+**Subprocess Invocation with ogr2ogr:**
+- Risk: `subprocess.run()` invokes ogr2ogr with a complex argument list including file paths, table names, and schema names. If any component is not properly quoted or escaped, command injection could occur.
+- Files: `vicmap_acquire/staging.py` (lines 489-541: `build_ogr2ogr_command`, lines 552-627: `load_layer`)
+- Current mitigation: The command is built as a list of strings, not a shell command, so shell metacharacters in file paths or identifiers are passed literally. Identifiers are validated against closed patterns and quoted as SQL identifiers. File paths are `Path` objects, not string interpolation.
+- Recommendations: Continue avoiding `shell=True`. If the ogr2ogr invocation changes, trace each argument to confirm it is either a constant, a validated identifier, or a Path object.
+
+**Environment Variable Leakage:**
+- Risk: Database password passed via `PGPASSWORD` environment variable is visible to all processes running as the same user (via `/proc/[pid]/environ` on Linux). If a subprocess or helper tool is spawned in the same environment, it inherits the password.
+- Files: `vicmap_acquire/staging.py` (line 584: `env={**os.environ, "PGPASSWORD": password}`)
+- Current mitigation: The password is passed only to the specific `subprocess.run()` call for ogr2ogr; the entire process environment is not modified. Cleartext password appears in the subprocess's own env, but that is unavoidable with command-line tools that do not support stdin or conninfo strings.
+- Recommendations: Document that `VICMAP_DB_PASSWORD` (the source of the password parameter) is read from the environment only once, at process start, and is never written to config files, logs, or event streams. Operators should ensure the container/host/script that runs the acquisition tool uses a secure secret management system (e.g., OS credential store, opnix) rather than exporting `VICMAP_DB_PASSWORD` in shell session state.
+
+---
+
+## Performance Bottlenecks
+
+**Sequential Layer Loading:**
+- Problem: `run_staging()` loads manifest layers sequentially in a loop (lines 1169-1238), one `ogr2ogr` subprocess per layer, waiting for completion before starting the next. On a large manifest with many layers, total runtime is the sum of all per-layer times.
+- Files: `vicmap_acquire/staging.py` (lines 1128-1240)
+- Cause: Explicit design choice documented in the function docstring ("One `ogr2ogr` invocation at a time -- sequentially, with no concurrent execution framework"). Simplifies error handling (first failure stops the run) and resource management (no unbounded subprocess count).
+- Improvement path: If loading becomes a bottleneck, implement a bounded task queue or thread pool with a small concurrency limit (e.g., 2-4 parallel loads). This requires careful error handling to ensure the first load failure stops all pending tasks gracefully, and would need regression testing to confirm no race conditions in database writes.
+
+**Validation Query on Large Spatial Tables:**
+- Problem: `validate_layer()` runs a single complex SQL query (built by `build_validation_query()`) that selects row count, null-geometry count, invalid-geometry count, distinct SRIDs, distinct geometry types, extent, and Z/M flags in one pass. On a very large table (millions of rows), this query could be I/O-intensive.
+- Files: `vicmap_acquire/staging.py` (lines 701-743: `build_validation_query`, lines 780-928: `validate_layer`)
+- Cause: Design trade-off: one query minimizes the number of table scans and reduces total query time vs. multiple focused queries.
+- Improvement path: Monitor real query execution times on production manifests. If validation exceeds a threshold (e.g., >30 seconds), consider splitting into separate queries or adding covering indexes on the staging table before validation begins. Current design is acceptable for validation purposes (accuracy matters more than speed) and the queried staging tables are temporary anyway.
+
+**ogr2ogr Subprocess Diagnostics Capture:**
+- Problem: stderr output from the ogr2ogr subprocess is captured to a file on every load (line 579: `stderr=diagnostics_path(...)`). On large files or verbose ogr2ogr output, the file could grow large and I/O for writing it could slow the overall load.
+- Files: `vicmap_acquire/staging.py` (lines 543-627)
+- Cause: Design choice to capture diagnostics for debugging failed loads; necessary for post-mortem analysis when load_layer raises LoadFailed.
+- Improvement path: Only write diagnostics file on error (use `PIPE` initially, then write only if returncode != 0). Current approach is acceptable for proof-of-concept; optimize if diagnostics file sizes become problematic in production runs.
+
+---
+
+## Fragile Areas
+
+**validate_layer Function Logic:**
+- Files: `vicmap_acquire/staging.py` (lines 780-928)
+- Why fragile: Contains a six-step validation state machine (row count → null geometry → SRID → geometry type → repair → extent) with multiple conditional branches and exception types. Any change to the order, condition, or exception mapping could break invariants (e.g., row count must be checked before geometry type, because a mismatch means the table is wrong regardless of geometry state).
+- Safe modification: Add new validation steps by appending to the numbered list (step 7, 8, ...), not by inserting. Update docstrings and comments to reflect the new order. Add corresponding test cases in `ValidationTest` class.
+- Test coverage: `tests/test_staging.py` has 20+ tests for `validate_layer` variants (spatial, non-spatial, repair, mismatches); add new tests for any new step before committing.
+
+**apply_post_validation_ddl Function:**
+- Files: `vicmap_acquire/staging.py` (lines 949-1120)
+- Why fragile: Builds and executes four separate DDL statements (PRIMARY KEY, typed geometry column, NOT NULL constraint, GiST index, btree indexes) in a single transaction. If any statement fails partway through (e.g., primary key creation fails after the ALTER TYPE succeeds), the whole transaction rolls back, but the order of operations is important for idempotency and readability.
+- Safe modification: Test any changes against an existing staging table (re-run apply_post_validation_ddl against the same table twice) to confirm idempotency. Ensure new DDL statements are added inside the same transaction block.
+- Test coverage: `tests/test_staging.py` has 10+ tests for post-validation DDL variants; always run them after changes.
+
+**Evidence Regex Patterns:**
+- Files: `vicmap_acquire/evidence.py` (all regex definitions and `_require_*` validators)
+- Why fragile: Adding a new event type or field requires adding a corresponding validator regex. If the regex is too permissive or missing a bound, the new field could leak unsanitized data into the event stream. If the regex is too strict, legitimate values could be rejected.
+- Safe modification: New fields must define a safe-scalar bound (max length, allowed characters) with a comment citing the source (e.g., "PostgreSQL 63-byte limit" or "DNS 253-byte limit"). Test the regex against real examples from the actual data source.
+- Test coverage: `tests/test_evidence.py` has 50+ tests for validators and event construction; add test cases for any new field before committing.
+
+**Discovery Module with ogrinfo Subprocess:**
+- Files: `vicmap_acquire/discovery.py` (lines 220-250: `discover_layers`)
+- Why fragile: Invokes `ogrinfo` subprocess with a timeout and parses JSON output. If ogrinfo output format changes (across GDAL versions), JSON parsing could fail. If the subprocess times out, determining whether it was the dataset itself or the timeout logic is difficult.
+- Safe modification: Maintain compatibility with GDAL versions documented in `flake.nix`. Add a version check or capture `ogrinfo --version` output in diagnostics if behavior diverges. Any change to timeout handling should be tested against both fast (in-memory) and slow (network) datasets.
+- Test coverage: `tests/test_discovery.py` and `test_discovery_differential.py` have differential oracle tests; use real datasets to verify changes.
+
+---
+
+## Scaling Limits
+
+**Manifest Layer Count:**
+- Current capacity: Tested with 100+ layers; `run_staging()` iterates sequentially, so doubling layer count doubles runtime.
+- Limit: No hard limit; limited by total runtime tolerance (if sequential loading exceeds 1 hour per order, operators may cancel). For the Vicmap delivery (1-3 layers typically), not a concern.
+- Scaling path: If manifests grow to 1000+ layers, implement parallel loading (see Performance Bottlenecks section).
+
+**PostGIS Staging Table Size:**
+- Current capacity: Tested with tables > 1 million rows; `validate_layer` query completes in seconds; staging tables are temporary and are dropped after publication.
+- Limit: PostgreSQL backend can handle billions of rows; the practical limit is disk space and query time. Storage is not a concern since staging tables are temporary.
+- Scaling path: Monitor query execution plans for validate_layer on very large tables; add covering indexes if sequential scans become problematic.
+
+**Connection Pool:**
+- Current capacity: One connection per function call (read_database_identity, preflight_staging_privileges, load_layer, validate_layer, apply_post_validation_ddl); connections are opened and closed sequentially.
+- Limit: Database server max_connections (default ~100). With sequential execution, this is never a bottleneck.
+- Scaling path: If parallel loading is implemented, use a bounded connection pool (psycopg.ConnectionPool) with a small limit (e.g., 5-10) to avoid exhausting the server's capacity.
+
+**ogr2ogr Subprocess Memory:**
+- Current capacity: Tested with archive members up to 4 GB; ogr2ogr's memory usage depends on the dataset format and layer complexity.
+- Limit: Host RAM available to the ogr2ogr subprocess. No explicit bound is set in the acquisition tool.
+- Scaling path: If datasets exceed available RAM, ogr2ogr will fail with an out-of-memory error (raised as LoadFailed). Monitor host memory during load and adjust `max_member_bytes` in `vicmap.toml` if needed.
+
+---
+
+## Dependencies at Risk
+
+**psycopg 3.3.4 PostgreSQL Driver:**
+- Risk: Phase 03 introduced psycopg as the required PostgreSQL driver. Major version changes (4.x, 5.x) could introduce breaking changes in connection strings, SQL parameter syntax, or exception types.
+- Impact: Loading phase would fail to work with newer driver versions without code updates.
+- Current mitigation: `flake.nix` pins psycopg to 3.3.4; nixpkgs updates are controlled.
+- Migration plan: Monitor psycopg releases for major version announcements. When psycopg 4.x is released, review breaking changes and plan a migration phase if needed. Current code uses standard psycopg patterns (connect, cursor, execute) that are likely stable across minor versions.
+
+**GDAL/ogr2ogr Binary Dependency:**
+- Risk: ogr2ogr is a system binary invoked via subprocess. GDAL version changes (3.x, 4.x) could change argument syntax, default behavior, or output format.
+- Impact: ogr2ogr invocation or stderr parsing could fail with newer GDAL versions.
+- Current mitigation: `flake.nix` pins GDAL to a specific version; test suite includes `test_only_best_and_allow_ballpark_flags_are_recognized_by_the_real_binary` to detect breaking changes.
+- Migration plan: When upgrading GDAL, run the flag-recognition test first. If it fails, review the new GDAL documentation and update the argument list in `build_ogr2ogr_command()`.
+
+**PROJ Library for Coordinate Transforms:**
+- Risk: PROJ 9.x introduced significant changes to grid handling and accuracy metadata. A future PROJ release could change how grids are discovered, ranked, or applied.
+- Impact: Grid vs. Helmert selection issue (WINDOWS.md #7) could worsen or change unexpectedly with PROJ updates.
+- Current mitigation: None — the grid selection issue is known and documented. `flake.nix` pins PROJ version.
+- Migration plan: Monitor PROJ release notes. If a release promises improved grid selection or accuracy, test it against the known GDA94/GDA2020 transform to determine if it resolves WINDOWS.md #7. If grid selection remains an issue, implement an explicit fix in the acquisition code (force grid selection via `-ct` pipeline) in a future phase.
+
+**pyogrio Python Geospatial I/O:**
+- Risk: Phase 02 uses pyogrio to read layer metadata via `read_info()`. Version changes could alter the returned data structure or add new exceptions.
+- Impact: Discovery metadata extraction could break or miss new layer fields.
+- Current mitigation: `flake.nix` pins pyogrio; `tests/test_discovery.py` includes regression tests against real and synthetic datasets.
+- Migration plan: Periodically run the discovery differential tests (especially `test_discovery_differential.py`) after updating pyogrio. If output changes, review and update the parsing logic in `discover_layers()`.
+
+---
+
+## Missing Critical Features
+
+**Superuser Privilege Testing (WINDOWS.md #6 - OPEN):**
+- Problem: PrivilegePreflightTest class has 5 test methods that verify privilege preflight behavior (pass path, 4 fail paths for missing staging schema create, public schema create, superuser role, unknown SRID). These tests skip without the `VICMAP_TEST_POSTGRES_SUPERUSER_DSN` environment variable, which was never configured during Phase 03.
+- Blocks: Automated verification of DB-02 privilege preflight rules; currently verified only via live manual testing (stage_order.py --preflight-only).
+- Gap: No automated regression test for privilege preflight; future changes to privilege validation logic could introduce subtle regressions.
+- Fix: Configure VICMAP_TEST_POSTGRES_SUPERUSER_DSN in the test environment, or set up a separate project-provisioned test-only superuser role (documented like VICMAP_DB_PASSWORD). This is an environment/operator setup task, not a code change.
+
+**GDA94/GDA2020 Grid-Accurate Coordinate Transform (WINDOWS.md #2, #7 - OPEN):**
+- Problem: Grid-free Helmert transform is selected instead of vendored ICSM grid, leading to ~2mm accuracy loss. No mechanism in the current acquisition code forces grid selection.
+- Blocks: Coordinates transformed to GDA2020 Vicgrid are ~2mm off; if application logic depends on sub-meter accuracy, this is unacceptable.
+- Gap: No workaround in code; operator acceptance is documented in phase sign-off (2026-09-21). Fix requires changes to GDAL invocation or PROJ pipeline configuration, outside the scope of Phase 03.
+- Fix: Implement explicit `-ct` pipeline string in `build_ogr2ogr_command()` to force grid selection, or upgrade to PROJ 10.x if it improves grid accuracy metadata. Document the chosen approach in a future phase plan.
+
+**Database Schema and Role Provisioning Script:**
+- Problem: `db/provision_vicmap_loader.sql` is incomplete (missing CREATE DATABASE) and requires manual operator steps before use.
+- Blocks: Provisioning a fresh PostgreSQL instance for the acquisition tool requires out-of-band manual steps.
+- Gap: No automated provisioning script or Terraform module to set up the entire database, schemas, and roles.
+- Fix: Create an optional Phase 04 plan to provide a complete provisioning guide or automation. For now, document the manual steps in WINDOWS.md and require operator confirmation before running the script.
+
+---
+
+## Test Coverage Gaps
+
+**Privilege Preflight Verification (tests/test_staging.py):**
+- What's not tested: The five PrivilegePreflightTest methods (pass path, 4 fail paths) skip without VICMAP_TEST_POSTGRES_SUPERUSER_DSN configured. DB-02's full contract is not automatically verified.
+- Files: `tests/test_staging.py` (lines 941-1127: PrivilegePreflightTest)
+- Risk: A regression in privilege validation (e.g., accidentally allowing superuser to write to staging schema, or rejecting a valid non-superuser role) could go undetected until live testing.
+- Priority: High — privilege checks are security-critical. Should be run as part of CI/CD if possible, or documented as a required manual pre-deployment check.
+- Recommendation: Set up VICMAP_TEST_POSTGRES_SUPERUSER_DSN in the test environment or use a Docker PostgreSQL fixture that provides both ordinary and superuser connections.
+
+**Live Delivery Regression Tests (tests/test_discovery.py, test_extraction.py, test_manifest.py):**
+- What's not tested: Tests marked with `@unittest.skipUnless(REAL_ARTIFACT.is_file(), ...)` skip if `artifacts/Order_OK0VUZ.zip` is not present. End-to-end integration with the real order artifact is conditional.
+- Files: `tests/test_manifest.py` (line 1119), `tests/test_discovery_config.py` (line 402), `tests/test_extraction.py` (lines 581, 667)
+- Risk: Unit tests can pass, but real artifact unpacking or manifest creation could still fail due to unexpected data in the real ZIP, OGR metadata, or layer schemas.
+- Priority: Medium — live tests caught multiple issues during Phase 02 (e.g., correct ADDRESS schema has 61 fields, not 40). Should be run nightly or pre-release.
+- Recommendation: Store artifacts in a dedicated CI/CD artifact cache and populate them at test time. Ensure the real Order_OK0VUZ artifacts are available in the CI environment.
+
+**Geometric Repair Edge Cases (tests/test_staging.py):**
+- What's not tested: `validate_layer()` can repair invalid geometries via `ST_MakeValid()`. Test coverage includes "repair-preserving-type" and "repair-changing-type" cases, but edge cases like self-intersecting polygons, overlapping holes, or topology violations are not explicitly tested.
+- Files: `tests/test_staging.py` (lines 1281-1330, 1332-1360)
+- Risk: A geometry edge case could fail to repair or repair to an unexpected type, causing the validation to raise or pass when it should do the opposite.
+- Priority: Low — the real Vicmap ADDRESS dataset has been tested against these functions and repairs succeeded. Regression unlikely unless geometry source changes.
+- Recommendation: If geometry repair logic changes, add fixture geometries for known edge cases (self-intersecting, holes, etc.) and test repair outcomes.
+
+**CLI Argument Parsing (discover_order.py, stage_order.py):**
+- What's not tested: The top-level entry-point scripts (discover_order.py, stage_order.py) parse command-line arguments, load configuration, and orchestrate the acquisition phases. Unit tests focus on module functions, not CLI orchestration.
+- Files: `discover_order.py`, `stage_order.py`
+- Risk: A typo in argument parsing or configuration loading could go undetected in unit tests.
+- Priority: Low — these scripts are tested via live manual execution during each phase. Automated CLI tests could be added if they become complex.
+- Recommendation: Consider adding pytest fixtures that simulate argparse inputs and configuration files, or use hypothesis-based property testing for config validation.
+
+---
+
+*Concerns audit: 2026-09-22*

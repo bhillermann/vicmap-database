@@ -1,289 +1,286 @@
-<!-- refreshed: 2026-09-18 -->
+<!-- refreshed: 2026-09-22 -->
 # Architecture
 
-**Analysis Date:** 2026-09-18
+**Analysis Date:** 2026-09-22
 
 ## System Overview
 
-The vicmap-database system acquires and processes geospatial data from a trusted email source through two distinct phases:
-- **Phase 1 (Acquisition)**: Authenticates user, scans mailbox for trusted candidates, downloads artifact, verifies integrity
-- **Phase 2 (Discovery)**: Extracts archive, discovers geospatial layers, normalizes table names, publishes manifest
+The Vicmap Database acquisition system is a three-phase pipeline that retrieves geospatial map data from a trusted email source, extracts and catalogs layers from the artifact, and loads them into a PostGIS database. Each phase is independent but sequentially ordered, with typed failure boundaries and closed event reporting at every stage.
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                             Phase 1: Acquisition                             │
-│  read_mailbox.py → run_acquisition()                                         │
-├──────────────┬────────────────┬──────────────┬──────────────┬───────────────┤
-│   Graph API  │  Candidates    │  Download    │  Artifact    │   Evidence    │
-│              │  Recognition   │  Manager     │  Verification│   Emitter     │
-└──────────────┴────────────────┴──────────────┴──────────────┴───────────────┘
-         │
-         ▼  Artifact + Provenance Sidecar
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                             Phase 2: Discovery                               │
-│  discover_order.py → run_discovery()                                         │
-├──────────────┬────────────────┬──────────────┬──────────────┬───────────────┤
-│  Extraction  │  Discovery     │   Naming     │   Manifest   │   Evidence    │
-│  Manager     │  (pyogrio)     │  Normalizer  │  Builder     │   Emitter     │
-└──────────────┴────────────────┴──────────────┴──────────────┴───────────────┘
-         │
-         ▼  Manifest + Companion Files
-     PostGIS Ingestion (Phase 3)
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         Phase 1: Acquisition                              │
+│              Graph → Candidate → Download → Verify                        │
+│                   (read_mailbox.py)                                       │
+└─────────────────────────┬──────────────────────────────────────────────────┘
+                          │ Download artifact
+                          │ (Order_{id}.zip)
+                          ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         Phase 2: Discovery                                │
+│        Extract → Discover → Name → Build → Write Manifest                │
+│                   (discover_order.py)                                     │
+└─────────────────────────┬──────────────────────────────────────────────────┘
+                          │ Manifest + extracted
+                          │ geospatial files
+                          ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         Phase 3: Staging                                  │
+│        Connect → Preflight → Load → Validate → Publish                   │
+│                   (stage_order.py)                                        │
+└──────────────────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+                   PostGIS Database
 ```
 
 ## Component Responsibilities
 
 | Component | Responsibility | File |
 |-----------|----------------|------|
-| Graph Adapter | Microsoft Graph OAuth authentication & mailbox scanning | `vicmap_acquire/graph.py` |
-| Candidate Recognition | Identify trusted mail candidates with authenticated origins | `vicmap_acquire/candidates.py` |
-| Download Manager | SSRF-resistant streaming artifact download with byte limits | `vicmap_acquire/download.py` |
-| Artifact Verification | Pre-extraction SHA256 & byte-count validation | `vicmap_acquire/extraction.py` |
-| Archive Extraction | Atomic zip extraction with member validation & fsync | `vicmap_acquire/extraction.py` |
-| Layer Discovery | pyogrio/ogrinfo profiling of geospatial datasets | `vicmap_acquire/discovery.py` |
-| Table Naming | Deterministic target-table normalization & collision detection | `vicmap_acquire/naming.py` |
-| Manifest Builder | Frozen dataclass serialization to manifest.json | `vicmap_acquire/manifest.py` |
-| Evidence Emitter | Closed JSON Lines event emission with _EmitOnce guard | `vicmap_acquire/evidence.py` |
-| Origin Verifier | Authentication-verdict validation (DKIM/DMARC/etc) | `vicmap_acquire/origin.py` |
-| Configuration Loader | TOML parsing & policy validation | `read_mailbox.py` |
+| **Acquisition** | Graph mailbox → candidate selection → artifact download → verification | `read_mailbox.py` |
+| **Graph Adapter** | Microsoft Graph OAuth + mailbox metadata iteration | `vicmap_acquire/graph.py` |
+| **Candidate Recognition** | Email header parsing, HTML visibility analysis, authentication verification | `vicmap_acquire/candidates.py` |
+| **Origin Verification** | Authenticated sender validation via SPF/DKIM/DMARC headers | `vicmap_acquire/origin.py` |
+| **Artifact Download** | Streaming HTTP download with SSRF protection and integrity verification | `vicmap_acquire/download.py` |
+| **Extraction** | Archive member extraction with traversal/compression safety checks | `vicmap_acquire/extraction.py` |
+| **Discovery** | GIS layer profiling via pyogrio + ogrinfo subprocess | `vicmap_acquire/discovery.py` |
+| **Naming** | Deterministic PostgreSQL target table name generation + collision detection | `vicmap_acquire/naming.py` |
+| **Manifest** | Frozen import contract and `manifest.json` persistence | `vicmap_acquire/manifest.py` |
+| **Staging** | Database connection, privilege verification, ogr2ogr load, row validation | `vicmap_acquire/staging.py` |
+| **Evidence** | Closed, redaction-safe JSON Lines event reporting | `vicmap_acquire/evidence.py` |
 
 ## Pattern Overview
 
-**Overall:** Multi-stage pipeline with ordered typed-failure composition and guarded event emission
+**Overall:** Fail-closed orchestration with ordered pipelines and typed error boundaries
 
 **Key Characteristics:**
-- **No import cycles**: Dependency direction strictly adheres to leaf-ward layering
-- **Closed exceptions**: Every failure class carries no untrusted text (no subprocess/driver/archive output)
-- **Atomic publication**: Only fsync'd filesystem operations serve as commit points
-- **Single-emit events**: `_EmitOnce` guard ensures failures never multiply
-- **Frozen dataclasses**: All public data structures are immutable (`frozen=True`)
-- **TOML-driven policy**: All non-secret parameters reviewable in `vicmap.toml`
+- Every phase composes stages in strict order; no stage begins before the previous succeeds
+- Typed exception hierarchies map to closed `ReasonCode` enums, never raw driver/subprocess text
+- Event reporting routes through `_EmitOnce` guards that guarantee exactly-once delivery and isolation
+- Redaction-safe event streams (JSON Lines) expose only project-controlled values, never filesystem/driver/SQL text
+- Configuration is frozen and validated once at startup per `AcquisitionConfig`, `DiscoveryRunConfig`, `DatabaseRunConfig`
+- Every boundary module (graph, download, extraction, discovery, staging) is driver/subprocess-isolated
 
 ## Layers
 
-**Graph & Authentication:**
-- Purpose: Establish trusted OAuth session with Microsoft Graph, retrieve authenticated mailbox messages
-- Location: `vicmap_acquire/graph.py`
-- Contains: Graph account initialization, MIME message retrieval, connection management
-- Depends on: O365 SDK, environment credentials
-- Used by: `read_mailbox.run_acquisition`
+**Configuration & Orchestration:**
+- Purpose: Parse `vicmap.toml`, validate policy, route events through guards
+- Location: `read_mailbox.py`, `discover_order.py`, `stage_order.py` (root entry points)
+- Contains: Policy dataclasses, CLI argument parsing, main orchestration functions
+- Depends on: All acquire modules, validation functions
+- Used by: Command-line invocation
 
-**Candidate Recognition & Origin Verification:**
-- Purpose: Parse mail candidates, extract download links, verify authentication verdicts (DKIM/DMARC/CompAuth)
-- Location: `vicmap_acquire/candidates.py`, `vicmap_acquire/origin.py`
-- Contains: HTML/text URL parsing with html5lib tree-construction, email header authentication parsing
-- Depends on: html5lib, email.parser, Graph messages
-- Used by: `read_mailbox.run_acquisition` for candidate filtering
+**Event & Data Model:**
+- Purpose: Define closed failure codes, redaction-safe event payloads, manifest schema
+- Location: `vicmap_acquire/evidence.py`, `vicmap_acquire/manifest.py`
+- Contains: `Stage`, `ReasonCode`, `SuccessEvent`, `SafeFailure`, `ImportManifest`
+- Depends on: Nothing (leaf modules)
+- Used by: All other modules for structured reporting
 
-**Download & Artifact Integrity:**
-- Purpose: Stream artifact bytes with SSRF protection, byte limits, timeout enforcement; persist provenance sidecar
+**External Boundaries:**
+
+*Graph/Mailbox Boundary:*
+- Purpose: Abstract Microsoft Graph API and MIME parsing
+- Location: `vicmap_acquire/graph.py`, `vicmap_acquire/candidates.py`, `vicmap_acquire/origin.py`
+- Contains: Graph connection management, candidate extraction, authentication verification
+- Depends on: O365 SDK, html5lib, email parser
+- Used by: Acquisition orchestration
+
+*Download Boundary:*
+- Purpose: Stream artifact over HTTPS with SSRF/redirect/size protections
 - Location: `vicmap_acquire/download.py`
-- Contains: URL validation against closed allowlist, streaming loop with progress events, SHA256 streaming, atomic file publication
-- Depends on: requests, pathlib, hashlib
-- Used by: `read_mailbox.run_acquisition` (Phase 1 output)
+- Contains: Streaming download, URL validation, redirect chain inspection, artifact checksumming
+- Depends on: requests, stdlib urllib
+- Used by: Acquisition orchestration
 
-**Extraction & Archive Validation:**
-- Purpose: Extract zip members with directory-escape prevention, member-count limits, compression-ratio verification
+*Extraction Boundary:*
+- Purpose: Safely unzip artifacts with member/compression guards
 - Location: `vicmap_acquire/extraction.py`
-- Contains: Zip member enumeration, unsafe-path rejection, fsync directory publication
-- Depends on: zipfile, pathlib
-- Used by: `discover_order.run_discovery` (Phase 2 input)
+- Contains: ZIP iteration, traversal detection, size enforcement, member profiling
+- Depends on: stdlib zipfile
+- Used by: Discovery orchestration
 
-**Layer Discovery:**
-- Purpose: Enumerate and profile geospatial datasets using pyogrio + ogrinfo subprocess
+**Processing Layers:**
+
+*Discovery:*
+- Purpose: Profile GIS layers in extracted archives
 - Location: `vicmap_acquire/discovery.py`
-- Contains: Extension→driver mapping, pyogrio.read_info() calls, ogrinfo -json subprocess coordination
+- Contains: pyogrio dataset enumeration, ogrinfo JSON subprocess parsing
 - Depends on: pyogrio, pyproj, subprocess
-- Used by: `discover_order.run_discovery` to populate layers
+- Used by: Discovery orchestration
 
-**Table Naming & Collision Detection:**
-- Purpose: Deterministic target-table name normalization, keyword avoidance, collision detection
+*Naming:*
+- Purpose: Map source layer names to PostgreSQL identifiers
 - Location: `vicmap_acquire/naming.py`
-- Contains: PostgreSQL reserved-keyword snapshot (transcribed 2026-09-16), casefold normalization, name conflict detection
-- Depends on: re module only
-- Used by: `discover_order.run_discovery` to assign targets
+- Contains: Keyword filtering, length bounding, collision detection
+- Depends on: Nothing (leaf module, no I/O)
+- Used by: Discovery orchestration
 
-**Manifest & Evidence:**
-- Purpose: Freeze discovery results into JSON structures; emit safe, disclosure-minimal events
-- Location: `vicmap_acquire/manifest.py`, `vicmap_acquire/evidence.py`
-- Contains: ImportManifest dataclass with schema versioning, SuccessEvent/SafeFailure JSON serialization
-- Depends on: json, dataclasses, hashlib
-- Used by: Both acquisition and discovery phases for output/reporting
+*Staging:*
+- Purpose: Database connection, privilege verification, layer loading
+- Location: `vicmap_acquire/staging.py`
+- Contains: psycopg connection management, ogr2ogr subprocess invocation, row validation
+- Depends on: psycopg, subprocess
+- Used by: Staging orchestration (Phase 3)
 
 ## Data Flow
 
-### Phase 1: Acquisition (read_mailbox.py)
+### Phase 1: Acquisition Path
 
-1. **Configuration Loading** (`read_mailbox.load_config`) — reads `vicmap.toml`, validates all policy constraints
-2. **Credential Retrieval** — reads `O365_AUTH_ID`, `O365_AUTH_SECRET`, `TENANT_ID` from environment
-3. **Graph Authentication** (`graph.py:GraphMailbox.__init__`) — establishes OAuth session via O365 SDK
-4. **Mailbox Scan** (`graph.py:scan_mailbox`) — retrieves MIME messages matching sender/date criteria
-5. **Candidate Recognition** (`candidates.py:recognize_candidate`) — for each message:
-   - Parses HTML body via html5lib tree construction
-   - Extracts visible URLs from DOM
-   - Identifies archive download link
-   - Extracts order ID from subject/URL
-6. **Candidate Selection** (`candidates.py:select_candidate`) — picks single candidate, fails if none or multiple
-7. **Origin Verification** (`origin.py:verify_authenticated_origin`) — validates DKIM/DMARC/CompAuth headers
-8. **Download** (`download.py:download_artifact`) — streams bytes with:
-   - SSRF rejection of disallowed hosts
-   - Byte-limit enforcement (per-chunk + cumulative)
-   - Timeout on stalled reads
-   - SHA256 streaming hash
-   - Atomic temp→final publication
-9. **Provenance Sidecar Write** (`download.py:write_provenance_sidecar`) — persists order ID, SHA256, byte count, message fingerprint
-10. **Event Emission** — guard-protected SuccessEvent for each stage; any failure emits SafeFailure once
+1. **Startup** (`read_mailbox.py:main()`) — Parse `vicmap.toml`, load `AcquisitionConfig` (`read_mailbox.py:763`)
+2. **Validation** (`read_mailbox.py:285`) — Validate policy: credentials available, bounds sensible, allowlists non-empty
+3. **Graph Auth** (`vicmap_acquire/graph.py:GraphMailbox.__init__`) — Create O365 account with tenant credentials
+4. **Mailbox Scan** (`read_mailbox.py:513`) — Iterate messages from cutoff date via `graph.iter_metadata()` (`vicmap_acquire/graph.py`)
+5. **Candidate Recognition** (`vicmap_acquire/candidates.py:recognize_candidate()`) — For each message:
+   - Fetch MIME via Graph (`graph.get_mime_content()`)
+   - Parse email headers + HTML body
+   - Build `Candidate` record (order ID, sender, URL)
+6. **Candidate Selection** (`vicmap_acquire/candidates.py:select_candidate()`) — Choose one from list (fail if 0 or >1)
+7. **Download** (`vicmap_acquire/download.py:download_artifact()`) — Stream artifact URL with:
+   - URL allowlist check
+   - Redirect chain inspection (reject disallowed hosts)
+   - Streaming size enforcement
+   - SHA256 integrity check
+8. **Write Provenance** (`vicmap_acquire/download.py:write_provenance_sidecar()`) — Write `.provenance.json` alongside artifact
+9. **Emit Success** (`read_mailbox.py:580`) — Emit redacted `SuccessEvent` records via guard
 
-**State Management:**
-- No mutable process state; Graph/HTTP sessions managed as context
-- `_EmitOnce` guard tracks: whether sink has failed, whether failure already emitted
-- Atomic publication ensures only fsync'd files survive process crash
+### Phase 2: Discovery Path
 
-### Phase 2: Discovery (discover_order.py)
+1. **Startup** (`discover_order.py:main()`) — Parse `vicmap.toml`, load `DiscoveryRunConfig` + `ExtractionPolicy`/`DiscoveryPolicy`
+2. **Read Provenance** (`vicmap_acquire/download.py:read_provenance_sidecar()`) — Load `.provenance.json` to verify SHA256/byte count
+3. **Verify Artifact** (`vicmap_acquire/extraction.py:verify_artifact()`) — SHA256 check on-disk artifact
+4. **Extract Archive** (`vicmap_acquire/extraction.py:extract_artifact()`) — Unzip with:
+   - Member size bounds
+   - Total size enforcement
+   - Compression ratio ceiling
+   - Traversal detection (reject `..` paths)
+5. **Discover Layers** (`vicmap_acquire/discovery.py:discover_layers()`) — For each extracted dataset:
+   - Call `pyogrio.read_info()` for bulk metadata
+   - Call `ogrinfo -json -al -so` for field details
+   - Validate geometry type + CRS
+6. **Assign Names** (`discover_order.py:assign_target_table_names()`) — Map source layer names via `vicmap_acquire/naming.py:normalize_target_table_name()`
+7. **Build Manifest** (`vicmap_acquire/manifest.py:build_manifest()`) — Construct frozen `ImportManifest` record
+8. **Write Manifest** (`vicmap_acquire/manifest.py:write_manifest()`) — Persist `manifest.json` + compute SHA256 digest
+9. **Emit Success** (`discover_order.py:180`) — Emit redacted `SuccessEvent` records with layer count, manifest digest
 
-1. **Configuration Loading** (`read_mailbox.load_discovery_config`) — reads Phase 2 policy from `vicmap.toml`
-2. **Provenance Sidecar Reading** (`download.py:read_provenance_sidecar`) — validates artifact identity
-3. **Artifact Verification** (`extraction.py:verify_artifact`) — SHA256 + byte-count check
-4. **Archive Extraction** (`extraction.py:extract_artifact`) — unzips to `.tmp-` directory with:
-   - Member path validation (rejects `..`, symlinks)
-   - Cumulative byte-count + member-count limits
-   - Compression-ratio verification (stored ÷ compressed, max 200×)
-   - Fsync publication to final run directory
-5. **Layer Discovery** (`discovery.py:discover_layers`) — for each `.gdb` directory:
-   - Calls pyogrio.read_info() for feature count, geometry type, CRS, field list
-   - Runs ogrinfo -json -al -so subprocess for field precision/nullability/width
-   - Returns LayerProfile with complete metadata
-6. **Table Naming** (`naming.py:assign_target_table_names`) — maps each source layer to:
-   - Deterministic target name: `{source_name_normalized}_{layer_index}`
-   - PostgreSQL keyword conflict detection
-   - Multi-layer collision detection
-7. **Manifest Building** (`manifest.py:build_manifest`) — freezes:
-   - All discovered layers with their target tables
-   - Companion files (non-.gdb members)
-   - Artifact/run identifiers
-   - SHA256 of manifest itself
-8. **Manifest Write** (`manifest.py:write_manifest`) — JSON serialization + fsync
-9. **Event Emission** — guard-protected SuccessEvent for each stage
+### Phase 3: Staging Path
+
+1. **Startup** (`stage_order.py:main()`) — Parse `vicmap.toml`, load `DatabaseRunConfig`
+2. **Create Connection** (`vicmap_acquire/staging.py:read_database_identity()`) — Connect via psycopg with password from env (`VICMAP_DB_PASSWORD`)
+3. **Preflight** (`vicmap_acquire/staging.py:preflight_staging_privileges()`) — Prove loader can write to staging schema (rolled-back CREATE)
+4. **Read Manifest** (`vicmap_acquire/manifest.py:read_manifest()`) — Load `manifest.json` from run directory
+5. **For Each Layer:**
+   - Invoke `ogr2ogr -f PostgreSQL ... layer` (`vicmap_acquire/staging.py:run_staging()`)
+   - Verify row count matches extracted file
+   - Capture stderr to diagnostic file on failure
+6. **Emit Success** (`stage_order.py:135`) — Emit redacted `SuccessEvent` with row count
 
 **State Management:**
-- No mutable state; all intermediate values are immutable dataclasses
-- Extraction leaves `.tmp-` directories on early failures for debugging
-- Manifest written before final SuccessEvent, so even if event sink fails, manifest is durable
+- No global mutable state in modules; all state is parameter-passed or closure-captured
+- `GraphMailbox` holds a live O365 account in its instance (recreated per run)
+- psycopg connection in `StagingPolicy` is live only during `run_staging()` execution
+- Manifest is immutable frozen dataclass (`@dataclass(frozen=True)`)
 
 ## Key Abstractions
 
-**DiscoveryConfig:**
-- Purpose: Encapsulate all non-secret Phase 2 policy (paths, byte limits, format allowlist, timeouts)
-- Examples: `discover_order.py:DiscoveryConfig`
-- Pattern: Frozen dataclass, validated on construction
+**SuccessEvent & SafeFailure:**
+- Purpose: Redacted structured events for operator output and audit trails
+- Examples: `SuccessEvent.candidate_selected()`, `SafeFailure(ReasonCode.DOWNLOAD_TIMEOUT, order_id="OK0VUZ")`
+- Pattern: Frozen dataclass with regex-validated fields; rendered as JSON Lines via `render_success()`/`render_failure()`
 
-**LayerProfile:**
-- Purpose: Represent pyogrio discovery results for one geospatial layer
-- Examples: `discovery.py:LayerProfile` with feature_count, geometry_type, crs, fields
-- Pattern: Frozen dataclass with optional field list from ogrinfo
+**Candidate:**
+- Purpose: Recognized email message containing order metadata and artifact URL
+- Examples: `Candidate(order_id="OK0VUZ", artifact_url="https://...", sender="noreply@...", received_datetime_utc=...)`
+- Pattern: Frozen dataclass, only constructed after full MIME header + HTML parse validation
 
 **ImportManifest:**
-- Purpose: Immutable Phase 2 output contract for Phase 3 ingestion
-- Examples: `manifest.py:ImportManifest` with layers, artifact identity, run timestamp
-- Pattern: Frozen dataclass, serialized to manifest.json
+- Purpose: Frozen contract representing a discovered order's layers + companion files
+- Examples: `ImportManifest(order_id="OK0VUZ", layers=(ManifestLayer(...), ...), run_timestamp="20260921T123456Z")`
+- Pattern: Frozen dataclass with SHA256 digest written to `manifest.json` for auditability
+
+**LayerProfile:**
+- Purpose: Discovered GIS layer with field schema + geometry/CRS info
+- Examples: `LayerProfile(source_name="roads", field_count=12, geometry_type="LineString", crs_srid=7899)`
+- Pattern: Frozen dataclass, immutable product of discovery phase
 
 **Closed Exception Hierarchy:**
-- Purpose: Typed failures with no untrusted detail leakage
-- Examples: `ArchiveFailure`, `DiscoveryFailure`, `NamingFailure`, `ManifestFailure`
-- Pattern: Each exception has a `code` attribute; no untrusted text in message
+- Purpose: Ensure typed failures map to `ReasonCode` enums, never driver/subprocess text
+- Examples: `CandidateError`, `DownloadError`, `ArchiveFailure`, `DiscoveryFailure`, `StagingFailure`
+- Pattern: Each boundary module defines its own base exception, re-raised up to orchestration guard
 
 ## Entry Points
 
-**read_mailbox.main():**
-- Location: `read_mailbox.py:main`
-- Triggers: CLI invocation with `--config` (default: `vicmap.toml`)
-- Responsibilities: Parse TOML, validate policy, initialize Graph session, orchestrate Phase 1 via `run_acquisition`, handle exit codes
+**Phase 1 Orchestration:**
+- Location: `read_mailbox.py:main()` (CLI) → `read_mailbox.py:run_acquisition()` (core)
+- Triggers: `python read_mailbox.py --config vicmap.toml`
+- Responsibilities: Load config, authenticate with Graph, scan mailbox, download artifact, emit provenance
 
-**discover_order.main():**
-- Location: `discover_order.py:main`
-- Triggers: CLI invocation with `--config` (default: `vicmap.toml`)
-- Responsibilities: Parse TOML, read provenance sidecar, build ExtractionPolicy/DiscoveryPolicy, orchestrate Phase 2 via `run_discovery`, handle exit codes
+**Phase 2 Orchestration:**
+- Location: `discover_order.py:main()` (CLI) → `discover_order.py:run_discovery()` (core)
+- Triggers: `python discover_order.py --config vicmap.toml`
+- Responsibilities: Extract archive, discover layers, normalize names, write manifest
 
-**run_acquisition():**
-- Location: `read_mailbox.py:run_acquisition`
-- Triggers: Called by Phase 1 main after config validation
-- Responsibilities: Compose graph → candidates → download → artifact → evidence pipeline; guard all emissions
-
-**run_discovery():**
-- Location: `discover_order.py:run_discovery`
-- Triggers: Called by Phase 2 main after provenance validation
-- Responsibilities: Compose verify → extract → discover → name → build → write → render pipeline; guard all emissions
+**Phase 3 Orchestration:**
+- Location: `stage_order.py:main()` (CLI) → indirect (no separate function, inline in main)
+- Triggers: `python stage_order.py --config vicmap.toml [--preflight-only]`
+- Responsibilities: Connect database, prove privilege, load layers, validate row counts
 
 ## Architectural Constraints
 
-- **Threading:** Single-threaded, synchronous pipeline (no workers, no async/await)
-- **Global state:** None; Graph/HTTP sessions are context-local, immediately closed after use
-- **Circular imports:** None by design; dependency graph is acyclic (graph → candidates → download; discovery → naming → manifest)
-- **File atomicity:** Only fsync'd final-directory entries are commit points; partial writes left in `.tmp-` for inspection
-- **Event ordering:** Deterministic; events emitted in pipeline order and never reordered by the guard
-- **Configuration mutability:** vicmap.toml is read-only at runtime; no in-process policy changes
+- **Driver Isolation:** Only `vicmap_acquire/staging.py` imports psycopg (D-41); all other modules stay driver-free
+- **Leaf Modules:** `vicmap_acquire/naming.py` imports nothing (proven by import test); `vicmap_acquire/origin.py` has no I/O
+- **No Global State:** Module-level singletons forbidden; factories passed to orchestration functions
+- **Circular Imports:** Prevented by strict dependency direction: leaf modules (evidence, naming, origin) → processing layers (discovery, extraction) → boundaries (graph, download) → orchestration (read_mailbox)
+- **Event Ordering:** `_EmitOnce` guards guarantee exactly one emission per event; a failed emission aborts the run
+- **Configuration Immutability:** Policy objects created once at startup, frozen (frozen dataclasses) throughout execution
+- **Single Credential:** Only password reaches as env var; no credential in config files (D-58)
 
 ## Anti-Patterns
 
-### Subprocess Text Exposure
+### Raw Exception Text in Closed Failures
 
-**What happens:** Layer discovery combines pyogrio.read_info() with ogrinfo subprocess; ogrinfo output could carry driver errors or invalid SQL
-**Why it's wrong:** Operator-facing events would leak untrusted detail; subprocess failures become opaque
-**Do this instead:** `discovery.py` wraps ogrinfo in a subprocess call with timeout; any exception (timeout, non-zero exit, JSON parse error) collapses to `DiscoveryFailure` with no subprocess text exposed
+**What happens:** A module catches a driver/subprocess exception and re-raises it with `str(e)` in the message
 
-### Silent Format Rejection
+**Why it's wrong:** Sensitive data (SQL, connection strings, file paths) leaks into event streams; violates closed failure contract
 
-**What happens:** A recognized extension (e.g., `.shp`) is skipped silently because the format isn't in the allowlist
-**Why it's wrong:** Operator can't distinguish "format not supported" from "no datasets found"
-**Do this instead:** `discovery.py:find_datasets` checks the extension-to-driver map; if recognized but not allowed, raises named `UnsupportedFormat` failure
+**Do this instead:** Define a typed exception (e.g., `class StagingFailure(RuntimeError): code = "..."`), catch the raw exception internally, and raise the typed version with only `.code` attribute (`vicmap_acquire/staging.py:15-25`)
 
-### Implicit Member Validation Bypass
+### Skipping Guard Wrapping
 
-**What happens:** Archive extraction walks members with no path validation; a crafted zip could escape the extraction root via `../` sequences or symlinks
-**Why it's wrong:** Data confidentiality and system integrity compromised
-**Do this instead:** `extraction.py:_reject_unsafe_member` resolves each member path and asserts it remains under extraction root; symlinks are rejected outright
+**What happens:** An orchestration path emits events directly to `event_sink` instead of wrapping with `_EmitOnce`
 
-### Unbounded Event Retries
+**Why it's wrong:** A faulty sink can turn a closed failure into an unhandled exception; no audit trail if emission fails
 
-**What happens:** Event sink fails (e.g., render_success raises); orchestration code retries the emission
-**Why it's wrong:** Faulty sink can turn a closed failure (already emitted once) into multiple events, confusing operators
-**Do this instead:** `_EmitOnce` guard allows sink to fail exactly once; subsequent calls to emit() are no-ops; if guard.failed is true at exit, the pipeline raises RunDiscoveryReportingFailed (or AcquisitionFailure) without retrying the sink
+**Do this instead:** Route all events through `_EmitOnce` guard constructed once per run (`read_mailbox.py:194-225`, `discover_order.py:124`)
 
-### Hardcoded Byte Limits
+### Loose Validation of External Input
 
-**What happens:** Byte limits are defined in code, not configuration
-**Why it's wrong:** Operators can't adjust limits without redeploying
-**Do this instead:** All byte limits live in DownloadPolicy/ExtractionPolicy dataclasses, which are populated from vicmap.toml; no ceiling value is hardcoded in code (except regex patterns)
+**What happens:** Code assumes a validated field value without re-checking in the boundary
+
+**Why it's wrong:** Loose assumptions can inject hostile values into SQL, filesystem paths, or subprocess arguments
+
+**Do this instead:** Re-validate at the boundary with regex patterns (e.g., `evidence.py:_HOST`, `evidence.py:_ORDER_ID`, `staging.py:_IDENTIFIER`; WR-06 validates hostname in evidence.py before read_mailbox.py hands it to staging)
 
 ## Error Handling
 
-**Strategy:** Typed closed exceptions at layer boundaries; guard-protected single-emission of events; pipeline fails fast without swallowing intermediate exceptions
+**Strategy:** Fail-closed with typed boundaries. Every module boundary (graph, download, extraction, discovery, naming, staging) defines its own exception base, which orchestration catches and maps to `ReasonCode`.
 
 **Patterns:**
 
-1. **Per-layer failure class:** Each module (graph, download, extraction, etc) defines its own failure base class (e.g., `DownloadFailure`, `ArchiveFailure`)
-2. **Code attribute:** Every failure has a `code` attribute (e.g., "download_url_rejected", "archive_unreadable") for event reporting
-3. **No subprocess text:** Subprocess/driver output is never interpolated into exception messages
-4. **Guard-protected emission:** `_EmitOnce` ensures failures are emitted exactly once; the sink cannot turn a failure into multiple events
-5. **Re-raise unchanged:** Orchestration code catches typed exceptions, emits events, then re-raises unchanged
+- **Boundary Catch:** `read_mailbox.py:630-639` catches `GraphError`, `CandidateError`, `DownloadError`, maps `.code` to failure reason, emits via guard
+- **Guard Isolation:** `_EmitOnce.emit_failure()` catches rendering exceptions and marks guard failed, so a broken JSON emission is visible
+- **Unopened Resources:** Early validation prevents resource creation (e.g., `verify_artifact` checks SHA256 before creating run directory in `vicmap_acquire/extraction.py:verify_artifact()`)
+- **Atomic Publish:** Only final filesystem operation commits state (`vicmap_acquire/extraction.py:extract_artifact()` renames `.tmp-` dir only on all-members-extracted success)
 
 ## Cross-Cutting Concerns
 
-**Logging:** 
-- Dependency loggers (O365, msal, requests, urllib3) are silenced at CRITICAL+1
-- Application doesn't use logging module; all output is via guarded event emission
+**Logging:** Project disables dependency logs (O365, msal, requests, urllib3) via `_suppress_dependency_logs()` in `read_mailbox.py:246`; all events route through JSON Lines event sink for audit
 
-**Validation:**
-- Configuration validation in `read_mailbox.validate_acquisition_policy` (policy checks before any work)
-- URL validation in `download.py:validate_https_target` (allowlist + scheme checks)
-- Member path validation in `extraction.py:_reject_unsafe_member` (resolves and asserts within root)
-- Naming validation in `naming.py:assign_target_table_names` (keyword checks + collision detection)
+**Validation:** Every input validated at module boundary via regex (hostname, order ID, identifier, target table); validation functions in `evidence.py` and boundary modules re-checked before use (WR-06)
 
-**Authentication:**
-- O365 OAuth tokens are memory-only (MemoryTokenBackend); no token persistence to disk
-- DKIM/DMARC/CompAuth verdicts verified from email headers by trusted mail infrastructure
-- No custom cryptography; relies on email protocol headers and O365 SDK
+**Authentication:** Graph OAuth via O365 SDK (tenant-wide credentials); database via psycopg password from env; mailbox headers re-validated via `Authentication-Results` MIME header parsing in `vicmap_acquire/origin.py`
 
 ---
 
-*Architecture analysis: 2026-09-18*
+*Architecture analysis: 2026-09-22*
