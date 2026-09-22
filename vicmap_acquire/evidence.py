@@ -18,7 +18,15 @@ from typing import TextIO
 _HEX_LOWER = re.compile(r"[0-9a-f]+")
 _HEX_64 = re.compile(r"[0-9a-f]{64}")
 _ORDER_ID = re.compile(r"[A-Za-z0-9]+")
-_HOST = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+# WR-06: mirrors staging._HOSTNAME/read_mailbox._HOSTNAME exactly (253-byte
+# total bound, per-label DNS structure) rather than the looser pattern this
+# module used to carry -- this is the last safety net before an
+# operator-facing value is written into the event stream, so it should not
+# be looser than the validators that, today, are its only callers.
+_HOST = re.compile(
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+)
 _MIN_FINGERPRINT_HEX_CHARS = 8
 _MAX_FINGERPRINT_HEX_CHARS = 64
 
@@ -386,7 +394,9 @@ def _require_count(value: int) -> int:
     return value
 
 
-_TARGET_TABLE = re.compile(r"[a-z][a-z0-9_]*")
+# WR-06: mirrors staging._identifier's 63-byte bound (PostgreSQL's own
+# NAMEDATALEN-1 limit) rather than the previously unbounded pattern.
+_TARGET_TABLE = re.compile(r"[a-z][a-z0-9_]{0,62}")
 
 
 def _require_target_table(value: str) -> str:
