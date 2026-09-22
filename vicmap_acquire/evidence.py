@@ -117,6 +117,7 @@ class ReasonCode(str, Enum):
     DB_TARGET_SRID_UNRESOLVED = "db_target_srid_unresolved"
     DB_PRIVILEGE_DENIED = "db_privilege_denied"
     DB_LOAD_FAILED = "db_load_failed"
+    DB_VALIDATION_QUERY_FAILED = "db_validation_query_failed"
     DB_ROW_COUNT_MISMATCH = "db_row_count_mismatch"
     DB_SRID_MISMATCH = "db_srid_mismatch"
     DB_GEOMETRY_TYPE_MISMATCH = "db_geometry_type_mismatch"
@@ -286,6 +287,10 @@ _FAILURE_POLICY = MappingProxyType(
         ReasonCode.DB_LOAD_FAILED: (
             Stage.DB_LOAD,
             "review_the_named_loader_diagnostic_file",
+        ),
+        ReasonCode.DB_VALIDATION_QUERY_FAILED: (
+            Stage.DB_VALIDATION,
+            "retry_validation_or_review_staging_table_directly",
         ),
         ReasonCode.DB_ROW_COUNT_MISMATCH: (
             Stage.DB_VALIDATION,

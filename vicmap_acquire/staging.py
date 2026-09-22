@@ -235,6 +235,15 @@ class PrivilegeDenied(StagingFailure):
     code = "db_privilege_denied"
 
 
+class ValidationQueryFailed(StagingFailure):
+    """WR-03: a validation SELECT or repair UPDATE/recheck itself failed --
+    unrelated to ``ogr2ogr`` (``LoadFailed``'s documented meaning) and with
+    no diagnostics file to point an operator at, since only ``load_layer``
+    ever writes one."""
+
+    code = "db_validation_query_failed"
+
+
 class LoadFailed(StagingFailure):
     """D-43: on a non-zero ``ogr2ogr`` exit, ``diagnostics_file`` carries the
     *name* (never the full path, never the stderr content) of the local file
@@ -785,7 +794,7 @@ def validate_layer(
                 cursor.execute(query)
                 row = cursor.fetchone()
         except Exception:
-            raise LoadFailed() from None
+            raise ValidationQueryFailed() from None
 
         if not spatial:
             (row_count,) = row
@@ -871,7 +880,7 @@ def validate_layer(
                     )
                     (remaining_invalid,) = cursor.fetchone()
             except Exception:
-                raise LoadFailed() from None
+                raise ValidationQueryFailed() from None
             if remaining_invalid > 0:
                 raise GeometryRepairIncomplete()
             connection.commit()
@@ -894,6 +903,7 @@ def validate_layer(
         GeometryTypeMismatch,
         GeometryRepairChangedType,
         GeometryRepairIncomplete,
+        ValidationQueryFailed,
         LoadFailed,
     ):
         raise

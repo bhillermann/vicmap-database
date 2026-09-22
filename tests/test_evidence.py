@@ -283,6 +283,7 @@ class EvidenceContractTest(unittest.TestCase):
             "db_target_srid_unresolved": "db_preflight",
             "db_privilege_denied": "db_preflight",
             "db_load_failed": "db_load",
+            "db_validation_query_failed": "db_validation",
             "db_row_count_mismatch": "db_validation",
             "db_srid_mismatch": "db_validation",
             "db_geometry_type_mismatch": "db_validation",
