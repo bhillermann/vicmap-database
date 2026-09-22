@@ -22,6 +22,7 @@ subprocess, or SQL text.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import os
 import re
@@ -64,6 +65,30 @@ _FORBIDDEN_SCHEMA_NAMES = frozenset({"public"})
 # unsuffixed name.
 _STAGING_NAME_CHARSET = re.compile(r"[a-z0-9_]+")
 _MAX_STAGING_NAME_BYTES = 63
+
+
+def _bounded_composed_identifier(name: str) -> str:
+    """Bound a DDL identifier this module composes by string-concatenation
+    (WR-02) to PostgreSQL's own 63-byte NAMEDATALEN-1 limit. PostgreSQL
+    does not error on an over-limit identifier -- it silently truncates,
+    which can make two distinct composed names collide on-disk while the
+    strings this module reports (and sends to the server) still differ.
+    A name already within the limit is returned unchanged; one over the
+    limit is deterministically truncated and given a short content-hash
+    suffix so the result is still unique and always matches exactly what
+    is sent to the server -- every identifier this module composes stays
+    provably within the limit *before* it reaches PostgreSQL."""
+
+    encoded = name.encode("utf-8")
+    if len(encoded) <= _MAX_STAGING_NAME_BYTES:
+        return name
+    digest = hashlib.sha256(encoded).hexdigest()[:8]
+    # Reserve one byte for the separator plus the digest's own bytes;
+    # identifiers this module composes are ASCII-only ([a-z0-9_]), so a
+    # byte-boundary truncation is always a valid UTF-8 boundary too.
+    budget = _MAX_STAGING_NAME_BYTES - len(digest) - 1
+    truncated = encoded[:budget].decode("ascii")
+    return f"{truncated}_{digest}"
 
 
 def _positive_integer(value: object) -> int:
@@ -959,7 +984,7 @@ def apply_post_validation_ddl(
                         table=table_ref
                     )
                 )
-                created.append(f"{staging_table}_pkey")
+                created.append(_bounded_composed_identifier(f"{staging_table}_pkey"))
 
             if validation.spatial:
                 # 2. Typed geometry column with its SRID (D-63) --
@@ -1002,7 +1027,9 @@ def apply_post_validation_ddl(
                             srid=sql.Literal(policy.target_srid),
                         )
                     )
-                    created.append(f"{staging_table}_geom_typed")
+                    created.append(
+                        _bounded_composed_identifier(f"{staging_table}_geom_typed")
+                    )
 
                 # 3. NOT NULL on the geometry column (D-63). 03-05 already
                 # proved no row holds a NULL geometry; this makes the
@@ -1012,15 +1039,21 @@ def apply_post_validation_ddl(
                         "ALTER TABLE {table} ALTER COLUMN geom SET NOT NULL"
                     ).format(table=table_ref)
                 )
-                created.append(f"{staging_table}_geom_not_null")
+                created.append(
+                    _bounded_composed_identifier(f"{staging_table}_geom_not_null")
+                )
 
                 # 4. GiST index (D-62), built once over the populated
                 # table, as an ordinary blocking CREATE INDEX inside this
                 # same transaction -- the non-blocking online-build variant
                 # is deliberately not used here: it cannot run inside a
                 # transaction block, and there is no concurrent reader to
-                # protect against in the first place.
-                gist_index_name = f"{staging_table}_geom_gist"
+                # protect against in the first place. Bounded (WR-02) so
+                # the name this call sends to the server can never
+                # silently diverge from the name reported in ``created``.
+                gist_index_name = _bounded_composed_identifier(
+                    f"{staging_table}_geom_gist"
+                )
                 cursor.execute(
                     sql.SQL(
                         "CREATE INDEX {index} ON {table} USING GIST (geom)"
@@ -1029,9 +1062,15 @@ def apply_post_validation_ddl(
                 created.append(gist_index_name)
 
             # 5. Secondary btree indexes from the allowlist (D-64) --
-            # applies to spatial and non-spatial layers alike.
+            # applies to spatial and non-spatial layers alike. Bounded
+            # (WR-02) for the same reason the GiST index name is: an
+            # allowlisted column name can itself be up to 63 bytes
+            # (``_identifier``), so the composed index name has no
+            # inherent bound of its own.
             for column in secondary_index_columns(manifest_layer, policy):
-                index_name = f"{staging_table}_{column}_idx"
+                index_name = _bounded_composed_identifier(
+                    f"{staging_table}_{column}_idx"
+                )
                 cursor.execute(
                     sql.SQL("CREATE INDEX {index} ON {table} ({column})").format(
                         index=sql.Identifier(index_name),
