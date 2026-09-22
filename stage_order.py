@@ -144,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except read_mailbox.AcquisitionFailure as error:
         try:
-            render_failure(error.failure)
+            render_failure(SafeFailure(error.failure.reason, order_id=order_id))
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception:
