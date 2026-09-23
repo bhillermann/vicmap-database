@@ -15,12 +15,15 @@ driver-isolation posture is respected in the tests too.
 
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from vicmap_acquire import publish
+from vicmap_acquire import download, publish
 
 
 _RUN_TS = "20260918t041500z"
@@ -640,6 +643,269 @@ class ReaderVerificationTest(unittest.TestCase):
                     published_tables=("vmadd_address",),
                 )
         self.assertTrue(connection.closed)
+
+
+class ReadLayerValidationsTest(unittest.TestCase):
+    """No database. ``read_layer_validations`` re-reads the full D-56 metrics
+    (not just the pass/fail the gate checks) for every manifest layer, in
+    the caller's own ``target_tables`` order, and maps the same failure
+    modes as the gate."""
+
+    _AUDIT_ROW = (
+        "vmadd_address",
+        "pass",
+        True,
+        4222035,
+        7899,
+        "POINT",
+        12,
+    )
+    _NON_SPATIAL_ROW = (
+        "vmadd_lookup",
+        "pass",
+        False,
+        100,
+        None,
+        None,
+        None,
+    )
+
+    def test_returns_one_record_per_target_table_in_caller_order(self):
+        connection = _FakeConnection(
+            audit_rows=(self._NON_SPATIAL_ROW, self._AUDIT_ROW)
+        )
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            records = publish.read_layer_validations(
+                _publish_policy(),
+                "sentinel-secret",
+                run_timestamp=_RUN_TS,
+                manifest_digest="a" * 64,
+                target_tables=("vmadd_address", "vmadd_lookup"),
+            )
+        self.assertEqual(2, len(records))
+        self.assertEqual("vmadd_address", records[0].target_table)
+        self.assertTrue(records[0].spatial)
+        self.assertEqual(4222035, records[0].row_count)
+        self.assertEqual(7899, records[0].srid)
+        self.assertEqual("vmadd_lookup", records[1].target_table)
+        self.assertFalse(records[1].spatial)
+        self.assertIsNone(records[1].srid)
+        self.assertIsNone(records[1].geometry_type)
+        self.assertIsNone(records[1].repaired_count)
+        # A read-only re-read: no DDL, no write.
+        for statement in connection.executed:
+            self.assertNotIn("DROP TABLE", statement)
+            self.assertNotIn("ALTER TABLE", statement)
+            self.assertNotIn("GRANT", statement)
+            self.assertNotIn("INSERT", statement)
+
+    def test_a_table_with_no_row_is_simply_omitted(self):
+        connection = _FakeConnection(audit_rows=(self._AUDIT_ROW,))
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            records = publish.read_layer_validations(
+                _publish_policy(),
+                "sentinel-secret",
+                run_timestamp=_RUN_TS,
+                manifest_digest="a" * 64,
+                target_tables=("vmadd_address", "vmadd_road"),
+            )
+        self.assertEqual(("vmadd_address",), tuple(r.target_table for r in records))
+
+    def test_unreadable_audit_table_raises_audit_privilege_denied(self):
+        connection = _FakeConnection(
+            audit_error=publish.pg_errors.InsufficientPrivilege("denied")
+        )
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            with self.assertRaises(publish.AuditPrivilegeDenied):
+                publish.read_layer_validations(
+                    _publish_policy(),
+                    "sentinel-secret",
+                    run_timestamp=_RUN_TS,
+                    manifest_digest="a" * 64,
+                    target_tables=("vmadd_address",),
+                )
+
+
+def _provenance_fixture(directory: Path, *, order_id: str, message_fingerprint: str, sha256: str):
+    """Write a real D-32 provenance sidecar into ``directory`` -- the exact
+    on-disk artifact ``assemble_summary`` re-reads -- so the offline
+    ``SummaryAssemblyTest`` exercises the real ``read_provenance_sidecar``
+    path, never a mocked stand-in (differential-oracle-testing: a hand-rolled
+    fixture that never touches the real reader would share any blind spot
+    the reader itself has)."""
+
+    artifact_path = directory / f"Order_{order_id}.zip"
+    artifact_path.write_bytes(b"not a real archive -- only the sidecar is read")
+    download.write_provenance_sidecar(
+        artifact_path,
+        order_id=order_id,
+        message_fingerprint=message_fingerprint,
+        sha256=sha256,
+        byte_count=1234,
+    )
+    return artifact_path
+
+
+class SummaryAssemblyTest(unittest.TestCase):
+    """No database. ``assemble_summary`` links all six EVID-01 facts from
+    fixture inputs -- a real provenance sidecar on disk, a stand-in manifest,
+    fixture ``LayerValidationRecord`` rows, and fixture publish/reader
+    results -- and rejects a malformed input before returning anything."""
+
+    _ORDER_ID = "ORD123"
+    _MESSAGE_FINGERPRINT = "a" * 16
+    _ARTIFACT_SHA256 = "b" * 64
+    _MANIFEST_DIGEST = "c" * 64
+
+    def _validation_record(self, **overrides) -> publish.LayerValidationRecord:
+        kwargs = dict(
+            target_table="vmadd_address",
+            verdict="pass",
+            spatial=True,
+            row_count=4222035,
+            srid=7899,
+            geometry_type="POINT",
+            repaired_count=12,
+        )
+        kwargs.update(overrides)
+        return publish.LayerValidationRecord(**kwargs)
+
+    def _publication_result(self, **overrides) -> publish.PromotionResult:
+        kwargs = dict(
+            server_version="PostgreSQL 18.6 (fake build)",
+            published_tables=("vmadd_address",),
+        )
+        kwargs.update(overrides)
+        return publish.PromotionResult(**kwargs)
+
+    def _reader_verification(self, **overrides) -> publish.ReaderVerification:
+        kwargs = dict(
+            tables_discovered=("vmadd_address",),
+            spatial_query_row_count=2,
+            write_denied=True,
+        )
+        kwargs.update(overrides)
+        return publish.ReaderVerification(**kwargs)
+
+    def _assemble(self, tmp_dir: str, **overrides):
+        artifact_path = _provenance_fixture(
+            Path(tmp_dir),
+            order_id=self._ORDER_ID,
+            message_fingerprint=self._MESSAGE_FINGERPRINT,
+            sha256=self._ARTIFACT_SHA256,
+        )
+        kwargs = dict(
+            order_id=self._ORDER_ID,
+            artifact_path=artifact_path,
+            manifest=_one_layer_manifest(),
+            manifest_digest=self._MANIFEST_DIGEST,
+            validation_rows=(self._validation_record(),),
+            publication_result=self._publication_result(),
+            reader_verification=self._reader_verification(),
+        )
+        kwargs.update(overrides)
+        return publish.assemble_summary(**kwargs)
+
+    def test_links_all_six_evid_01_facts(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            summary = self._assemble(tmp_dir)
+        self.assertEqual(self._ORDER_ID, summary["order_id"])
+        self.assertEqual(self._MESSAGE_FINGERPRINT, summary["message_fingerprint"])
+        self.assertEqual(self._ARTIFACT_SHA256, summary["artifact_sha256"])
+        self.assertEqual(self._MANIFEST_DIGEST, summary["manifest_sha256"])
+        self.assertEqual(1, summary["layer_count"])
+        self.assertEqual(["vmadd_address"], summary["published_tables"])
+        self.assertEqual(1, len(summary["staging_validation"]))
+        self.assertEqual("vmadd_address", summary["staging_validation"][0]["target_table"])
+        self.assertEqual(4222035, summary["staging_validation"][0]["row_count"])
+        self.assertEqual(["vmadd_address"], summary["reader"]["tables_discovered"])
+        self.assertEqual(2, summary["reader"]["spatial_query_row_count"])
+        self.assertTrue(summary["reader"]["write_denied"])
+
+    def test_non_spatial_layer_reports_not_applicable_geometry_fields(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            summary = self._assemble(
+                tmp_dir,
+                manifest=_one_layer_manifest("vmadd_lookup"),
+                validation_rows=(
+                    self._validation_record(
+                        target_table="vmadd_lookup",
+                        spatial=False,
+                        srid=None,
+                        geometry_type=None,
+                        repaired_count=None,
+                    ),
+                ),
+                publication_result=self._publication_result(
+                    published_tables=("vmadd_lookup",)
+                ),
+                reader_verification=self._reader_verification(
+                    tables_discovered=("vmadd_lookup",)
+                ),
+            )
+        record = summary["staging_validation"][0]
+        self.assertFalse(record["spatial"])
+        self.assertEqual(publish.evidence.NOT_APPLICABLE, record["srid"])
+        self.assertEqual(publish.evidence.NOT_APPLICABLE, record["geometry_type"])
+        self.assertEqual(publish.evidence.NOT_APPLICABLE, record["repaired_count"])
+
+    def test_no_raw_message_id_path_dsn_or_password_in_summary(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            summary = self._assemble(tmp_dir)
+        rendered = json.dumps(summary)
+        for forbidden in (
+            "sentinel-secret",
+            str(Path(tmp_dir)),
+            "graph_message_id",
+            "password",
+            "dsn",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_missing_validation_row_for_a_manifest_layer_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(ValueError):
+                self._assemble(tmp_dir, validation_rows=())
+
+    def test_non_pass_verdict_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(ValueError):
+                self._assemble(
+                    tmp_dir,
+                    validation_rows=(self._validation_record(verdict="fail"),),
+                )
+
+    def test_unsafe_target_table_in_published_tables_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(ValueError):
+                self._assemble(
+                    tmp_dir,
+                    publication_result=self._publication_result(
+                        published_tables=("Robert'); DROP TABLE x;--",)
+                    ),
+                )
+
+    def test_summary_is_the_publication_event_source_of_truth(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            summary = self._assemble(tmp_dir)
+        event = publish.summary_to_publication_event(summary)
+        self.assertEqual("publication_summary", event["event"])
+        self.assertEqual(summary["order_id"], event["order_id"])
+        self.assertEqual(summary["message_fingerprint"], event["message_fingerprint"])
+        self.assertEqual(summary["published_tables"], event["published_tables"])
+
+
+class WriteSummaryTest(unittest.TestCase):
+    """No database. ``write_summary`` writes canonical, sorted-key UTF-8 JSON
+    into the run directory."""
+
+    def test_writes_canonical_json_into_the_run_directory(self):
+        summary = {"b": 1, "a": 2}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = publish.write_summary(Path(tmp_dir), summary)
+            self.assertEqual(Path(tmp_dir) / "summary.json", path)
+            text = path.read_text(encoding="utf-8")
+        self.assertEqual('{"a":2,"b":1}\n', text)
 
 
 class _LivePublishMixin:

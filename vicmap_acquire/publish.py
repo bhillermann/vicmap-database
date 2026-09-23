@@ -42,19 +42,27 @@ no exception message ever carries driver, subprocess, or SQL text.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import psycopg
 from psycopg import sql
 from psycopg import errors as pg_errors
 
-from vicmap_acquire import staging
+from vicmap_acquire import download, evidence, staging
+from vicmap_acquire.evidence import SuccessEvent
+from vicmap_acquire.manifest import ImportManifest
 from vicmap_acquire.staging import AuditPrivilegeDenied
 
 
 # D-70: the durable publication-gate record 04-03 writes and this module reads.
 AUDIT_SCHEMA = "vicmap_audit"
 AUDIT_TABLE = "staging_validation"
+
+# D-74: the reader's own secret, exactly parallel to staging.PASSWORD_ENV_VAR
+# (the loader's VICMAP_DB_PASSWORD) -- never a config key, never argv.
+READER_PASSWORD_ENV_VAR = "VICMAP_READER_PASSWORD"
 
 
 @dataclass(frozen=True)
@@ -625,3 +633,251 @@ def verify_reader_access(
         spatial_query_row_count=spatial_query_row_count,
         write_denied=write_denied,
     )
+
+
+@dataclass(frozen=True)
+class LayerValidationRecord:
+    """One durable ``vicmap_audit.staging_validation`` row -- the D-56 metrics
+    plus verdict Phase 3's back-fill (``staging.record_validation``) actually
+    persisted -- re-read independently by ``read_layer_validations`` for the
+    EVID-01 summary (D-76). Never constructed from an in-memory
+    ``staging.LayerValidation``; ``srid``/``geometry_type``/``repaired_count``
+    are ``None`` for a non-spatial layer, exactly as the table's own nullable
+    columns store them."""
+
+    target_table: str
+    verdict: str
+    spatial: bool
+    row_count: int
+    srid: int | None
+    geometry_type: str | None
+    repaired_count: int | None
+
+
+def read_layer_validations(
+    policy: PublishPolicy,
+    password: str,
+    *,
+    run_timestamp: str,
+    manifest_digest: str,
+    target_tables: tuple[str, ...],
+) -> tuple[LayerValidationRecord, ...]:
+    """D-76: re-read the durable ``vicmap_audit.staging_validation`` rows for
+    this run's manifest layers as this run's own staging-validation facts for
+    the EVID-01 summary -- a second, independent read of the same table
+    ``assert_all_layers_validated`` gates on, never threading that call's
+    in-memory pass/fail result forward. Read-only: executes no DDL and
+    mutates nothing.
+
+    Failure modes mirror the gate's own: the loader being unable to read the
+    audit table raises the closed ``AuditPrivilegeDenied``; any other read
+    failure raises ``PromotionFailed``. Rows are returned in
+    ``target_tables``' own order; a target table absent from the result set
+    is simply omitted -- this function stays a pure read, never itself a
+    validation gate, so ``assemble_summary``'s own hard-require is what
+    notices a shortfall.
+    """
+
+    connection = _connect(policy, password)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL(
+                    "SELECT target_table, verdict, spatial, row_count, srid, "
+                    "geometry_type, repaired_count FROM {table} "
+                    "WHERE run_ts = %s AND manifest_digest = %s"
+                ).format(table=sql.Identifier(AUDIT_SCHEMA, AUDIT_TABLE)),
+                (run_timestamp, manifest_digest),
+            )
+            rows = cursor.fetchall()
+    except pg_errors.InsufficientPrivilege:
+        raise AuditPrivilegeDenied() from None
+    except PublishFailure:
+        raise
+    except Exception:
+        raise PromotionFailed() from None
+    finally:
+        connection.close()
+
+    by_table = {
+        row[0]: LayerValidationRecord(
+            target_table=row[0],
+            verdict=row[1],
+            spatial=row[2],
+            row_count=row[3],
+            srid=row[4],
+            geometry_type=row[5],
+            repaired_count=row[6],
+        )
+        for row in rows
+    }
+    return tuple(by_table[table] for table in target_tables if table in by_table)
+
+
+def assemble_summary(
+    *,
+    order_id: str,
+    artifact_path: Path,
+    manifest: ImportManifest,
+    manifest_digest: str,
+    validation_rows: tuple[LayerValidationRecord, ...],
+    publication_result: PromotionResult,
+    reader_verification: ReaderVerification,
+    fingerprint_hex_chars: int = 16,
+) -> dict:
+    """D-75/D-76: assemble the EVID-01 redacted summary purely by re-reading
+    already-durable facts and recombining this run's own results -- never a
+    growing in-memory record threaded between phase invocations.
+
+    This function performs exactly one re-read of its own: Phase 1's
+    provenance sidecar via ``download.read_provenance_sidecar`` (the message
+    fingerprint and artifact checksum). Everything else it is handed by the
+    caller, who has already re-read Phase 2's ``manifest.json``
+    (``manifest``/``manifest_digest``) and Phase 3's ``vicmap_audit`` rows
+    (``validation_rows``), plus this run's own ``promote_order`` and
+    ``verify_reader_access`` results.
+
+    Every field is validated through ``evidence.py``'s safe-scalar helpers
+    before this function returns: the six EVID-01 link facts are first
+    round-tripped through ``SuccessEvent.publication_summary`` (04-01's own
+    redaction contract for the event mirror), and the additional per-layer
+    staging-validation detail ``summary.json`` carries beyond that minimal
+    vocabulary is checked with the same closed validators directly. A
+    malformed input -- an unsafe scalar, a non-PASS verdict, or a manifest
+    layer with no matching ``validation_rows`` entry -- raises ``ValueError``
+    before anything is returned; there is no partially assembled summary.
+    """
+
+    provenance = download.read_provenance_sidecar(artifact_path, order_id=order_id)
+
+    target_tables = tuple(layer.target_table for layer in manifest.layers)
+    layer_count = len(manifest.layers)
+
+    # D-75: round-trip the six EVID-01 link facts through the redacted event
+    # vocabulary 04-01 already defined -- this is the guarantee, not a
+    # decorative parallel construction.
+    event = SuccessEvent.publication_summary(
+        order_id=order_id,
+        message_fingerprint=provenance.message_fingerprint,
+        artifact_sha256=provenance.sha256,
+        manifest_sha256=manifest_digest,
+        layer_count=layer_count,
+        published_tables=publication_result.published_tables,
+        reader_tables_discovered=len(reader_verification.tables_discovered),
+        reader_spatial_query_row_count=reader_verification.spatial_query_row_count,
+        reader_write_denied=reader_verification.write_denied,
+        fingerprint_hex_chars=fingerprint_hex_chars,
+    )
+
+    by_table = {record.target_table: record for record in validation_rows}
+    missing = [table for table in target_tables if table not in by_table]
+    if missing:
+        raise ValueError(
+            "validation_rows is missing a durable PASS row for a manifest layer"
+        )
+
+    staging_validation = []
+    for table in target_tables:
+        record = by_table[table]
+        if record.verdict != "pass":
+            raise ValueError(
+                "validation_rows must carry only a durable PASS verdict"
+            )
+        if isinstance(record.spatial, bool) is False:
+            raise ValueError("spatial must be a bool")
+        if record.spatial:
+            srid = record.srid
+            geometry_type = record.geometry_type
+            repaired_count = record.repaired_count
+            if srid is None or geometry_type is None or repaired_count is None:
+                raise ValueError(
+                    "a spatial layer's staging validation must carry geometry facts"
+                )
+        else:
+            srid = evidence.NOT_APPLICABLE
+            geometry_type = evidence.NOT_APPLICABLE
+            repaired_count = evidence.NOT_APPLICABLE
+
+        staging_validation.append(
+            {
+                "target_table": evidence._require_target_table(record.target_table),
+                "spatial": record.spatial,
+                "row_count": evidence._require_count(record.row_count),
+                "srid": evidence._require_srid_or_not_applicable(srid),
+                "geometry_type": evidence._require_geometry_type_or_not_applicable(
+                    geometry_type
+                ),
+                "repaired_count": evidence._require_count_or_not_applicable(
+                    repaired_count
+                ),
+            }
+        )
+
+    return {
+        "order_id": event["order_id"],
+        "message_fingerprint": event["message_fingerprint"],
+        "artifact_sha256": event["artifact_sha256"],
+        "manifest_sha256": event["manifest_sha256"],
+        "layer_count": event["layer_count"],
+        "published_tables": event["published_tables"],
+        "server_version": evidence._require_server_version(
+            publication_result.server_version
+        ),
+        "staging_validation": staging_validation,
+        "reader": {
+            "tables_discovered": [
+                evidence._require_target_table(table)
+                for table in reader_verification.tables_discovered
+            ],
+            "tables_discovered_count": event["reader_tables_discovered"],
+            "spatial_query_row_count": event["reader_spatial_query_row_count"],
+            "write_denied": event["reader_write_denied"],
+        },
+    }
+
+
+def summary_to_publication_event(summary: dict) -> SuccessEvent:
+    """Rebuild the D-75 ``publication_summary`` event from an already-
+    assembled ``summary`` dict, re-applying the same redaction validators
+    ``assemble_summary`` already ran -- so the event ``publish_order.py``
+    renders is provably the ``summary.json`` file's own mirror, never a
+    second, independently constructed payload (the one-output-mechanism
+    guarantee D-75 describes)."""
+
+    reader = summary["reader"]
+    return SuccessEvent.publication_summary(
+        order_id=summary["order_id"],
+        message_fingerprint=summary["message_fingerprint"],
+        artifact_sha256=summary["artifact_sha256"],
+        manifest_sha256=summary["manifest_sha256"],
+        layer_count=summary["layer_count"],
+        published_tables=tuple(summary["published_tables"]),
+        reader_tables_discovered=reader["tables_discovered_count"],
+        reader_spatial_query_row_count=reader["spatial_query_row_count"],
+        reader_write_denied=reader["write_denied"],
+    )
+
+
+def write_summary(run_directory: Path, summary: dict) -> Path:
+    """Durably write ``summary.json`` into ``run_directory`` (D-75's file
+    deliverable) as canonical UTF-8 JSON, mirroring ``manifest.py``'s own
+    ``json.dumps(..., sort_keys=True, ensure_ascii=False)`` idiom exactly, so
+    the file is byte-stable given the same summary content.
+
+    Unlike ``manifest.json``, this file is never digest-verified by another
+    process (it lives in the git-ignored ``runs/`` tree as the milestone's
+    proof artifact, not a durable receipt something else reads back), so a
+    plain write -- not the atomic exclusive-create dance ``write_manifest``
+    uses -- is sufficient; a retried publish simply overwrites it. Any
+    ``OSError`` propagates unwrapped -- there is no dedicated reason code for
+    a summary-write failure, so it is deliberately left for the CLI's
+    catch-all ``INTERNAL_FAILURE`` mapping, exactly as an unexpected failure
+    should be.
+    """
+
+    canonical = json.dumps(
+        summary, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    summary_path = Path(run_directory) / "summary.json"
+    summary_path.write_text(canonical + "\n", encoding="utf-8")
+    return summary_path
