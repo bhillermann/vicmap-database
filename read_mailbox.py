@@ -88,6 +88,7 @@ _DATABASE_KEYS = {
     "connect_timeout_seconds",
     "statement_timeout_seconds",
     "lock_timeout_seconds",
+    "reader_user",
 }
 _ORDER_ID = re.compile(r"[A-Za-z0-9]+")
 _HOSTNAME = re.compile(
@@ -144,7 +145,7 @@ class DiscoveryRunConfig:
 
 @dataclass(frozen=True)
 class DatabaseRunConfig:
-    """Complete non-secret Phase 3 policy, reviewable in ``vicmap.toml``."""
+    """Complete non-secret Phase 3/4 policy, reviewable in ``vicmap.toml``."""
 
     run_root: Path
     fingerprint_hex_chars: int
@@ -161,6 +162,10 @@ class DatabaseRunConfig:
     connect_timeout_seconds: int
     statement_timeout_seconds: int
     lock_timeout_seconds: int
+    # D-72: the reader role's name, reviewable non-secret config. Consumed
+    # only by the Phase 4 publish path (04-04/04-05); StagingPolicy never
+    # sees it -- staging never grants.
+    reader_user: str
 
 
 class AcquisitionFailure(RuntimeError):
@@ -478,6 +483,7 @@ def validate_database_policy(config: DatabaseRunConfig) -> None:
         config.user,
         config.staging_schema,
         config.publish_schema,
+        config.reader_user,
     ):
         if not isinstance(identifier, str) or _PG_IDENTIFIER.fullmatch(identifier) is None:
             raise AcquisitionFailure("config_invalid")
@@ -485,10 +491,16 @@ def validate_database_policy(config: DatabaseRunConfig) -> None:
     if (
         config.staging_schema in _FORBIDDEN_SCHEMA_NAMES
         or config.publish_schema in _FORBIDDEN_SCHEMA_NAMES
+        or config.reader_user in _FORBIDDEN_SCHEMA_NAMES
     ):
         raise AcquisitionFailure("config_invalid")
 
     if config.staging_schema == config.publish_schema:
+        raise AcquisitionFailure("config_invalid")
+
+    # D-72/T-04-09: the reader can never be the loader -- reader_user is
+    # granted read-only SELECT (04-04), never the owning role.
+    if config.reader_user == config.user:
         raise AcquisitionFailure("config_invalid")
 
     _bounded_integer(config.target_srid, 1024, 998999)
@@ -949,6 +961,7 @@ def load_database_config(path: Path) -> DatabaseRunConfig:
             lock_timeout_seconds=_bounded_integer(
                 database["lock_timeout_seconds"], 1, 3600
             ),
+            reader_user=_strict_string(database["reader_user"]),
         )
         validate_database_policy(config)
         return config

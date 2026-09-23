@@ -45,3 +45,4 @@ gt = 20000
 connect_timeout_seconds = 10
 statement_timeout_seconds = 3600
 lock_timeout_seconds = 30
+reader_user = "vicmap_reader"

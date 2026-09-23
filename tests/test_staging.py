@@ -83,6 +83,7 @@ gt = 20000
 connect_timeout_seconds = 10
 statement_timeout_seconds = 3600
 lock_timeout_seconds = 30
+reader_user = "vicmap_reader"
 """
 
 _DATABASE_SECTION = """\
@@ -99,6 +100,7 @@ gt = 20000
 connect_timeout_seconds = 10
 statement_timeout_seconds = 3600
 lock_timeout_seconds = 30
+reader_user = "vicmap_reader"
 """
 
 _DATABASE_KEY_NAMES = (
@@ -114,6 +116,7 @@ _DATABASE_KEY_NAMES = (
     "connect_timeout_seconds",
     "statement_timeout_seconds",
     "lock_timeout_seconds",
+    "reader_user",
 )
 
 
@@ -154,6 +157,7 @@ class DatabaseConfigTest(unittest.TestCase):
             connect_timeout_seconds=10,
             statement_timeout_seconds=3600,
             lock_timeout_seconds=30,
+            reader_user="vicmap_reader",
         )
 
     def test_happy_path_loads_every_field(self):
@@ -171,6 +175,17 @@ class DatabaseConfigTest(unittest.TestCase):
         self.assertEqual(10, config.connect_timeout_seconds)
         self.assertEqual(3600, config.statement_timeout_seconds)
         self.assertEqual(30, config.lock_timeout_seconds)
+        self.assertEqual("vicmap_reader", config.reader_user)
+        self.assertNotEqual(config.reader_user, config.user)
+
+    def test_discovery_loader_still_loads_with_reader_user_present(self):
+        # D-72's reader_user key widens [database] but must not disturb the
+        # Phase 1/2 loader paths -- load_discovery_config never reads
+        # [database] at all.
+        with tempfile.TemporaryDirectory() as directory:
+            path = _write_policy(directory)
+            discovery_config = read_mailbox.load_discovery_config(path)
+        self.assertEqual(("OK0VUZ",), discovery_config.allowed_order_ids)
 
     def test_missing_database_section_entirely(self):
         text = VALID_TOML.replace("\n" + _DATABASE_SECTION, "\n")
@@ -269,6 +284,35 @@ class DatabaseConfigTest(unittest.TestCase):
             lowered = key.lower()
             for forbidden in ("passw", "secret", "token"):
                 self.assertNotIn(forbidden, lowered, f"{key!r} looks credential-shaped")
+
+    def test_reader_user_malformed_identifier_rejected(self):
+        text = VALID_TOML.replace(
+            'reader_user = "vicmap_reader"', 'reader_user = "Vicmap_Reader"'
+        )
+        self._assert_rejected(text)
+
+    def test_reader_user_is_public(self):
+        text = VALID_TOML.replace(
+            'reader_user = "vicmap_reader"', 'reader_user = "public"'
+        )
+        self._assert_rejected(text)
+
+    def test_reader_user_equals_loader_user(self):
+        text = VALID_TOML.replace(
+            'reader_user = "vicmap_reader"', 'reader_user = "vicmap_loader"'
+        )
+        self._assert_rejected(text)
+
+    def test_directly_constructed_config_reader_user_equals_loader_bypasses_loader_not_validator(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            kwargs = self._valid_kwargs(Path(directory))
+            kwargs["reader_user"] = kwargs["user"]
+            config = read_mailbox.DatabaseRunConfig(**kwargs)
+            with self.assertRaises(read_mailbox.AcquisitionFailure) as caught:
+                read_mailbox.validate_database_policy(config)
+            self.assertEqual("config_invalid", caught.exception.code)
 
 
 def _staging_policy(**overrides) -> staging.StagingPolicy:
