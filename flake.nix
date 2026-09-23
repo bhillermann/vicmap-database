@@ -29,6 +29,12 @@
             # in argv. Operator must create this item (03-01-PLAN.md user_setup) --
             # see 03-01-USER-SETUP.md.
             { name = "VICMAP_DB_PASSWORD"; reference = "op://nixos-services/vicmap_loader_credentials/password"; }
+            # D-74: the vicmap_reader role's own PostgreSQL password, sourced from
+            # 1Password through opnix exactly as VICMAP_DB_PASSWORD above -- never
+            # from vicmap.toml, never in argv. Operator must create this item
+            # (04-02-PLAN.md user_setup) before the reader-login verification
+            # (04-05) can run.
+            { name = "VICMAP_READER_PASSWORD"; reference = "op://nixos-services/vicmap_reader_credentials/password"; }
           ];
         };
 
