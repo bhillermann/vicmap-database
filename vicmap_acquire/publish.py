@@ -115,8 +115,8 @@ class ReaderVerification:
     real reader-authenticated query, never trusted from the caller's
     ``published_tables`` argument alone), the row count the representative
     spatial query returned, and ``write_denied`` -- always ``True`` here,
-    since the not-denied branch never returns a result (it raises a closed
-    failure instead)."""
+    since the not-denied branch never returns a result (it raises
+    ``ReaderWriteNotDenied`` instead)."""
 
     tables_discovered: tuple[str, ...]
     spatial_query_row_count: int
@@ -180,6 +180,16 @@ class ReaderVerificationFailed(PublishFailure):
     raised, or there was no published table to prove against."""
 
     code = "reader_verification_failed"
+
+
+class ReaderWriteNotDenied(PublishFailure):
+    """T-04-02 (security-critical): the reader's attempted write was NOT
+    rejected -- the grant model is broken. This is the phase's most urgent
+    failure and must never be downgraded to a warning or a pass;
+    ``evidence.py``'s remediation hint for this code is immediate
+    revocation, not a routine retry."""
+
+    code = "reader_write_not_denied"
 
 
 def _connect(policy: PublishPolicy, password: str) -> "psycopg.Connection":
@@ -549,10 +559,9 @@ def verify_reader_access(
     real executed ``INSERT ... DEFAULT VALUES`` -- chosen over ``UPDATE``
     because PostgreSQL's ACL check runs at executor startup, before any
     ``NOT NULL`` constraint is ever evaluated -- never a grant-metadata-only
-    shortcut (research Anti-Pattern). If the write is not rejected, this
-    raises a closed failure and never returns a passing result; Task 2
-    (T-04-02) hardens this into the dedicated, security-critical
-    ``ReaderWriteNotDenied``."""
+    shortcut (research Anti-Pattern). If the write is
+    not rejected, the grant model is broken: this raises the security-critical
+    ``ReaderWriteNotDenied`` and never returns a passing result (T-04-02)."""
 
     if not reader_password:
         raise ReaderRoleUnavailable()
@@ -603,9 +612,10 @@ def verify_reader_access(
             write_denied = True
         else:
             connection.rollback()
-            # Task 2 (T-04-02) hardens this branch into the dedicated,
-            # security-critical hard-stop; a plain closed failure for now.
-            raise ReaderVerificationFailed()
+            # T-04-02/security-critical: a writable reader means the grant
+            # model is broken -- this must never be downgraded to a warning
+            # or a pass.
+            raise ReaderWriteNotDenied()
     finally:
         connection.rollback()
         connection.close()

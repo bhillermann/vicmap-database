@@ -352,10 +352,14 @@ class ClosedFailureVocabularyTest(unittest.TestCase):
             "reader_verification_failed", publish.ReaderVerificationFailed.code
         )
 
+    def test_reader_write_not_denied_code(self):
+        self.assertEqual("reader_write_not_denied", publish.ReaderWriteNotDenied.code)
+
     def test_reader_failures_are_a_closed_hierarchy(self):
         for failure in (
             publish.ReaderRoleUnavailable,
             publish.ReaderVerificationFailed,
+            publish.ReaderWriteNotDenied,
         ):
             self.assertTrue(issubclass(failure, publish.PublishFailure))
 
@@ -609,13 +613,13 @@ class ReaderVerificationTest(unittest.TestCase):
         self.assertIn("-39.2", spatial[0])
         self.assertIn('"vicmap"."vmadd_address"', spatial[0])
 
-    def test_writable_reader_is_not_a_silent_pass(self):
-        # Task 2 (T-04-02) hardens this branch into the dedicated,
-        # security-critical ReaderWriteNotDenied; for now it must still fail
-        # closed rather than silently return write_denied=False.
+    def test_writable_reader_raises_reader_write_not_denied(self):
+        # T-04-02, security-critical: a writable reader is caught, never a
+        # silent pass -- the negative proof that the check actually detects
+        # a broken grant, not just the happy path.
         connection = self._connection(deny_write=False)
         with patch.object(publish.psycopg, "connect", return_value=connection):
-            with self.assertRaises(publish.PublishFailure):
+            with self.assertRaises(publish.ReaderWriteNotDenied):
                 publish.verify_reader_access(
                     _publish_policy(),
                     reader_password="sentinel-secret",
@@ -747,6 +751,21 @@ class LiveReaderWriteDenialTest(_LivePublishMixin, unittest.TestCase):
             "live write-denial proof requires an operator-provisioned reader "
             "role with baseline USAGE only (D-72) and a promoted fixture "
             "table; deferred to the operator's live run"
+        )
+
+
+class LiveReaderWriteNotDeniedTest(_LivePublishMixin, unittest.TestCase):
+    """Skips without live DSNs. A reader-equivalent role deliberately granted
+    INSERT on the fixture table must trip ``ReaderWriteNotDenied`` -- proving
+    the check actually detects a broken grant, not just the happy path
+    (T-04-02, security-critical)."""
+
+    def test_writable_reader_trips_reader_write_not_denied(self):
+        self._require_live()
+        self.skipTest(
+            "live negative write-denial proof requires an operator-provisioned "
+            "role deliberately granted INSERT on a promoted fixture table "
+            "(a broken-grant simulation); deferred to the operator's live run"
         )
 
 
