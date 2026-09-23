@@ -2486,5 +2486,272 @@ class ProductionIsolationTest(_LivePostgresMixin, unittest.TestCase):
         self.assertEqual(before_counts, after_counts)
 
 
+class AuditValidationRecordTest(_LivePostgresMixin, unittest.TestCase):
+    """Skips without a server, and without
+    ``VICMAP_TEST_POSTGRES_SUPERUSER_DSN`` naming a reachable superuser
+    connection. D-68/D-69/D-70: proves ``record_validation`` durably writes
+    one PASS row keyed by ``(run_ts, manifest_digest, target_table)`` into
+    the real ``vicmap_audit.staging_validation`` table.
+
+    Creates the schema/table via the superuser connection only if either
+    does not already exist -- never dropping a pre-existing, operator-
+    provisioned one -- and always cleans up only the rows this test itself
+    inserted, keyed by a per-process-unique ``run_ts`` so a shared,
+    already-provisioned table is never disturbed for any other row."""
+
+    _SUPERUSER_DSN_ENV_VAR = "VICMAP_TEST_POSTGRES_SUPERUSER_DSN"
+
+    def setUp(self):
+        self._connect().close()  # proves driver + ordinary server, or skips
+        self.params = self._connection_params()
+
+        superuser_dsn = os.environ.get(self._SUPERUSER_DSN_ENV_VAR)
+        if not superuser_dsn:
+            self.skipTest(
+                f"{self._SUPERUSER_DSN_ENV_VAR} not set -- audit validation "
+                "record check skipped, not failed"
+            )
+
+        import psycopg
+
+        try:
+            connection = psycopg.connect(
+                superuser_dsn, connect_timeout=self._CONNECT_TIMEOUT_SECONDS
+            )
+        except Exception as exc:  # noqa: BLE001 -- any connect failure just skips
+            self.skipTest(
+                "no reachable PostgreSQL superuser connection for audit "
+                f"validation record check: {exc}"
+            )
+        connection.autocommit = True
+        self.superuser_connection = connection
+        self._schema_created = False
+        self._table_created = False
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regnamespace('vicmap_audit')")
+            (schema_oid,) = cursor.fetchone()
+            if schema_oid is None:
+                cursor.execute("CREATE SCHEMA vicmap_audit")
+                self._schema_created = True
+
+            cursor.execute("SELECT to_regclass('vicmap_audit.staging_validation')")
+            (table_oid,) = cursor.fetchone()
+            if table_oid is None:
+                # Mirrors db/provision_vicmap_loader.sql's exact D-69 shape.
+                cursor.execute(
+                    "CREATE TABLE vicmap_audit.staging_validation ("
+                    "run_ts text NOT NULL, "
+                    "manifest_digest text NOT NULL, "
+                    "target_table text NOT NULL, "
+                    "staging_table text NOT NULL, "
+                    "verdict text NOT NULL, "
+                    "spatial boolean NOT NULL, "
+                    "row_count bigint NOT NULL, "
+                    "srid integer, "
+                    "geometry_type text, "
+                    "repaired_count bigint, "
+                    "recorded_at timestamptz NOT NULL DEFAULT now(), "
+                    "PRIMARY KEY (run_ts, manifest_digest, target_table)"
+                    ")"
+                )
+                self._table_created = True
+
+            cursor.execute(
+                staging.sql.SQL("GRANT USAGE ON SCHEMA vicmap_audit TO {}").format(
+                    staging.sql.Identifier(self.params["user"])
+                )
+            )
+            cursor.execute(
+                staging.sql.SQL(
+                    "GRANT SELECT, INSERT ON vicmap_audit.staging_validation TO {}"
+                ).format(staging.sql.Identifier(self.params["user"]))
+            )
+
+        # A distinctive, per-process run_ts keys every row this test class
+        # writes, so tearDown can delete exactly (and only) its own rows
+        # regardless of what else already lives in a possibly-shared,
+        # already-provisioned table.
+        self.run_ts = f"claude-record-validation-{os.getpid()}"
+
+    def tearDown(self):
+        connection = getattr(self, "superuser_connection", None)
+        if connection is None:
+            return
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM vicmap_audit.staging_validation WHERE run_ts = %s",
+                    (self.run_ts,),
+                )
+                if self._table_created:
+                    cursor.execute(
+                        "DROP TABLE IF EXISTS vicmap_audit.staging_validation"
+                    )
+                if self._schema_created:
+                    cursor.execute("DROP SCHEMA IF EXISTS vicmap_audit")
+        finally:
+            connection.close()
+
+    def _policy(self) -> staging.StagingPolicy:
+        return _staging_policy(
+            host=self.params["host"],
+            port=self.params["port"],
+            dbname=self.params["dbname"],
+            user=self.params["user"],
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+        )
+
+    def test_record_validation_writes_one_row_and_reads_back(self):
+        digest = "a" * 64
+        validation = staging.LayerValidation(
+            staging_table="vmadd_address_20260918t041500z",
+            spatial=True,
+            row_count=4222035,
+            geometry_type="POINT",
+            srid=7899,
+            repaired_count=0,
+            extent=(0.0, 0.0, 1.0, 1.0),
+        )
+
+        staging.record_validation(
+            self._policy(),
+            self.params["password"],
+            run_timestamp=self.run_ts,
+            manifest_digest=digest,
+            target_table="vmadd_address",
+            validation=validation,
+        )
+
+        with self.superuser_connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT target_table, verdict, row_count, srid, geometry_type, "
+                "repaired_count, spatial, staging_table "
+                "FROM vicmap_audit.staging_validation "
+                "WHERE run_ts = %s AND manifest_digest = %s AND target_table = %s",
+                (self.run_ts, digest, "vmadd_address"),
+            )
+            rows = cursor.fetchall()
+
+        self.assertEqual(1, len(rows))
+        (
+            target_table,
+            verdict,
+            row_count,
+            srid,
+            geometry_type,
+            repaired_count,
+            spatial,
+            staging_table,
+        ) = rows[0]
+        self.assertEqual("vmadd_address", target_table)
+        self.assertEqual("pass", verdict)
+        self.assertEqual(4222035, row_count)
+        self.assertEqual(7899, srid)
+        self.assertEqual("POINT", geometry_type)
+        self.assertEqual(0, repaired_count)
+        self.assertTrue(spatial)
+        self.assertEqual("vmadd_address_20260918t041500z", staging_table)
+
+    def test_second_call_for_same_key_is_idempotent_not_a_raw_duplicate_error(self):
+        digest = "b" * 64
+        validation = staging.LayerValidation(
+            staging_table="vmadd_address_20260918t041500z",
+            spatial=True,
+            row_count=1,
+            geometry_type="POINT",
+            srid=7899,
+            repaired_count=0,
+            extent=(0.0, 0.0, 1.0, 1.0),
+        )
+        kwargs = dict(
+            run_timestamp=self.run_ts,
+            manifest_digest=digest,
+            target_table="vmadd_address",
+            validation=validation,
+        )
+
+        staging.record_validation(self._policy(), self.params["password"], **kwargs)
+        staging.record_validation(self._policy(), self.params["password"], **kwargs)
+
+        with self.superuser_connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM vicmap_audit.staging_validation "
+                "WHERE run_ts = %s AND manifest_digest = %s AND target_table = %s",
+                (self.run_ts, digest, "vmadd_address"),
+            )
+            (count,) = cursor.fetchone()
+        self.assertEqual(1, count)
+
+    def test_non_spatial_layer_writes_null_srid_geometry_type_repaired_count(self):
+        digest = "c" * 64
+        validation = staging.LayerValidation(
+            staging_table="lookup_lookup_20260918t041500z",
+            spatial=False,
+            row_count=10,
+            geometry_type=staging.NOT_APPLICABLE,
+            srid=staging.NOT_APPLICABLE,
+            repaired_count=staging.NOT_APPLICABLE,
+            extent=staging.NOT_APPLICABLE,
+        )
+
+        staging.record_validation(
+            self._policy(),
+            self.params["password"],
+            run_timestamp=self.run_ts,
+            manifest_digest=digest,
+            target_table="lookup_lookup",
+            validation=validation,
+        )
+
+        with self.superuser_connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT srid, geometry_type, repaired_count, spatial "
+                "FROM vicmap_audit.staging_validation "
+                "WHERE run_ts = %s AND manifest_digest = %s AND target_table = %s",
+                (self.run_ts, digest, "lookup_lookup"),
+            )
+            srid, geometry_type, repaired_count, spatial = cursor.fetchone()
+
+        self.assertIsNone(srid)
+        self.assertIsNone(geometry_type)
+        self.assertIsNone(repaired_count)
+        self.assertFalse(spatial)
+
+    def test_privilege_denied_when_insert_grant_missing(self):
+        with self.superuser_connection.cursor() as cursor:
+            cursor.execute(
+                staging.sql.SQL(
+                    "REVOKE INSERT ON vicmap_audit.staging_validation FROM {}"
+                ).format(staging.sql.Identifier(self.params["user"]))
+            )
+        try:
+            validation = staging.LayerValidation(
+                staging_table="vmadd_address_20260918t041500z",
+                spatial=True,
+                row_count=1,
+                geometry_type="POINT",
+                srid=7899,
+                repaired_count=0,
+                extent=(0.0, 0.0, 1.0, 1.0),
+            )
+            with self.assertRaises(staging.AuditPrivilegeDenied):
+                staging.record_validation(
+                    self._policy(),
+                    self.params["password"],
+                    run_timestamp=self.run_ts,
+                    manifest_digest="d" * 64,
+                    target_table="vmadd_address",
+                    validation=validation,
+                )
+        finally:
+            with self.superuser_connection.cursor() as cursor:
+                cursor.execute(
+                    staging.sql.SQL(
+                        "GRANT SELECT, INSERT ON vicmap_audit.staging_validation TO {}"
+                    ).format(staging.sql.Identifier(self.params["user"]))
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

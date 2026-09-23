@@ -318,6 +318,36 @@ def _companion_from_payload(payload: dict) -> CompanionFile:
     )
 
 
+def manifest_digest(run_directory: Path) -> str:
+    """Return ``manifest.json.sha256``'s own digest -- a thin read, never a
+    full re-verification. ``read_manifest`` remains the full-verification
+    path (recomputes the digest over ``manifest.json``'s own bytes and
+    compares it to this same sidecar before trusting a single field) and
+    must always be called first by any caller that needs the manifest's
+    actual content; this function exists only to hand the *same already-
+    verified* digest to a caller -- ``staging.record_validation`` (D-68) --
+    that needs to key a durable row by it without re-reading and
+    re-parsing the whole manifest a second time.
+
+    Validated against ``_SIDECAR_DIGEST`` (the exact 64-hex-character shape
+    ``read_manifest`` itself requires) before being returned, so a missing
+    or malformed sidecar raises the same closed ``ManifestUnreadable`` a
+    missing/malformed ``manifest.json`` does -- never a raw ``OSError`` or a
+    digest string that could turn out not to be 64 hex characters."""
+
+    try:
+        sidecar_text = (Path(run_directory) / "manifest.json.sha256").read_text(
+            encoding="utf-8"
+        )
+    except (OSError, UnicodeError):
+        raise ManifestUnreadable() from None
+
+    digest = sidecar_text[:-1] if sidecar_text.endswith("\n") else sidecar_text
+    if _SIDECAR_DIGEST.fullmatch(digest) is None:
+        raise ManifestUnreadable()
+    return digest
+
+
 def read_manifest(run_directory: Path) -> ImportManifest:
     """Read ``manifest.json`` back, verifying its digest before trusting a field.
 

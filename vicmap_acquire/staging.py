@@ -283,6 +283,24 @@ class StagingDdlFailed(StagingFailure):
     code = "db_staging_ddl_failed"
 
 
+class AuditPrivilegeDenied(StagingFailure):
+    """D-70: the loader lacks INSERT on ``vicmap_audit.staging_validation``
+    -- the by-hand provisioning in ``db/provision_vicmap_loader.sql`` has
+    not run, or granted a different role than the one connecting."""
+
+    code = "db_audit_privilege_denied"
+
+
+class AuditRecordFailed(StagingFailure):
+    """D-70: any other failure writing the durable PASS row -- schema
+    missing, column mismatch, connection drop mid-insert. Never a raw
+    duplicate-key error: ``record_validation``'s own ``ON CONFLICT DO
+    NOTHING`` makes a repeated call for the same key idempotent instead of
+    raising in the first place."""
+
+    code = "db_audit_record_failed"
+
+
 class TableNameInvalid(StagingFailure):
     """Shares ``evidence.ReasonCode.TABLE_NAME_INVALID``'s code with
     ``naming.TableNameInvalid`` (same meaning: an unsafe table-name scalar).
@@ -1123,6 +1141,87 @@ def apply_post_validation_ddl(
         connection.close()
 
     return tuple(created)
+
+
+def record_validation(
+    policy: StagingPolicy,
+    password: str,
+    *,
+    run_timestamp: str,
+    manifest_digest: str,
+    target_table: str,
+    validation: LayerValidation,
+) -> None:
+    """D-68/D-69/D-70's Phase 3 back-fill: durably persist one PASS row for
+    a layer ``validate_layer``/``apply_post_validation_ddl`` have already
+    returned without raising -- the caller's own all-layers-validated
+    precondition (T-04-06: a failed layer never reaches this call, so no
+    PASS row can ever exist for unvalidated data). ``verdict`` is always
+    the literal ``'pass'`` for exactly that reason.
+
+    Follows ``apply_post_validation_ddl``'s connection lifecycle exactly:
+    one ``_connect``, one implicit transaction, commit on success, rollback
+    before every raised failure. The non-spatial fields
+    (``srid``/``geometry_type``/``repaired_count``) are written as SQL
+    ``NULL`` when ``validation.spatial`` is ``False`` -- the table's own
+    nullable columns (D-69) -- rather than ``LayerValidation``'s in-process
+    ``evidence.NOT_APPLICABLE`` sentinel, which has no place in a durable
+    row.
+
+    A second call for the same ``(run_ts, manifest_digest, target_table)``
+    key is idempotent: ``ON CONFLICT DO NOTHING`` means a repeated back-fill
+    (re-running Phase 3 staging against the same manifest) can never raise a
+    raw duplicate-key error.
+
+    The table and every value are composed through ``sql.Identifier`` (the
+    table name only) and bind parameters (every value) -- no string-
+    formatted SQL (T-04-05), matching this module's established pattern.
+    The loader lacking ``INSERT`` on ``vicmap_audit.staging_validation``
+    raises the closed ``AuditPrivilegeDenied``; any other write failure
+    raises the closed ``AuditRecordFailed`` -- neither carries driver or SQL
+    text.
+    """
+
+    srid = validation.srid if validation.spatial else None
+    geometry_type = validation.geometry_type if validation.spatial else None
+    repaired_count = validation.repaired_count if validation.spatial else None
+
+    table_ref = sql.Identifier("vicmap_audit", "staging_validation")
+    statement = sql.SQL(
+        "INSERT INTO {table} "
+        "(run_ts, manifest_digest, target_table, staging_table, verdict, "
+        "spatial, row_count, srid, geometry_type, repaired_count) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (run_ts, manifest_digest, target_table) DO NOTHING"
+    ).format(table=table_ref)
+
+    connection = _connect(policy, password)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                statement,
+                (
+                    run_timestamp,
+                    manifest_digest,
+                    target_table,
+                    validation.staging_table,
+                    "pass",
+                    validation.spatial,
+                    validation.row_count,
+                    srid,
+                    geometry_type,
+                    repaired_count,
+                ),
+            )
+        connection.commit()
+    except pg_errors.InsufficientPrivilege:
+        connection.rollback()
+        raise AuditPrivilegeDenied() from None
+    except Exception:
+        connection.rollback()
+        raise AuditRecordFailed() from None
+    finally:
+        connection.close()
 
 
 def run_staging(

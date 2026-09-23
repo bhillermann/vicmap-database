@@ -656,6 +656,80 @@ class ManifestReadDigestTest(_TempDirMixin, unittest.TestCase):
         self.assertEqual([], forbidden)
 
 
+class ManifestDigestTest(_TempDirMixin, unittest.TestCase):
+    """04-03 Task 1: ``manifest_digest`` is a thin sidecar read that always
+    agrees with ``read_manifest``'s own full verification -- never its own,
+    independently-derived notion of the digest."""
+
+    def test_matches_the_digest_write_manifest_returned(self):
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-digest-")
+        expected_digest = manifest_module.write_manifest(manifest, run_dir)
+
+        self.assertEqual(expected_digest, manifest_module.manifest_digest(run_dir))
+
+    def test_matches_read_manifest_own_verified_digest(self):
+        # Independent oracle: recompute the digest exactly the way
+        # read_manifest does (over manifest.json's own bytes, trailing
+        # newline stripped) and confirm manifest_digest agrees with it,
+        # after read_manifest has already proven that digest correct.
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-digest-oracle-")
+        manifest_module.write_manifest(manifest, run_dir)
+        manifest_module.read_manifest(run_dir)  # raises if the digest is wrong
+
+        canonical_text = (run_dir / "manifest.json").read_text(encoding="utf-8")
+        canonical = canonical_text[:-1] if canonical_text.endswith("\n") else canonical_text
+        oracle_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+        self.assertEqual(oracle_digest, manifest_module.manifest_digest(run_dir))
+
+    def test_is_64_lowercase_hex_characters(self):
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-digest-shape-")
+        manifest_module.write_manifest(manifest, run_dir)
+
+        digest = manifest_module.manifest_digest(run_dir)
+
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_missing_sidecar_raises_manifest_unreadable(self):
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-digest-missing-")
+        manifest_module.write_manifest(manifest, run_dir)
+        (run_dir / "manifest.json.sha256").unlink()
+
+        with self.assertRaises(manifest_module.ManifestUnreadable):
+            manifest_module.manifest_digest(run_dir)
+
+    def test_truncated_sidecar_raises_manifest_unreadable(self):
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-digest-truncated-")
+        manifest_module.write_manifest(manifest, run_dir)
+        (run_dir / "manifest.json.sha256").write_text("0123456789\n", encoding="utf-8")
+
+        with self.assertRaises(manifest_module.ManifestUnreadable):
+            manifest_module.manifest_digest(run_dir)
+
+    def test_missing_run_directory_raises_manifest_unreadable(self):
+        run_dir = self.make_temp_dir("manifest-digest-absent-")
+        shutil.rmtree(run_dir)
+
+        with self.assertRaises(manifest_module.ManifestUnreadable):
+            manifest_module.manifest_digest(run_dir)
+
+    def test_does_not_read_manifest_json_itself(self):
+        # A thin sidecar read: manifest.json can be missing or corrupt and
+        # manifest_digest still returns the sidecar's own value, unlike
+        # read_manifest which would need manifest.json to compute anything.
+        manifest = _manifest()
+        run_dir = self.make_temp_dir("manifest-digest-thin-")
+        expected_digest = manifest_module.write_manifest(manifest, run_dir)
+        (run_dir / "manifest.json").unlink()
+
+        self.assertEqual(expected_digest, manifest_module.manifest_digest(run_dir))
+
+
 # ---------------------------------------------------------------------------
 # Task 2: ordered run_discovery composition
 # ---------------------------------------------------------------------------
