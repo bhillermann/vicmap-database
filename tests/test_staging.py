@@ -315,6 +315,71 @@ class DatabaseConfigTest(unittest.TestCase):
             self.assertEqual("config_invalid", caught.exception.code)
 
 
+class ProvisionScriptTest(unittest.TestCase):
+    """Structural checks on db/provision_vicmap_loader.sql (D-70/D-72).
+
+    Text-only: no database, no driver. Proves the by-hand superuser script
+    carries the vicmap_audit gate table with loader append-only grants and
+    the vicmap_reader LOGIN role with USAGE-only on vicmap -- the durable
+    counterpart to StagingTest's runtime preflight checks.
+    """
+
+    def _sql_text(self) -> str:
+        return (REPO_ROOT / "db" / "provision_vicmap_loader.sql").read_text(
+            encoding="utf-8"
+        )
+
+    def test_audit_schema_and_table_created(self):
+        low = self._sql_text().lower()
+        self.assertIn("schema if not exists vicmap_audit", low)
+        self.assertIn("vicmap_audit.staging_validation", low)
+        self.assertIn(
+            "primary key (run_ts, manifest_digest, target_table)", low
+        )
+
+    def test_loader_granted_select_insert_only_on_audit_table(self):
+        import re
+
+        low = self._sql_text().lower()
+        self.assertRegex(
+            low,
+            r"grant\s+select\s*,\s*insert\s+on\s+vicmap_audit\.staging_validation\s+to\s+vicmap_loader",
+        )
+        self.assertIsNone(
+            re.search(r"grant[^;]*update[^;]*to\s+vicmap_loader", low),
+            "loader must not be granted UPDATE on the audit table",
+        )
+        self.assertIsNone(
+            re.search(r"grant[^;]*delete[^;]*to\s+vicmap_loader", low),
+            "loader must not be granted DELETE on the audit table",
+        )
+
+    def test_reader_role_is_login_with_schema_usage_only(self):
+        import re
+
+        low = self._sql_text().lower()
+        self.assertIn("create role vicmap_reader login", low)
+        self.assertRegex(
+            low, r"grant\s+usage\s+on\s+schema\s+vicmap\s+to\s+vicmap_reader"
+        )
+        self.assertNotIn("grant all", low)
+        self.assertIsNone(
+            re.search(r"grant[^;]*insert[^;]*on[^;]*to\s+vicmap_reader", low),
+            "reader must not be granted any write privilege",
+        )
+        self.assertIsNone(
+            re.search(r"grant\s+create\s+on\s+schema\s+vicmap\s+to\s+vicmap_reader", low),
+            "reader must not be granted CREATE on schema vicmap",
+        )
+
+    def test_reader_role_name_matches_configured_reader_user(self):
+        # T-04-09/key_links: the CREATE ROLE name here is the exact string
+        # vicmap.toml's [database].reader_user must equal.
+        with tempfile.TemporaryDirectory() as directory:
+            config = read_mailbox.load_database_config(_write_policy(directory))
+        self.assertIn(f"create role {config.reader_user} login", self._sql_text().lower())
+
+
 def _staging_policy(**overrides) -> staging.StagingPolicy:
     kwargs = dict(
         host="127.0.0.1",

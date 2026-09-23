@@ -40,8 +40,56 @@ CREATE SCHEMA IF NOT EXISTS vicmap AUTHORIZATION vicmap_loader;
 -- not something a provisioning script should do silently.
 
 -- ---------------------------------------------------------------------
+-- D-69/D-70: the publication gate's durable record lives in a dedicated
+-- vicmap_audit schema, owned by the superuser running this script -- NOT
+-- by vicmap_loader (research Open Question 2's tighter model). The loader
+-- is granted only SELECT+INSERT on the one table inside it: append-only,
+-- no CREATE/UPDATE/DELETE, so the gate record can never be silently
+-- rewritten by the pipeline that reads and writes it (T-04-08).
+--
+-- CURRENT_USER at script-run time is the connecting superuser, so this
+-- schema is owned by whichever superuser role runs this script.
+CREATE SCHEMA IF NOT EXISTS vicmap_audit AUTHORIZATION CURRENT_USER;
+
+-- D-69: per staging run, the run_ts + frozen manifest digest + per-layer
+-- verdict plus the D-56 metrics (row count, SRID, geometry type, repaired
+-- count) -- nothing about mailbox state, idempotency, or history (that is
+-- OPS-01's full audit subsystem, explicitly deferred).
+CREATE TABLE IF NOT EXISTS vicmap_audit.staging_validation (
+    run_ts text NOT NULL,
+    manifest_digest text NOT NULL,
+    target_table text NOT NULL,
+    staging_table text NOT NULL,
+    verdict text NOT NULL,
+    spatial boolean NOT NULL,
+    row_count bigint NOT NULL,
+    srid integer,
+    geometry_type text,
+    repaired_count bigint,
+    recorded_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_ts, manifest_digest, target_table)
+);
+
+GRANT USAGE ON SCHEMA vicmap_audit TO vicmap_loader;
+GRANT SELECT, INSERT ON vicmap_audit.staging_validation TO vicmap_loader;
+
+-- ---------------------------------------------------------------------
+-- D-72: the reader role is provisioned once by hand here -- never by the
+-- pipeline. LOGIN + USAGE ON SCHEMA vicmap only: no CREATE, no table
+-- privileges. Per-table SELECT is granted per-publish by vicmap_loader
+-- (D-73, inside the publish transaction), never here (T-04-02).
+--
+-- Replace the placeholder below with the real password before running this
+-- script by hand -- never commit a real credential to this file. The value
+-- comes from the 1Password item created for Phase 4
+-- (op://nixos-services/vicmap_reader_credentials/password) and is exported
+-- as VICMAP_READER_PASSWORD wherever publish_order.py runs (D-74).
+CREATE ROLE vicmap_reader LOGIN PASSWORD 'REPLACE_WITH_1PASSWORD_VALUE';
+GRANT USAGE ON SCHEMA vicmap TO vicmap_reader;
+
+-- ---------------------------------------------------------------------
 -- Verification (paste into psql after running the statements above,
--- connected as any role against the same database -- these five checks are
+-- connected as any role against the same database -- these checks are
 -- exactly what preflight_staging_privileges proves at runtime):
 --
 -- SELECT rolsuper FROM pg_roles WHERE rolname = 'vicmap_loader';
@@ -54,4 +102,12 @@ CREATE SCHEMA IF NOT EXISTS vicmap AUTHORIZATION vicmap_loader;
 --   -- expect: false
 -- SELECT 1 FROM spatial_ref_sys WHERE srid = 7899;
 --   -- expect: one row
+-- SELECT has_table_privilege('vicmap_loader', 'vicmap_audit.staging_validation', 'INSERT');
+--   -- expect: true
+-- SELECT has_table_privilege('vicmap_loader', 'vicmap_audit.staging_validation', 'UPDATE');
+--   -- expect: false
+-- SELECT has_schema_privilege('vicmap_reader', 'vicmap', 'USAGE');
+--   -- expect: true
+-- SELECT has_schema_privilege('vicmap_reader', 'vicmap', 'CREATE');
+--   -- expect: false
 -- ---------------------------------------------------------------------
