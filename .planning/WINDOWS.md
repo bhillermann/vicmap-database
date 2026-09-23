@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 11
+open_count: 12
 waived_count: 0
 fixed_count: 3
-total_count: 14
-last_updated: 2026-09-23T05:04:48.206Z
+total_count: 15
+last_updated: 2026-09-23T05:24:20.388Z
 ---
 
 # Broken Windows Ledger
@@ -29,6 +29,7 @@ last_updated: 2026-09-23T05:04:48.206Z
 | 12 | 04 | unrun-verify | tests/test_publish.py |  | Live reader-verification test (discovery + Victoria-extent spatial query, PUB-05) is a skip-guarded placeholder; run against live DB after operator provisions the reader role and VICMAP_READER_PASSWORD | open |  | 2026-09-23T05:04:46.663Z |  |
 | 13 | 04 | unrun-verify | tests/test_publish.py |  | Live write-denial (InsufficientPrivilege) proof (PUB-04) is a skip-guarded placeholder; run against live DB | open |  | 2026-09-23T05:04:47.511Z |  |
 | 14 | 04 | unrun-verify | tests/test_publish.py |  | Live negative write-not-denied proof (T-04-02, security-critical) is a skip-guarded placeholder; run against live DB with a deliberately writable reader-equivalent role | open |  | 2026-09-23T05:04:48.206Z |  |
+| 15 | 04 | unrun-verify | tests/test_publish.py |  | Live publish_order.py full-run test (load-config -> gate/promote -> reader-verify -> summary, exit 0 + summary.json) is a skip-guarded placeholder; run against a fully provisioned live DB | open |  | 2026-09-23T05:24:20.388Z |  |
 
 ````json
 [
@@ -198,6 +199,18 @@ last_updated: 2026-09-23T05:04:48.206Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-23T05:04:48.206Z",
+    "resolved_at": null
+  },
+  {
+    "id": 15,
+    "kind": "unrun-verify",
+    "phase": "04",
+    "file": "tests/test_publish.py",
+    "line": null,
+    "description": "Live publish_order.py full-run test (load-config -> gate/promote -> reader-verify -> summary, exit 0 + summary.json) is a skip-guarded placeholder; run against a fully provisioned live DB",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-23T05:24:20.388Z",
     "resolved_at": null
   }
 ]
