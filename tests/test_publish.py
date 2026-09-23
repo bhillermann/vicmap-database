@@ -1035,5 +1035,29 @@ class LiveReaderWriteNotDeniedTest(_LivePublishMixin, unittest.TestCase):
         )
 
 
+class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
+    """Skips without live DSNs. ``publish_order.py``'s full ordered
+    composition (load-config -> gate -> promote -> reader-verify -> summary,
+    D-77) exits 0 and writes ``summary.json`` into the run directory on a
+    real, fully-provisioned order (D-70's ``vicmap_audit`` schema, D-72's
+    reader role, a completed Phase 3 staging run, and both
+    ``VICMAP_DB_PASSWORD``/``VICMAP_READER_PASSWORD`` resolvable). This is a
+    code-only phase delivery (per plan): the CLI composition itself is
+    exercised offline by the CLI-composition and exit-code contract tests in
+    this file and in ``tests/test_publish_order.py``; this live case is
+    deferred to the operator's own end-to-end run."""
+
+    def test_full_run_exits_zero_and_writes_summary_json(self):
+        self._require_live()
+        self.skipTest(
+            "a live end-to-end publish_order.py run requires an "
+            "operator-provisioned vicmap_audit schema (D-70), a vicmap_reader "
+            "role plus a resolvable VICMAP_READER_PASSWORD (D-72/D-74), and a "
+            "completed Phase 3 staging run over a real order; deferred to the "
+            "operator's live run (see this plan's SUMMARY.md for exact resume "
+            "steps)"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
