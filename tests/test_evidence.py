@@ -290,6 +290,7 @@ class EvidenceContractTest(unittest.TestCase):
             "db_geometry_repair_changed_type": "db_validation",
             "db_geometry_repair_incomplete": "db_validation",
             "db_staging_ddl_failed": "db_staging_ddl",
+            "pub_promotion_failed": "db_publish",
         }
         self.assertEqual(expected, evidence.reason_stage_vocabulary())
         self.assertEqual(set(expected.values()), {stage.value for stage in evidence.Stage})
@@ -1687,6 +1688,49 @@ class Phase3VocabularyTest(unittest.TestCase):
         for reason in evidence.ReasonCode:
             with self.subTest(reason=reason.value):
                 evidence.SafeFailure(reason)  # must not raise KeyError
+
+
+class Phase4VocabularyTest(unittest.TestCase):
+    """04-01: the Phase 4 evidence vocabulary extension (EVID-01/EVID-02).
+
+    Mirrors Phase3VocabularyTest's shape -- a subset check against the
+    closed reason/stage mapping, plus the generic "every reason constructs
+    a SafeFailure" and "vocabulary stays total" guarantees already proven
+    by EvidenceContractTest's exact-equality test.
+    """
+
+    def test_db_publish_stage_and_pub_promotion_failed_reason(self):
+        self.assertEqual("db_publish", evidence.Stage.DB_PUBLISH.value)
+        self.assertEqual(
+            "pub_promotion_failed", evidence.ReasonCode.PUB_PROMOTION_FAILED.value
+        )
+        stage, hint = evidence._FAILURE_POLICY[evidence.ReasonCode.PUB_PROMOTION_FAILED]
+        self.assertIs(evidence.Stage.DB_PUBLISH, stage)
+        self.assertEqual("review_the_named_publish_boundary_and_retry", hint)
+
+        stream = io.StringIO()
+        evidence.render_failure(
+            evidence.SafeFailure(evidence.ReasonCode.PUB_PROMOTION_FAILED),
+            stream=stream,
+        )
+        rendered = stream.getvalue()
+        self.assertEqual(1, rendered.count("\n"))
+        payload = json.loads(rendered)
+        self.assertEqual(
+            {
+                "event": "failure",
+                "stage": "db_publish",
+                "reason": "pub_promotion_failed",
+                "hint": "review_the_named_publish_boundary_and_retry",
+            },
+            payload,
+        )
+
+    def test_reason_stage_vocabulary_stays_total_after_the_extension(self):
+        vocabulary = evidence.reason_stage_vocabulary()
+        for reason in evidence.ReasonCode:
+            with self.subTest(reason=reason.value):
+                self.assertIn(reason.value, vocabulary)
 
 
 class DatabaseIdentityEventTest(unittest.TestCase):

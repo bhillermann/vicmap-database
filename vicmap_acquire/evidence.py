@@ -82,6 +82,7 @@ class Stage(str, Enum):
     DB_LOAD = "db_load"
     DB_VALIDATION = "db_validation"
     DB_STAGING_DDL = "db_staging_ddl"
+    DB_PUBLISH = "db_publish"
 
 
 class ReasonCode(str, Enum):
@@ -132,6 +133,7 @@ class ReasonCode(str, Enum):
     DB_GEOMETRY_REPAIR_CHANGED_TYPE = "db_geometry_repair_changed_type"
     DB_GEOMETRY_REPAIR_INCOMPLETE = "db_geometry_repair_incomplete"
     DB_STAGING_DDL_FAILED = "db_staging_ddl_failed"
+    PUB_PROMOTION_FAILED = "pub_promotion_failed"
 
 
 _FAILURE_POLICY = MappingProxyType(
@@ -323,6 +325,13 @@ _FAILURE_POLICY = MappingProxyType(
         ReasonCode.DB_STAGING_DDL_FAILED: (
             Stage.DB_STAGING_DDL,
             "review_the_named_loader_diagnostic_file",
+        ),
+        # D-77 (EVID-02): the single promote/drop/rename/grant transaction
+        # boundary -- any failure inside it (DDL error, name-discovery
+        # mismatch, grant failure) surfaces here.
+        ReasonCode.PUB_PROMOTION_FAILED: (
+            Stage.DB_PUBLISH,
+            "review_the_named_publish_boundary_and_retry",
         ),
     }
 )
