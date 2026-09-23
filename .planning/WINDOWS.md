@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 8
+open_count: 11
 waived_count: 0
 fixed_count: 3
-total_count: 11
-last_updated: 2026-09-23T04:46:11.480Z
+total_count: 14
+last_updated: 2026-09-23T05:04:48.206Z
 ---
 
 # Broken Windows Ledger
@@ -26,6 +26,9 @@ last_updated: 2026-09-23T04:46:11.480Z
 | 9 | 04 | unrun-verify | tests/test_publish.py |  | Live single-layer promotion (PUB-01/04) test is a skip-guarded placeholder; run against live DB after operator provisioning | open |  | 2026-09-23T04:46:11.166Z |  |
 | 10 | 04 | unrun-verify | tests/test_publish.py |  | Live multi-layer commit-together (PUB-02) test is a skip-guarded placeholder; run against live DB | open |  | 2026-09-23T04:46:11.318Z |  |
 | 11 | 04 | unrun-verify | tests/test_publish.py |  | Live induced-failure rollback (PUB-03) test is a skip-guarded placeholder; run against live DB | open |  | 2026-09-23T04:46:11.480Z |  |
+| 12 | 04 | unrun-verify | tests/test_publish.py |  | Live reader-verification test (discovery + Victoria-extent spatial query, PUB-05) is a skip-guarded placeholder; run against live DB after operator provisions the reader role and VICMAP_READER_PASSWORD | open |  | 2026-09-23T05:04:46.663Z |  |
+| 13 | 04 | unrun-verify | tests/test_publish.py |  | Live write-denial (InsufficientPrivilege) proof (PUB-04) is a skip-guarded placeholder; run against live DB | open |  | 2026-09-23T05:04:47.511Z |  |
+| 14 | 04 | unrun-verify | tests/test_publish.py |  | Live negative write-not-denied proof (T-04-02, security-critical) is a skip-guarded placeholder; run against live DB with a deliberately writable reader-equivalent role | open |  | 2026-09-23T05:04:48.206Z |  |
 
 ````json
 [
@@ -159,6 +162,42 @@ last_updated: 2026-09-23T04:46:11.480Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-23T04:46:11.480Z",
+    "resolved_at": null
+  },
+  {
+    "id": 12,
+    "kind": "unrun-verify",
+    "phase": "04",
+    "file": "tests/test_publish.py",
+    "line": null,
+    "description": "Live reader-verification test (discovery + Victoria-extent spatial query, PUB-05) is a skip-guarded placeholder; run against live DB after operator provisions the reader role and VICMAP_READER_PASSWORD",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-23T05:04:46.663Z",
+    "resolved_at": null
+  },
+  {
+    "id": 13,
+    "kind": "unrun-verify",
+    "phase": "04",
+    "file": "tests/test_publish.py",
+    "line": null,
+    "description": "Live write-denial (InsufficientPrivilege) proof (PUB-04) is a skip-guarded placeholder; run against live DB",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-23T05:04:47.511Z",
+    "resolved_at": null
+  },
+  {
+    "id": 14,
+    "kind": "unrun-verify",
+    "phase": "04",
+    "file": "tests/test_publish.py",
+    "line": null,
+    "description": "Live negative write-not-denied proof (T-04-02, security-critical) is a skip-guarded placeholder; run against live DB with a deliberately writable reader-equivalent role",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-23T05:04:48.206Z",
     "resolved_at": null
   }
 ]
