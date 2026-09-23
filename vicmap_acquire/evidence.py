@@ -785,6 +785,72 @@ class SuccessEvent(_SafeEvent):
             }
         )
 
+    @classmethod
+    def publication_summary(
+        cls,
+        *,
+        order_id: str,
+        message_fingerprint: str,
+        artifact_sha256: str,
+        manifest_sha256: str,
+        layer_count: int,
+        published_tables: tuple[str, ...],
+        reader_tables_discovered: int,
+        reader_spatial_query_row_count: int,
+        reader_write_denied: bool,
+        fingerprint_hex_chars: int = 16,
+    ) -> "SuccessEvent":
+        """D-75: the operator-visible, redacted publication summary (EVID-01).
+
+        Links message -> checksum -> layers -> published tables -> reader
+        verification through safe scalars only (fingerprints, checksums,
+        counts, target-table names, booleans) -- never a raw id, path, or
+        secret. The durable ``summary.json`` file assembled in 04-06 is the
+        deliverable; this event is its everything-is-an-event mirror. This
+        classmethod only defines and validates the vocabulary -- emitting or
+        assembling the event is 04-06's job.
+        """
+
+        validated_order_id = _require_order_id(order_id)
+        validated_message_fingerprint = _require_fingerprint(
+            message_fingerprint, fingerprint_hex_chars
+        )
+        if not isinstance(artifact_sha256, str) or _HEX_64.fullmatch(artifact_sha256) is None:
+            raise ValueError("artifact_sha256 is not a complete lowercase SHA-256 value")
+        if not isinstance(manifest_sha256, str) or _HEX_64.fullmatch(manifest_sha256) is None:
+            raise ValueError("manifest_sha256 is not a complete lowercase SHA-256 value")
+        validated_layer_count = _require_count(layer_count)
+        if not isinstance(published_tables, tuple) or not all(
+            isinstance(table, str) for table in published_tables
+        ):
+            raise ValueError("published_tables must be a tuple of strings")
+        validated_published_tables = [
+            _require_target_table(table) for table in published_tables
+        ]
+        validated_reader_tables_discovered = _require_count(reader_tables_discovered)
+        validated_reader_spatial_query_row_count = _require_count(
+            reader_spatial_query_row_count
+        )
+        if isinstance(reader_write_denied, bool) is False:
+            raise ValueError("reader_write_denied must be a bool")
+
+        return cls(
+            {
+                "event": "publication_summary",
+                "order_id": validated_order_id,
+                "message_fingerprint": validated_message_fingerprint,
+                "artifact_sha256": artifact_sha256,
+                "manifest_sha256": manifest_sha256,
+                "layer_count": validated_layer_count,
+                "published_tables": validated_published_tables,
+                "reader_tables_discovered": validated_reader_tables_discovered,
+                "reader_spatial_query_row_count": (
+                    validated_reader_spatial_query_row_count
+                ),
+                "reader_write_denied": reader_write_denied,
+            }
+        )
+
 
 class ProgressEvent(_SafeEvent):
     @classmethod

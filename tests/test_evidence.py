@@ -1922,5 +1922,114 @@ class StagingEventRedactionTest(unittest.TestCase):
             )
 
 
+class PublicationSummaryEventTest(unittest.TestCase):
+    """04-01 Task 3: the redacted publication_summary success event (EVID-01).
+
+    This classmethod only defines and tests the vocabulary -- emitting or
+    assembling the event is 04-06's job (per the plan's action block).
+    """
+
+    def _kwargs(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = dict(
+            order_id="OK0VUZ",
+            message_fingerprint="a" * 16,
+            artifact_sha256="b" * 64,
+            manifest_sha256="c" * 64,
+            layer_count=1,
+            published_tables=("vmadd_address",),
+            reader_tables_discovered=1,
+            reader_spatial_query_row_count=10,
+            reader_write_denied=True,
+        )
+        base.update(overrides)
+        return base
+
+    def test_happy_path_pins_the_redacted_field_set(self):
+        event = evidence.SuccessEvent.publication_summary(**self._kwargs())
+        self.assertEqual(
+            {
+                "event": "publication_summary",
+                "order_id": "OK0VUZ",
+                "message_fingerprint": "a" * 16,
+                "artifact_sha256": "b" * 64,
+                "manifest_sha256": "c" * 64,
+                "layer_count": 1,
+                "published_tables": ["vmadd_address"],
+                "reader_tables_discovered": 1,
+                "reader_spatial_query_row_count": 10,
+                "reader_write_denied": True,
+            },
+            dict(event),
+        )
+
+    def test_no_key_carries_a_raw_path_password_dsn_or_message_id(self):
+        event = evidence.SuccessEvent.publication_summary(**self._kwargs())
+        rendered = json.dumps(dict(event))
+        for forbidden in ("dsn=", "password", "/home", "message_id", "graph_message"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_order_id_with_a_space_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.publication_summary(
+                **self._kwargs(order_id="bad id")
+            )
+
+    def test_message_fingerprint_wrong_length_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.publication_summary(
+                **self._kwargs(message_fingerprint="a" * 8)
+            )
+
+    def test_artifact_sha256_not_a_complete_hex_digest_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.publication_summary(
+                **self._kwargs(artifact_sha256="xyz")
+            )
+
+    def test_manifest_sha256_not_a_complete_hex_digest_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.publication_summary(
+                **self._kwargs(manifest_sha256="not-a-digest")
+            )
+
+    def test_negative_layer_count_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.publication_summary(
+                **self._kwargs(layer_count=-1)
+            )
+
+    def test_unsafe_published_table_name_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.publication_summary(
+                **self._kwargs(published_tables=("Not-Safe!",))
+            )
+
+    def test_negative_reader_tables_discovered_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.publication_summary(
+                **self._kwargs(reader_tables_discovered=-1)
+            )
+
+    def test_negative_reader_spatial_query_row_count_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.SuccessEvent.publication_summary(
+                **self._kwargs(reader_spatial_query_row_count=-1)
+            )
+
+    def test_non_bool_reader_write_denied_is_rejected(self):
+        for bad in (1, 0, "true", None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    evidence.SuccessEvent.publication_summary(
+                        **self._kwargs(reader_write_denied=bad)
+                    )
+
+    def test_fingerprint_hex_chars_is_configurable(self):
+        event = evidence.SuccessEvent.publication_summary(
+            **self._kwargs(message_fingerprint="d" * 8, fingerprint_hex_chars=8)
+        )
+        self.assertEqual("d" * 8, dict(event)["message_fingerprint"])
+
+
 if __name__ == "__main__":
     unittest.main()
