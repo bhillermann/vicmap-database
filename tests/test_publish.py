@@ -77,6 +77,8 @@ class _FakeCursor:
         self._connection.executed.append(text)
         if self._connection.fail_on and self._connection.fail_on in text:
             raise RuntimeError("induced driver failure")
+        if "staging_validation" in text and self._connection.audit_error is not None:
+            raise self._connection.audit_error
         if "version()" in text:
             self._rows = [("PostgreSQL 18.6 (fake build)",)]
         elif "staging_validation" in text:
@@ -103,6 +105,7 @@ class _FakeConnection:
         index_rows=(),
         audit_rows=(),
         fail_on=None,
+        audit_error=None,
     ):
         self.executed: list[str] = []
         self.commit_count = 0
@@ -112,6 +115,7 @@ class _FakeConnection:
         self.index_rows = index_rows
         self.audit_rows = audit_rows
         self.fail_on = fail_on
+        self.audit_error = audit_error
 
     def cursor(self):
         return _FakeCursor(self)
@@ -180,7 +184,14 @@ class PromotionCompositionTest(unittest.TestCase):
     catalog-driven renames, and the in-transaction reader grant."""
 
     def _promote(self, connection):
-        with patch.object(publish.psycopg, "connect", return_value=connection):
+        # promote_order opens two connections: the D-68 gate's read-only
+        # connection first (answers the audit query with an all-PASS row) then
+        # the promotion transaction's connection (``connection``, the one under
+        # assertion). side_effect hands them out in that order.
+        gate_conn = _FakeConnection(audit_rows=(("vmadd_address", "pass"),))
+        with patch.object(
+            publish.psycopg, "connect", side_effect=[gate_conn, connection]
+        ):
             return publish.promote_order(
                 _one_layer_manifest(),
                 _publish_policy(),
@@ -193,7 +204,6 @@ class PromotionCompositionTest(unittest.TestCase):
         params = dict(
             constraint_rows=(_PK_ROW, _NOT_NULL_ROW),
             index_rows=(_GEOM_INDEX_ROW,),
-            audit_rows=(("vmadd_address", "pass"),),
         )
         params.update(overrides)
         return _FakeConnection(**params)
@@ -294,12 +304,15 @@ class PromotionRollbackCompositionTest(unittest.TestCase):
     runs, so a real prior table would be left untouched (PUB-03)."""
 
     def test_failure_rolls_back_and_raises_promotion_failed(self):
+        gate_conn = _FakeConnection(audit_rows=(("vmadd_address", "pass"),))
         connection = _FakeConnection(
             constraint_rows=(_PK_ROW, _NOT_NULL_ROW),
             index_rows=(_GEOM_INDEX_ROW,),
             fail_on="GRANT SELECT",
         )
-        with patch.object(publish.psycopg, "connect", return_value=connection):
+        with patch.object(
+            publish.psycopg, "connect", side_effect=[gate_conn, connection]
+        ):
             with self.assertRaises(publish.PromotionFailed):
                 publish.promote_order(
                     _one_layer_manifest(),
@@ -330,6 +343,95 @@ class ClosedFailureVocabularyTest(unittest.TestCase):
     def test_publish_failures_are_a_closed_hierarchy(self):
         for failure in (publish.PromotionFailed, publish.PublicationValidationMissing):
             self.assertTrue(issubclass(failure, publish.PublishFailure))
+
+
+def _two_layer_target_tables():
+    return ("vmadd_address", "vmadd_road")
+
+
+class PublicationGateTest(unittest.TestCase):
+    """No database. The D-68 gate hard-stops before any DDL: every required
+    target must have a PASS row for the run, else PublicationValidationMissing;
+    an unreadable audit table is AuditPrivilegeDenied. This unit test runs
+    offline (it must, per the plan) by patching the driver connection."""
+
+    def _run_gate(self, connection, target_tables):
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            publish.assert_all_layers_validated(
+                _publish_policy(),
+                "sentinel-secret",
+                run_timestamp=_RUN_TS,
+                manifest_digest="a" * 64,
+                target_tables=target_tables,
+            )
+
+    def test_all_layers_pass_is_accepted(self):
+        connection = _FakeConnection(
+            audit_rows=(("vmadd_address", "pass"), ("vmadd_road", "pass"))
+        )
+        self._run_gate(connection, _two_layer_target_tables())  # no raise
+        # A gate is read-only: it executes no DDL.
+        for statement in connection.executed:
+            self.assertNotIn("DROP TABLE", statement)
+            self.assertNotIn("ALTER TABLE", statement)
+            self.assertNotIn("GRANT", statement)
+
+    def test_a_missing_layer_raises_publication_validation_missing(self):
+        connection = _FakeConnection(audit_rows=(("vmadd_address", "pass"),))
+        with self.assertRaises(publish.PublicationValidationMissing):
+            self._run_gate(connection, _two_layer_target_tables())
+
+    def test_a_non_pass_verdict_raises_publication_validation_missing(self):
+        connection = _FakeConnection(
+            audit_rows=(("vmadd_address", "pass"), ("vmadd_road", "fail"))
+        )
+        with self.assertRaises(publish.PublicationValidationMissing):
+            self._run_gate(connection, _two_layer_target_tables())
+
+    def test_no_ddl_runs_when_the_gate_fails(self):
+        connection = _FakeConnection(audit_rows=())
+        with self.assertRaises(publish.PublicationValidationMissing):
+            self._run_gate(connection, ("vmadd_address",))
+        self.assertFalse(
+            any("DROP TABLE" in s or "ALTER TABLE" in s for s in connection.executed)
+        )
+
+    def test_unreadable_audit_table_raises_audit_privilege_denied(self):
+        connection = _FakeConnection(
+            audit_error=publish.pg_errors.InsufficientPrivilege("denied")
+        )
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            with self.assertRaises(publish.AuditPrivilegeDenied):
+                publish.assert_all_layers_validated(
+                    _publish_policy(),
+                    "sentinel-secret",
+                    run_timestamp=_RUN_TS,
+                    manifest_digest="a" * 64,
+                    target_tables=("vmadd_address",),
+                )
+
+    def test_promote_order_hard_stops_before_any_ddl_when_the_gate_fails(self):
+        # The gate connection returns no PASS rows; promote_order must raise
+        # before it ever opens the promotion transaction, so only ONE
+        # connection is created and it issues no DDL (PUB-01/T-04-06).
+        gate_conn = _FakeConnection(audit_rows=())
+        created: list[_FakeConnection] = []
+
+        def _factory(*args, **kwargs):
+            created.append(gate_conn)
+            return gate_conn
+
+        with patch.object(publish.psycopg, "connect", side_effect=_factory):
+            with self.assertRaises(publish.PublicationValidationMissing):
+                publish.promote_order(
+                    _one_layer_manifest(),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    "a" * 64,
+                )
+        self.assertEqual(1, len(created))
+        self.assertFalse(any("DROP TABLE" in s for s in gate_conn.executed))
 
 
 class _LivePublishMixin:
@@ -383,6 +485,33 @@ class LivePromoteOneLayerTest(_LivePublishMixin, unittest.TestCase):
             "live single-layer promotion requires an operator-provisioned "
             "vicmap_audit schema, reader role, and staged fixture; deferred to "
             "the operator's live run (see 04-04-SUMMARY.md)"
+        )
+
+
+class LiveMultiLayerPromotionTest(_LivePublishMixin, unittest.TestCase):
+    """Skips without live DSNs. All layers of a multi-layer order become
+    visible together in one committed transaction; no session ever sees a
+    partial order (PUB-02)."""
+
+    def test_all_layers_commit_together(self):
+        self._require_live()
+        self.skipTest(
+            "live multi-layer promotion requires operator-provisioned schemas, "
+            "roles, and staged fixtures; deferred to the operator's live run"
+        )
+
+
+class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
+    """Skips without live DSNs. An induced failure on a later layer rolls the
+    whole transaction back: no layer is promoted and every prior ``vicmap.*``
+    table -- including any dropped earlier in the same transaction -- remains
+    exactly as it was (PUB-03)."""
+
+    def test_induced_failure_preserves_every_prior_table(self):
+        self._require_live()
+        self.skipTest(
+            "live rollback proof requires operator-provisioned schemas, roles, "
+            "and staged fixtures; deferred to the operator's live run"
         )
 
 

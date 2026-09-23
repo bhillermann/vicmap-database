@@ -193,6 +193,54 @@ def _connect(policy: PublishPolicy, password: str) -> "psycopg.Connection":
     return connection
 
 
+def assert_all_layers_validated(
+    policy: PublishPolicy,
+    password: str,
+    *,
+    run_timestamp: str,
+    manifest_digest: str,
+    target_tables,
+) -> None:
+    """D-68 publication gate, run before any DDL: refuse promotion unless every
+    ``target_table`` has a PASS row in ``vicmap_audit.staging_validation`` for
+    this ``(run_ts, manifest_digest)`` -- the exact rows 04-03 wrote, keyed by
+    the digest 04-03/manifest.py computed.
+
+    The required set must be a subset of the PASS set (research gate example);
+    a missing row and a non-PASS verdict both fail closed identically with
+    ``PublicationValidationMissing``, so table presence is never trusted as a
+    proxy for validation (D-68). A loader that cannot read the audit table
+    (schema/table missing, or the D-70 grant never applied) raises the closed
+    ``AuditPrivilegeDenied``; any other read failure is ``PromotionFailed``.
+    This is a read-only preflight on its own short-lived connection -- it
+    executes no DDL and mutates nothing (T-04-06)."""
+
+    required = set(target_tables)
+    connection = _connect(policy, password)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL(
+                    "SELECT target_table, verdict FROM {table} "
+                    "WHERE run_ts = %s AND manifest_digest = %s"
+                ).format(table=sql.Identifier(AUDIT_SCHEMA, AUDIT_TABLE)),
+                (run_timestamp, manifest_digest),
+            )
+            rows = cursor.fetchall()
+    except pg_errors.InsufficientPrivilege:
+        raise AuditPrivilegeDenied() from None
+    except PublishFailure:
+        raise
+    except Exception:
+        raise PromotionFailed() from None
+    finally:
+        connection.close()
+
+    passed = {row[0] for row in rows if row[1] == "pass"}
+    if not required.issubset(passed):
+        raise PublicationValidationMissing()
+
+
 def _discover_constraints(
     cursor, *, staging_schema: str, staging_table: str
 ) -> list[tuple[str, str, str | None]]:
@@ -357,6 +405,17 @@ def promote_order(
     ``vicmap.*`` table is left exactly as it was -- and re-raises the closed
     ``PromotionFailed`` with no driver or SQL text (a ``PublishFailure`` such as
     the gate's ``PublicationValidationMissing`` is re-raised unchanged)."""
+
+    # D-68: hard-stop an unvalidated order before any DDL. This runs first, on
+    # its own read-only connection, so a missing/non-PASS layer never reaches
+    # the promotion transaction below (T-04-06).
+    assert_all_layers_validated(
+        policy,
+        password,
+        run_timestamp=run_timestamp,
+        manifest_digest=manifest_digest,
+        target_tables=tuple(layer.target_table for layer in manifest.layers),
+    )
 
     connection = _connect(policy, password)
     published: list[str] = []
