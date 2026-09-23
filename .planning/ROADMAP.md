@@ -169,7 +169,30 @@ Plans:
 4. A redacted run summary links the selected message, artifact checksum, discovered layers, staging validation, published tables, and reader verification.
 5. Any stage failure returns a non-zero result identifying the failed boundary without exposing secrets.
 
-**Plans:** TBD
+**Plans:** 6 plans
+
+Plans:
+
+**Wave 1**
+
+- [ ] 04-01-PLAN.md — Extend the closed evidence vocabulary for the publication, audit-gate, and reader-verification boundaries (3 stages, 7 reason codes, the redacted publication_summary event).
+- [ ] 04-02-PLAN.md — Add the reader-role config contract and provision the vicmap_audit gate table + least-privilege reader role + reader secret.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 04-03-PLAN.md — Back-fill Phase 3 so it persists a durable PASS validation record per layer for the publish gate to trust.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 04-04-PLAN.md — Add publish.py and promote every validated layer into vicmap as one atomic, previous-preserving transaction with catalog-discovered canonical names and an in-transaction reader grant.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 04-05-PLAN.md — Prove reader access (PUB-05) from a real reader login: discovery, a GiST-exercising spatial query, and a security-critical denied write.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 04-06-PLAN.md — Assemble the redacted EVID-01 summary from durable artifacts and add publish_order.py with the EVID-02 exit-code contract.
 
 ### Phase 5: Approved Legacy Cleanup
 
@@ -195,7 +218,7 @@ Plans:
 | 1. Trusted Graph Acquisition | 14/14 | Complete    | 2026-09-23 |
 | 2. Safe Geospatial Discovery | 9/9 | Complete    | 2026-09-17 |
 | 3. Validated PostGIS Staging | 6/6 | Complete    | 2026-09-22 |
-| 4. Transactional Publication and Access | 0/TBD | Not started | — |
+| 4. Transactional Publication and Access | 0/6 | Planned | — |
 | 5. Approved Legacy Cleanup | 0/TBD | Not started | — |
 
 ---
