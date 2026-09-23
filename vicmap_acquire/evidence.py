@@ -82,7 +82,9 @@ class Stage(str, Enum):
     DB_LOAD = "db_load"
     DB_VALIDATION = "db_validation"
     DB_STAGING_DDL = "db_staging_ddl"
+    DB_AUDIT = "db_audit"
     DB_PUBLISH = "db_publish"
+    DB_READER_VERIFY = "db_reader_verify"
 
 
 class ReasonCode(str, Enum):
@@ -133,7 +135,13 @@ class ReasonCode(str, Enum):
     DB_GEOMETRY_REPAIR_CHANGED_TYPE = "db_geometry_repair_changed_type"
     DB_GEOMETRY_REPAIR_INCOMPLETE = "db_geometry_repair_incomplete"
     DB_STAGING_DDL_FAILED = "db_staging_ddl_failed"
+    DB_AUDIT_PRIVILEGE_DENIED = "db_audit_privilege_denied"
+    DB_AUDIT_RECORD_FAILED = "db_audit_record_failed"
+    PUB_VALIDATION_MISSING = "pub_validation_missing"
     PUB_PROMOTION_FAILED = "pub_promotion_failed"
+    READER_ROLE_UNAVAILABLE = "reader_role_unavailable"
+    READER_VERIFICATION_FAILED = "reader_verification_failed"
+    READER_WRITE_NOT_DENIED = "reader_write_not_denied"
 
 
 _FAILURE_POLICY = MappingProxyType(
@@ -326,12 +334,42 @@ _FAILURE_POLICY = MappingProxyType(
             Stage.DB_STAGING_DDL,
             "review_the_named_loader_diagnostic_file",
         ),
+        # D-68/D-70: the DB_AUDIT boundary covers both the Phase 3 backfill
+        # write and the Phase 4 gate read against vicmap_audit.
+        ReasonCode.DB_AUDIT_PRIVILEGE_DENIED: (
+            Stage.DB_AUDIT,
+            "run_the_documented_provisioning_script_as_superuser",
+        ),
+        ReasonCode.DB_AUDIT_RECORD_FAILED: (
+            Stage.DB_AUDIT,
+            "retry_recording_validation_or_review_audit_schema",
+        ),
+        ReasonCode.PUB_VALIDATION_MISSING: (
+            Stage.DB_AUDIT,
+            "stage_and_validate_every_order_layer_before_publishing",
+        ),
         # D-77 (EVID-02): the single promote/drop/rename/grant transaction
         # boundary -- any failure inside it (DDL error, name-discovery
         # mismatch, grant failure) surfaces here.
         ReasonCode.PUB_PROMOTION_FAILED: (
             Stage.DB_PUBLISH,
             "review_the_named_publish_boundary_and_retry",
+        ),
+        # D-74: the DB_READER_VERIFY boundary is the post-commit reader-role
+        # proof -- READER_WRITE_NOT_DENIED carries the phase's most urgent
+        # hint (immediate revocation, never a routine retry) because it
+        # signals a broken grant model (T-04-07).
+        ReasonCode.READER_ROLE_UNAVAILABLE: (
+            Stage.DB_READER_VERIFY,
+            "provision_the_reader_role_and_set_its_password",
+        ),
+        ReasonCode.READER_VERIFICATION_FAILED: (
+            Stage.DB_READER_VERIFY,
+            "review_reader_grants_and_published_tables",
+        ),
+        ReasonCode.READER_WRITE_NOT_DENIED: (
+            Stage.DB_READER_VERIFY,
+            "revoke_reader_write_immediately_grant_model_is_broken",
         ),
     }
 )

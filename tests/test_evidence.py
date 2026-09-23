@@ -290,7 +290,13 @@ class EvidenceContractTest(unittest.TestCase):
             "db_geometry_repair_changed_type": "db_validation",
             "db_geometry_repair_incomplete": "db_validation",
             "db_staging_ddl_failed": "db_staging_ddl",
+            "db_audit_privilege_denied": "db_audit",
+            "db_audit_record_failed": "db_audit",
+            "pub_validation_missing": "db_audit",
             "pub_promotion_failed": "db_publish",
+            "reader_role_unavailable": "db_reader_verify",
+            "reader_verification_failed": "db_reader_verify",
+            "reader_write_not_denied": "db_reader_verify",
         }
         self.assertEqual(expected, evidence.reason_stage_vocabulary())
         self.assertEqual(set(expected.values()), {stage.value for stage in evidence.Stage})
@@ -1731,6 +1737,54 @@ class Phase4VocabularyTest(unittest.TestCase):
         for reason in evidence.ReasonCode:
             with self.subTest(reason=reason.value):
                 self.assertIn(reason.value, vocabulary)
+
+    def test_phase_4_reason_codes_extend_the_closed_vocabulary(self):
+        expected_additions = {
+            "pub_promotion_failed": "db_publish",
+            "db_audit_privilege_denied": "db_audit",
+            "db_audit_record_failed": "db_audit",
+            "pub_validation_missing": "db_audit",
+            "reader_role_unavailable": "db_reader_verify",
+            "reader_verification_failed": "db_reader_verify",
+            "reader_write_not_denied": "db_reader_verify",
+        }
+        vocabulary = evidence.reason_stage_vocabulary()
+        for reason, stage in expected_additions.items():
+            with self.subTest(reason=reason):
+                self.assertEqual(stage, vocabulary.get(reason))
+        self.assertEqual(len(expected_additions), 7)
+        self.assertLessEqual(set(expected_additions), set(vocabulary))
+
+    def test_every_stage_is_reachable_from_at_least_one_reason(self):
+        used_stages = {stage.value for stage, _ in evidence._FAILURE_POLICY.values()}
+        self.assertEqual({stage.value for stage in evidence.Stage}, used_stages)
+
+    def test_safe_failure_constructs_for_every_new_reason(self):
+        for reason in (
+            evidence.ReasonCode.DB_AUDIT_PRIVILEGE_DENIED,
+            evidence.ReasonCode.DB_AUDIT_RECORD_FAILED,
+            evidence.ReasonCode.PUB_VALIDATION_MISSING,
+            evidence.ReasonCode.PUB_PROMOTION_FAILED,
+            evidence.ReasonCode.READER_ROLE_UNAVAILABLE,
+            evidence.ReasonCode.READER_VERIFICATION_FAILED,
+            evidence.ReasonCode.READER_WRITE_NOT_DENIED,
+        ):
+            with self.subTest(reason=reason.value):
+                evidence.SafeFailure(reason)  # must not raise KeyError
+
+    def test_reader_write_not_denied_hint_is_the_urgent_revoke_hint(self):
+        hint = evidence.remediation_hint(evidence.ReasonCode.READER_WRITE_NOT_DENIED)
+        self.assertIn("revoke", hint)
+        self.assertNotIn("retry", hint)
+        self.assertNotIn("review", hint)
+
+        other_reader_verify_hints = (
+            evidence.remediation_hint(evidence.ReasonCode.READER_ROLE_UNAVAILABLE),
+            evidence.remediation_hint(evidence.ReasonCode.READER_VERIFICATION_FAILED),
+        )
+        for other_hint in other_reader_verify_hints:
+            with self.subTest(hint=other_hint):
+                self.assertNotEqual(hint, other_hint)
 
 
 class DatabaseIdentityEventTest(unittest.TestCase):
