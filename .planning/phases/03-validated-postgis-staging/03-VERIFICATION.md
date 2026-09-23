@@ -1,9 +1,10 @@
 ---
 phase: 03-validated-postgis-staging
 verified: 2026-09-23T00:00:00Z
-status: human_needed
+status: passed
 score: 5/5 must-haves verified
 covered_files:
+
   - ".planning/REQUIREMENTS.md"
   - ".planning/phases/03-validated-postgis-staging/03-01-PLAN.md"
   - ".planning/phases/03-validated-postgis-staging/03-01-SUMMARY.md"
@@ -31,6 +32,7 @@ covered_files:
   - "vicmap_acquire/evidence.py"
   - "vicmap_acquire/manifest.py"
   - "vicmap_acquire/staging.py"
+
 covered_digest: "v1:sha256:1da66b18ed712b8c4eb77d3bcb14293f29440f6a278568f03c19c1ca689ee9e1"
 behavior_unverified: 0
 overrides_applied: 0
@@ -41,6 +43,7 @@ re_verification:
   gaps_remaining: []
   regressions: []
 human_verification:
+
   - test: "PROHIB-08 (DB-04, judgment-tier, plan 03-03): confirm a non-spatial layer's validation record reports geometry/SRID/extent as literal not_applicable, never as passed, and a repaired-geometry count is always carried, never omitted for being non-zero."
     expected: "Human sign-off that the LLM-judge verdict below is correct: `validate_layer` (vicmap_acquire/staging.py) always returns `NOT_APPLICABLE` for geometry_type/srid/repaired_count/extent on a non-spatial layer, and `SuccessEvent.staging_layer_validated` (vicmap_acquire/evidence.py) raises ValueError if a non-spatial event carries anything other than not_applicable for those four fields, or if a spatial event carries not_applicable for any of them. Live-reconfirmed this session: ValidationTest.test_non_spatial_layer_reports_not_applicable passed against a real PostGIS server."
     why_human: "The plan itself marks this prohibition status: unresolved, verification: null — \"flagged-unverified by the spec-less prohibition probe; no wired-check descriptor is available.\" Per ADR-550's judgment-tier soft gate, an LLM-judge verdict is non-authoritative and must be flagged for human sign-off rather than silently folded into a passed verdict, even when supported by strong code and live-test evidence as it is here."
@@ -168,6 +171,14 @@ Two judgment-tier prohibitions, both self-flagged `status: "unresolved"`, `verif
 No functional gaps. All 5 roadmap success criteria and every plan-level must-have across all six plans were independently re-verified against the current tree, with live evidence gathered fresh this session (not merely carried forward) for everything except `preflight_staging_privileges`'s fail-closed branches — for which no code changed since the prior round's orchestrator-verified live run, confirmed by `git diff`. The WR-01..WR-06 code-review fixes that made the prior verification stale were checked line-by-line against the current source and, where the fixed code path is reachable without superuser privilege, directly re-exercised live against a real PostGIS server this session — all passed.
 
 The only reason this round routes to `human_needed` rather than `passed` is procedural, not functional: two prohibitions in the PLAN frontmatter (PROHIB-08, PROHIB-10) are self-flagged as judgment-tier and unresolved by their owning plans, and per this workflow's ADR-550 rule a judgment-tier prohibition must always surface for human sign-off rather than being silently absorbed into a passed verdict — regardless of how strong the supporting evidence is. Both are assessed HELD with high confidence above; a human just needs to confirm and close them (e.g. via `gsd-tools windows` or by editing the owning PLAN's prohibition `status` field), after which a re-run of this verifier should score `passed`.
+
+---
+
+## Human Sign-Off (ADR-550 judgment-tier gate)
+
+- **Signed off:** 2026-09-23 by operator (bhillermann@vegetationlink.com.au), during autonomous re-verification.
+- **Items:** PROHIB-08 (DB-04) and PROHIB-10 (DB-05) — both accepted as HELD.
+- **Basis:** LLM-judge verdict HELD/high-confidence plus the live evidence recorded above (real PostGIS run, 507 tests, zero destructive-SQL keywords, clean live catalogue). This is a human sign-off on a judgment-tier soft gate, **not** a wired machine check — no automated descriptor exists for these two prohibitions. Status advanced to `passed` on the strength of that sign-off.
 
 ---
 
