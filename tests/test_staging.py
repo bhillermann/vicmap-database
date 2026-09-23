@@ -644,14 +644,22 @@ class Ogr2ogrFlagOracleTest(unittest.TestCase):
 
 
 class DriverImportPolicyTest(unittest.TestCase):
-    """No database. T-03 structural proof: staging.py alone touches a driver."""
+    """No database. T-03/T-04 structural proof: only ``staging.py`` and
+    ``publish.py`` -- the two DB-boundary modules (D-41 extended for Phase 4) --
+    touch a driver. The exemption set is deliberately a small, closed,
+    reviewable pair (research Pitfall 5): ``publish.py`` was added to it in the
+    same commit that introduced its ``import psycopg``, so a new module that
+    imports a driver still breaks this test until it is explicitly reviewed
+    into the set."""
+
+    _DRIVER_EXEMPT_MODULES = frozenset({"staging.py", "publish.py"})
 
     def test_staging_is_the_only_module_referencing_a_database_driver(self):
         package_dir = REPO_ROOT / "vicmap_acquire"
         forbidden_tokens = ("psycopg", "psycopg2", "sqlalchemy", "asyncpg", "pg8000")
         offending = []
         for path in sorted(package_dir.glob("*.py")):
-            if path.name == "staging.py":
+            if path.name in self._DRIVER_EXEMPT_MODULES:
                 continue
             text = path.read_text(encoding="utf-8")
             for token in forbidden_tokens:
