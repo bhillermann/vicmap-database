@@ -27,7 +27,12 @@ from vicmap_acquire.evidence import (
     render_progress,
     render_success,
 )
-from vicmap_acquire.manifest import ManifestFailure, ManifestUnreadable, read_manifest
+from vicmap_acquire.manifest import (
+    ManifestFailure,
+    ManifestUnreadable,
+    manifest_digest,
+    read_manifest,
+)
 
 
 _REASON_BY_CODE = {reason.value: reason for reason in ReasonCode}
@@ -134,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         # creating a near-duplicate under a fresh now() timestamp.
         run_timestamp = run_directory.name
 
-        staging.run_staging(
+        validations = staging.run_staging(
             manifest,
             policy,
             password=password,
@@ -142,6 +147,26 @@ def main(argv: list[str] | None = None) -> int:
             diagnostics_dir=run_directory,
             event_sink=render_event,
         )
+
+        # D-68/D-70's Phase 3 back-fill: persist one durable PASS row per
+        # layer only now -- run_staging above has already returned every
+        # manifest layer's LayerValidation without raising, which is
+        # exactly the all-layers-validated precondition a PASS set
+        # requires. A failed run_staging call raises before this line is
+        # ever reached, so a failed layer leaves no audit row (T-04-06).
+        # zip pairs the manifest's own layer order with run_staging's
+        # returned validations, which run_staging preserves in that same
+        # order (D-42).
+        digest = manifest_digest(run_directory)
+        for layer, validation in zip(manifest.layers, validations):
+            staging.record_validation(
+                policy,
+                password,
+                run_timestamp=run_timestamp,
+                manifest_digest=digest,
+                target_table=layer.target_table,
+                validation=validation,
+            )
     except read_mailbox.AcquisitionFailure as error:
         try:
             render_failure(SafeFailure(error.failure.reason, order_id=order_id))

@@ -29,6 +29,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import read_mailbox
+import stage_order
 from vicmap_acquire import staging
 from vicmap_acquire.discovery import FieldProfile, LayerProfile
 from vicmap_acquire.evidence import ProgressEvent, ReasonCode, SafeFailure, SuccessEvent
@@ -2751,6 +2752,143 @@ class AuditValidationRecordTest(_LivePostgresMixin, unittest.TestCase):
                         "GRANT SELECT, INSERT ON vicmap_audit.staging_validation TO {}"
                     ).format(staging.sql.Identifier(self.params["user"]))
                 )
+
+
+class StageOrderAuditBackfillTest(unittest.TestCase):
+    """No database. Proves ``stage_order.main``'s D-70 back-fill wiring:
+    ``staging.record_validation`` is called once per manifest layer only
+    after ``staging.run_staging`` returns every ``LayerValidation`` without
+    raising, and is never called at all when ``run_staging`` raises.
+    Everything below ``read_database_identity``/
+    ``preflight_staging_privileges``/``run_staging`` is mocked -- this class
+    opens no connection and must never skip."""
+
+    def setUp(self):
+        self.scratch_dir = Path(tempfile.mkdtemp(prefix="stage-order-audit-"))
+        self.addCleanup(shutil.rmtree, self.scratch_dir, ignore_errors=True)
+        self.config_path = _write_policy(str(self.scratch_dir))
+        self.run_directory = (
+            self.scratch_dir / "runs" / "OK0VUZ" / "20260918T030000Z"
+        )
+        self.run_directory.mkdir(parents=True)
+
+    @staticmethod
+    def _identity() -> staging.DatabaseIdentity:
+        return staging.DatabaseIdentity(
+            host="127.0.0.1",
+            port=5432,
+            dbname="vicmap",
+            role="vicmap_loader",
+            server_version="PostgreSQL",
+            postgis_version="POSTGIS",
+        )
+
+    def _manifest(self) -> ImportManifest:
+        layer = ManifestLayer(
+            profile=_profile_with_fields(
+                dataset_relative_path="VMADD.gdb",
+                dataset_stem="VMADD",
+                layer_name="ADDRESS",
+                feature_count=1,
+            ),
+            target_table="vmadd_address",
+        )
+        return ImportManifest(
+            schema_version=1,
+            order_id="OK0VUZ",
+            run_timestamp="20260918T030000Z",
+            run_directory=str(self.run_directory),
+            artifact_sha256="a" * 64,
+            artifact_byte_count=1,
+            message_fingerprint="f" * 16,
+            layers=(layer,),
+            companions=(),
+        )
+
+    @staticmethod
+    def _validation(staging_table: str) -> staging.LayerValidation:
+        return staging.LayerValidation(
+            staging_table=staging_table,
+            spatial=True,
+            row_count=1,
+            geometry_type="POINT",
+            srid=7899,
+            repaired_count=0,
+            extent=(0.0, 0.0, 1.0, 1.0),
+        )
+
+    def _run(self, *, run_staging_side_effect):
+        manifest = self._manifest()
+        record_calls: list[dict] = []
+
+        def fake_record_validation(policy, password, **kwargs):
+            record_calls.append(kwargs)
+
+        with patch.dict(os.environ, {staging.PASSWORD_ENV_VAR: "x"}), patch.object(
+            stage_order, "_most_recent_run_directory", return_value=self.run_directory
+        ), patch.object(
+            stage_order, "read_manifest", return_value=manifest
+        ), patch.object(
+            stage_order, "manifest_digest", return_value="d" * 64
+        ), patch.object(
+            staging, "read_database_identity", return_value=self._identity()
+        ), patch.object(
+            staging, "preflight_staging_privileges", return_value=None
+        ), patch.object(
+            staging, "run_staging", side_effect=run_staging_side_effect
+        ), patch.object(
+            staging, "record_validation", side_effect=fake_record_validation
+        ):
+            exit_code = stage_order.main(["--config", str(self.config_path)])
+
+        return exit_code, record_calls
+
+    def test_success_path_records_one_row_per_layer_after_run_staging(self):
+        validation = self._validation("vmadd_address_20260918t030000z")
+        exit_code, record_calls = self._run(
+            run_staging_side_effect=lambda *args, **kwargs: (validation,)
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(1, len(record_calls))
+        call = record_calls[0]
+        self.assertEqual("20260918T030000Z", call["run_timestamp"])
+        self.assertEqual("d" * 64, call["manifest_digest"])
+        self.assertEqual("vmadd_address", call["target_table"])
+        self.assertIs(validation, call["validation"])
+
+    def test_failed_run_staging_records_nothing_and_exits_nonzero(self):
+        exit_code, record_calls = self._run(
+            run_staging_side_effect=staging.LoadFailed()
+        )
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual([], record_calls)
+
+    def test_audit_record_failure_after_a_successful_run_exits_nonzero(self):
+        validation = self._validation("vmadd_address_20260918t030000z")
+        manifest = self._manifest()
+
+        with patch.dict(os.environ, {staging.PASSWORD_ENV_VAR: "x"}), patch.object(
+            stage_order, "_most_recent_run_directory", return_value=self.run_directory
+        ), patch.object(
+            stage_order, "read_manifest", return_value=manifest
+        ), patch.object(
+            stage_order, "manifest_digest", return_value="d" * 64
+        ), patch.object(
+            staging, "read_database_identity", return_value=self._identity()
+        ), patch.object(
+            staging, "preflight_staging_privileges", return_value=None
+        ), patch.object(
+            staging,
+            "run_staging",
+            side_effect=lambda *args, **kwargs: (validation,),
+        ), patch.object(
+            staging, "record_validation", side_effect=staging.AuditPrivilegeDenied()
+        ):
+            exit_code = stage_order.main(["--config", str(self.config_path)])
+
+        self.assertEqual(1, exit_code)
 
 
 if __name__ == "__main__":
