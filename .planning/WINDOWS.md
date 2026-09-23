@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 5
+open_count: 8
 waived_count: 0
 fixed_count: 3
-total_count: 8
-last_updated: 2026-09-23T04:22:17.242Z
+total_count: 11
+last_updated: 2026-09-23T04:46:11.480Z
 ---
 
 # Broken Windows Ledger
@@ -23,6 +23,9 @@ last_updated: 2026-09-23T04:22:17.242Z
 | 6 | 03 | unrun-verify | tests/test_staging.py |  | PrivilegePreflightTest's 5 methods (DB-02/DB-05 privilege-preflight proof) still skip: they need VICMAP_TEST_POSTGRES_SUPERUSER_DSN, which has never been set. A real superuser role exists on the live dev server, but this session's own tool-use sandbox consistently blocked constructing/using that credential from Bash, even for a read-only connectivity check, so it could not be routed into the test env. DB-02's runtime proof is otherwise exercised via stage_order.py's live --preflight-only output (03-04-SUMMARY.md), not via this automated test. Closing this needs a deliberately separate, project-provisioned VICMAP_TEST_POSTGRES_SUPERUSER_DSN test-only credential (documented like VICMAP_DB_PASSWORD's opnix entry) -- an environment/operator setup task, not a code change 03-05 or 03-06 can make. | fixed |  | 2026-09-21T08:24:18.388Z | 2026-09-22T00:16:17.175Z |
 | 7 | 03 | unmet-truth | vicmap_acquire/staging.py |  | CONFIRMED (03-06, decisive live evidence): ogr2ogr -ct_opt ONLY_BEST=YES ALLOW_BALLPARK=NO selects the grid-free Helmert 7-parameter transform (+proj=helmert ...), not the vendored ICSM grid (+proj=hgridshift au_icsm_GDA94_GDA2020_conformal_and_distortion.tif), for GDA2020<->GDA94 Vicgrid. Verified via pyproj.datadir.set_data_dir() (bypasses the internal-path precedence bug in #3) plus a matching real ogr2ogr transform of a genuine ADDRESS point (2537307.0758,2401846.5231 EPSG:7899 -> ogr2ogr:2537306.55479674,2401845.06807695 EPSG:3111, matching the Helmert op pyproj computed to 4dp, differing from the grid op by ~2mm at this point). Root cause: PROJ's own accuracy metadata ranks Helmert (0.01m claimed) above the grid (0.05m claimed) for this pair, so ONLY_BEST picks Helmert regardless of PROJ_DATA resolution. Not remediated -- a future plan must force grid selection (explicit -ct pipeline or stricter operation filter) if grid-accurate coordinates are required. See 03-06-SUMMARY.md. | open |  | 2026-09-21T09:10:46.290Z |  |
 | 8 | 04 | unrun-verify | tests/test_staging.py |  | AuditValidationRecordTest's live write/read-back proof for record_validation skips without VICMAP_TEST_POSTGRES_SUPERUSER_DSN (this plan was executed code-only, per operator instruction, with no live database); resume by re-running once the DSN and 04-02's provisioning script are in place. | open |  | 2026-09-23T04:22:17.242Z |  |
+| 9 | 04 | unrun-verify | tests/test_publish.py |  | Live single-layer promotion (PUB-01/04) test is a skip-guarded placeholder; run against live DB after operator provisioning | open |  | 2026-09-23T04:46:11.166Z |  |
+| 10 | 04 | unrun-verify | tests/test_publish.py |  | Live multi-layer commit-together (PUB-02) test is a skip-guarded placeholder; run against live DB | open |  | 2026-09-23T04:46:11.318Z |  |
+| 11 | 04 | unrun-verify | tests/test_publish.py |  | Live induced-failure rollback (PUB-03) test is a skip-guarded placeholder; run against live DB | open |  | 2026-09-23T04:46:11.480Z |  |
 
 ````json
 [
@@ -120,6 +123,42 @@ last_updated: 2026-09-23T04:22:17.242Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-23T04:22:17.242Z",
+    "resolved_at": null
+  },
+  {
+    "id": 9,
+    "kind": "unrun-verify",
+    "phase": "04",
+    "file": "tests/test_publish.py",
+    "line": null,
+    "description": "Live single-layer promotion (PUB-01/04) test is a skip-guarded placeholder; run against live DB after operator provisioning",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-23T04:46:11.166Z",
+    "resolved_at": null
+  },
+  {
+    "id": 10,
+    "kind": "unrun-verify",
+    "phase": "04",
+    "file": "tests/test_publish.py",
+    "line": null,
+    "description": "Live multi-layer commit-together (PUB-02) test is a skip-guarded placeholder; run against live DB",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-23T04:46:11.318Z",
+    "resolved_at": null
+  },
+  {
+    "id": 11,
+    "kind": "unrun-verify",
+    "phase": "04",
+    "file": "tests/test_publish.py",
+    "line": null,
+    "description": "Live induced-failure rollback (PUB-03) test is a skip-guarded placeholder; run against live DB",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-23T04:46:11.480Z",
     "resolved_at": null
   }
 ]
