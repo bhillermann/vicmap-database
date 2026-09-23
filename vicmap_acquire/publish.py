@@ -109,6 +109,21 @@ class PublishPolicy:
 
 
 @dataclass(frozen=True)
+class ReaderVerification:
+    """What ``verify_reader_access`` returns on a passed PUB-04/PUB-05 proof:
+    the published tables the reader role can itself see (re-derived from a
+    real reader-authenticated query, never trusted from the caller's
+    ``published_tables`` argument alone), the row count the representative
+    spatial query returned, and ``write_denied`` -- always ``True`` here,
+    since the not-denied branch never returns a result (it raises a closed
+    failure instead)."""
+
+    tables_discovered: tuple[str, ...]
+    spatial_query_row_count: int
+    write_denied: bool
+
+
+@dataclass(frozen=True)
 class PromotionResult:
     """What ``promote_order`` returns on a committed promotion: the live
     server's ``version()`` string (surfaced for the EVID-01 summary and proof
@@ -147,6 +162,24 @@ class PublicationValidationMissing(PublishFailure):
     identically -- table presence is never trusted as a proxy for validation."""
 
     code = "pub_validation_missing"
+
+
+class ReaderRoleUnavailable(PublishFailure):
+    """D-72/D-74: the reader role, its ``USAGE`` grant, or
+    ``VICMAP_READER_PASSWORD`` is missing or wrong -- an unset password is
+    caught before any connection is attempted, and a connect/authentication
+    failure as the reader maps here too. Fails closed before the proof runs,
+    exposing no secret and no driver text (must-have)."""
+
+    code = "reader_role_unavailable"
+
+
+class ReaderVerificationFailed(PublishFailure):
+    """D-74: discovery or the representative spatial query failed for a
+    reason other than the write-denial proof itself -- e.g. the query
+    raised, or there was no published table to prove against."""
+
+    code = "reader_verification_failed"
 
 
 def _connect(policy: PublishPolicy, password: str) -> "psycopg.Connection":
@@ -442,4 +475,143 @@ def promote_order(
 
     return PromotionResult(
         server_version=server_version, published_tables=tuple(published)
+    )
+
+
+def _connect_as_reader(policy: PublishPolicy, reader_password: str) -> "psycopg.Connection":
+    """Open a fresh, genuinely independent connection authenticated as
+    ``policy.reader_user`` -- never ``SET ROLE`` from the loader connection
+    (D-74/Pattern 3: ``SET ROLE`` would prove privilege bits, not a real
+    login, and would require the loader to hold membership in the reader
+    role). Mirrors ``_connect``'s timeout setup so no reader query can hang
+    the operator's database. Any failure -- wrong/missing password, the role
+    not existing, the server unreachable, the timeout SETs failing -- maps to
+    the one closed ``ReaderRoleUnavailable``, discarding all driver text."""
+
+    try:
+        connection = psycopg.connect(
+            host=policy.host,
+            port=policy.port,
+            dbname=policy.dbname,
+            user=policy.reader_user,
+            password=reader_password,
+            connect_timeout=policy.connect_timeout_seconds,
+        )
+    except Exception:
+        raise ReaderRoleUnavailable() from None
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("SET statement_timeout = {}").format(
+                    sql.Literal(policy.statement_timeout_seconds * 1000)
+                )
+            )
+            cursor.execute(
+                sql.SQL("SET lock_timeout = {}").format(
+                    sql.Literal(policy.lock_timeout_seconds * 1000)
+                )
+            )
+        connection.commit()
+    except Exception:
+        connection.close()
+        raise ReaderRoleUnavailable() from None
+    return connection
+
+
+def verify_reader_access(
+    policy: PublishPolicy,
+    *,
+    reader_password: str,
+    published_tables: tuple[str, ...],
+) -> ReaderVerification:
+    """PUB-04/PUB-05/D-74: prove the reader role's whole access contract from
+    a real, independently-authenticated login -- discover the tables it can
+    see, run a representative GiST-exercising spatial query over Victoria's
+    real extent, and attempt a real write that must be denied.
+
+    A missing/unset ``reader_password`` or an empty ``published_tables``
+    fails closed before any connection is attempted -- ``ReaderRoleUnavailable``
+    and ``ReaderVerificationFailed`` respectively -- exposing no secret
+    (must-have). ``published_tables[0]`` (this run's promoted target) is the
+    representative table both the spatial query and the write-denial attempt
+    run against. The reader connection is always rolled back and closed
+    before this function returns or raises, so no state is ever left behind.
+
+    Discovery uses ``information_schema.tables``, which only lists objects
+    the connected role holds at least one privilege on -- so the query
+    itself is part of the PUB-05 proof, not just a listing convenience
+    (research Code Examples). The spatial query's envelope is Victoria's real
+    WGS84 extent, ``ST_Transform``-ed into ``policy.target_srid`` at query
+    time -- never EPSG:7899's own advertised projected-meters bounds, which
+    are the Lambert Conformal Conic's full mathematical domain, not
+    Victoria's actual footprint (Pitfall 3). The write-denial attempt is a
+    real executed ``INSERT ... DEFAULT VALUES`` -- chosen over ``UPDATE``
+    because PostgreSQL's ACL check runs at executor startup, before any
+    ``NOT NULL`` constraint is ever evaluated -- never a grant-metadata-only
+    shortcut (research Anti-Pattern). If the write is not rejected, this
+    raises a closed failure and never returns a passing result; Task 2
+    (T-04-02) hardens this into the dedicated, security-critical
+    ``ReaderWriteNotDenied``."""
+
+    if not reader_password:
+        raise ReaderRoleUnavailable()
+    if not published_tables:
+        raise ReaderVerificationFailed()
+
+    target = published_tables[0]
+    connection = _connect_as_reader(policy, reader_password)
+    try:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = %s ORDER BY table_name",
+                    (policy.publish_schema,),
+                )
+                tables_discovered = tuple(row[0] for row in cursor.fetchall())
+
+                # Pattern 4/Pitfall 3: Victoria's real WGS84 extent, ST_Transform-ed
+                # into target_srid at query time -- never EPSG:7899's own
+                # advertised projected-meters "bounds" (the projection's full
+                # mathematical domain, not Victoria's actual footprint).
+                cursor.execute(
+                    sql.SQL(
+                        "SELECT gid FROM {table} WHERE geom && "
+                        "ST_Transform(ST_MakeEnvelope(140.96, -39.2, 150.04, -33.98, 4326), %s) "
+                        "LIMIT 10"
+                    ).format(table=sql.Identifier(policy.publish_schema, target)),
+                    (policy.target_srid,),
+                )
+                spatial_query_row_count = len(cursor.fetchall())
+        except Exception:
+            raise ReaderVerificationFailed() from None
+
+        # D-74/Pattern 3: the write-denial proof is a real executed INSERT,
+        # never a grant-metadata-only shortcut -- DEFAULT VALUES
+        # needs no prior SELECT and is rejected by the executor's ACL check
+        # before any NOT NULL constraint is ever evaluated.
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    sql.SQL("INSERT INTO {table} DEFAULT VALUES").format(
+                        table=sql.Identifier(policy.publish_schema, target)
+                    )
+                )
+        except pg_errors.InsufficientPrivilege:
+            connection.rollback()
+            write_denied = True
+        else:
+            connection.rollback()
+            # Task 2 (T-04-02) hardens this branch into the dedicated,
+            # security-critical hard-stop; a plain closed failure for now.
+            raise ReaderVerificationFailed()
+    finally:
+        connection.rollback()
+        connection.close()
+
+    return ReaderVerification(
+        tables_discovered=tables_discovered,
+        spatial_query_row_count=spatial_query_row_count,
+        write_denied=write_denied,
     )

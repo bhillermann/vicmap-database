@@ -344,6 +344,21 @@ class ClosedFailureVocabularyTest(unittest.TestCase):
         for failure in (publish.PromotionFailed, publish.PublicationValidationMissing):
             self.assertTrue(issubclass(failure, publish.PublishFailure))
 
+    def test_reader_role_unavailable_code(self):
+        self.assertEqual("reader_role_unavailable", publish.ReaderRoleUnavailable.code)
+
+    def test_reader_verification_failed_code(self):
+        self.assertEqual(
+            "reader_verification_failed", publish.ReaderVerificationFailed.code
+        )
+
+    def test_reader_failures_are_a_closed_hierarchy(self):
+        for failure in (
+            publish.ReaderRoleUnavailable,
+            publish.ReaderVerificationFailed,
+        ):
+            self.assertTrue(issubclass(failure, publish.PublishFailure))
+
 
 def _two_layer_target_tables():
     return ("vmadd_address", "vmadd_road")
@@ -434,6 +449,195 @@ class PublicationGateTest(unittest.TestCase):
         self.assertFalse(any("DROP TABLE" in s for s in gate_conn.executed))
 
 
+class _FakeReaderCursor:
+    """Records every executed statement and answers discovery/spatial-query
+    reads from the owning connection's fixed fixture rows. The write attempt
+    either raises ``InsufficientPrivilege`` (denied, the pass case) or
+    succeeds silently (not denied, the security-critical hard-stop case),
+    controlled by the owning connection's ``deny_write`` flag -- exactly the
+    two branches ``verify_reader_access`` must distinguish."""
+
+    def __init__(self, connection):
+        self._connection = connection
+        self._rows: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def execute(self, query, params=None):
+        text = query if isinstance(query, str) else query.as_string(None)
+        self._connection.executed.append(text)
+        if "SET statement_timeout" in text or "SET lock_timeout" in text:
+            return
+        if "INSERT INTO" in text:
+            if self._connection.deny_write:
+                raise publish.pg_errors.InsufficientPrivilege("denied")
+            return
+        if "information_schema.tables" in text:
+            if self._connection.discovery_error is not None:
+                raise self._connection.discovery_error
+            self._rows = list(self._connection.discovered_rows)
+        elif "ST_Transform" in text:
+            self._rows = list(self._connection.spatial_rows)
+        else:
+            self._rows = []
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _FakeReaderConnection:
+    """A recording fake standing in for the second, independently-
+    authenticated reader connection ``verify_reader_access`` opens -- never
+    the same connection/fixture ``_FakeConnection`` above uses for the
+    promotion transaction, keeping the two proofs' fixtures independent."""
+
+    def __init__(
+        self,
+        *,
+        discovered_rows=(),
+        spatial_rows=(),
+        deny_write=True,
+        discovery_error=None,
+    ):
+        self.executed: list[str] = []
+        self.discovered_rows = discovered_rows
+        self.spatial_rows = spatial_rows
+        self.deny_write = deny_write
+        self.discovery_error = discovery_error
+        self.rollback_count = 0
+        self.commit_count = 0
+        self.closed = False
+
+    def cursor(self):
+        return _FakeReaderCursor(self)
+
+    def rollback(self):
+        self.rollback_count += 1
+
+    def commit(self):
+        self.commit_count += 1
+
+    def close(self):
+        self.closed = True
+
+
+class ReaderVerificationTest(unittest.TestCase):
+    """No database. Proves ``verify_reader_access``'s whole PUB-04/PUB-05
+    contract against a recording fake reader connection: table discovery,
+    the Victoria-extent GiST-exercising spatial query, the real executed
+    write-denial proof, and the security-critical not-denied hard-stop
+    (T-04-02) -- with no metadata-only shortcut."""
+
+    def _connection(self, **overrides):
+        params = dict(
+            discovered_rows=[("vmadd_address",)],
+            spatial_rows=[(1,), (2,)],
+            deny_write=True,
+        )
+        params.update(overrides)
+        return _FakeReaderConnection(**params)
+
+    def test_missing_reader_password_fails_closed_before_any_connection(self):
+        with patch.object(publish.psycopg, "connect") as connect:
+            with self.assertRaises(publish.ReaderRoleUnavailable):
+                publish.verify_reader_access(
+                    _publish_policy(),
+                    reader_password="",
+                    published_tables=("vmadd_address",),
+                )
+        connect.assert_not_called()
+
+    def test_empty_published_tables_fails_closed_before_any_connection(self):
+        with patch.object(publish.psycopg, "connect") as connect:
+            with self.assertRaises(publish.ReaderVerificationFailed):
+                publish.verify_reader_access(
+                    _publish_policy(), reader_password="sentinel-secret", published_tables=()
+                )
+        connect.assert_not_called()
+
+    def test_reader_connect_failure_is_reader_role_unavailable(self):
+        with patch.object(
+            publish.psycopg, "connect", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(publish.ReaderRoleUnavailable):
+                publish.verify_reader_access(
+                    _publish_policy(),
+                    reader_password="sentinel-secret",
+                    published_tables=("vmadd_address",),
+                )
+
+    def test_discovery_spatial_query_and_write_denial_proof(self):
+        connection = self._connection()
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            result = publish.verify_reader_access(
+                _publish_policy(),
+                reader_password="sentinel-secret",
+                published_tables=("vmadd_address",),
+            )
+        self.assertEqual(("vmadd_address",), result.tables_discovered)
+        self.assertEqual(2, result.spatial_query_row_count)
+        self.assertTrue(result.write_denied)
+        self.assertTrue(connection.closed)
+        self.assertGreaterEqual(connection.rollback_count, 1)
+
+    def test_discovery_query_is_scoped_to_the_publish_schema(self):
+        connection = self._connection()
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            publish.verify_reader_access(
+                _publish_policy(),
+                reader_password="sentinel-secret",
+                published_tables=("vmadd_address",),
+            )
+        discovery = [s for s in connection.executed if "information_schema.tables" in s]
+        self.assertEqual(1, len(discovery))
+
+    def test_spatial_query_uses_victoria_wgs84_extent_and_target_srid(self):
+        connection = self._connection()
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            publish.verify_reader_access(
+                _publish_policy(),
+                reader_password="sentinel-secret",
+                published_tables=("vmadd_address",),
+            )
+        spatial = [s for s in connection.executed if "ST_Transform" in s]
+        self.assertEqual(1, len(spatial))
+        self.assertIn("140.96", spatial[0])
+        self.assertIn("-39.2", spatial[0])
+        self.assertIn('"vicmap"."vmadd_address"', spatial[0])
+
+    def test_writable_reader_is_not_a_silent_pass(self):
+        # Task 2 (T-04-02) hardens this branch into the dedicated,
+        # security-critical ReaderWriteNotDenied; for now it must still fail
+        # closed rather than silently return write_denied=False.
+        connection = self._connection(deny_write=False)
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            with self.assertRaises(publish.PublishFailure):
+                publish.verify_reader_access(
+                    _publish_policy(),
+                    reader_password="sentinel-secret",
+                    published_tables=("vmadd_address",),
+                )
+        # The check always rolls back, whether the write was denied or not,
+        # and always closes -- no state is ever left behind.
+        self.assertGreaterEqual(connection.rollback_count, 1)
+        self.assertTrue(connection.closed)
+
+    def test_discovery_failure_is_reader_verification_failed(self):
+        connection = self._connection(discovery_error=RuntimeError("driver exploded"))
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            with self.assertRaises(publish.ReaderVerificationFailed):
+                publish.verify_reader_access(
+                    _publish_policy(),
+                    reader_password="sentinel-secret",
+                    published_tables=("vmadd_address",),
+                )
+        self.assertTrue(connection.closed)
+
+
 class _LivePublishMixin:
     """Skips -- never fails -- unless both a live loader DSN and a superuser
     DSN are present and reachable. Real promotion fixtures (a throwaway audit
@@ -512,6 +716,37 @@ class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
         self.skipTest(
             "live rollback proof requires operator-provisioned schemas, roles, "
             "and staged fixtures; deferred to the operator's live run"
+        )
+
+
+class LiveReaderVerificationTest(_LivePublishMixin, unittest.TestCase):
+    """Skips without live DSNs. From a genuinely separate reader login
+    (``policy.reader_user`` + ``VICMAP_READER_PASSWORD``, never ``SET ROLE``
+    from the loader): discovers the published tables it can see, runs the
+    Victoria-extent GiST-exercising spatial query, and confirms the rows are
+    selectable (PUB-04/PUB-05/D-74)."""
+
+    def test_reader_discovers_and_spatially_queries_published_tables(self):
+        self._require_live()
+        self.skipTest(
+            "live reader verification requires an operator-provisioned reader "
+            "role (D-72), VICMAP_READER_PASSWORD (D-74 opnix wiring), and a "
+            "promoted spatial fixture from a completed 04-04 run; deferred to "
+            "the operator's live run (see 04-05-SUMMARY.md)"
+        )
+
+
+class LiveReaderWriteDenialTest(_LivePublishMixin, unittest.TestCase):
+    """Skips without live DSNs. The reader's attempted write is denied by a
+    real executed ``INSERT ... DEFAULT VALUES`` that raises
+    ``InsufficientPrivilege`` (PUB-04's negative half of the access proof)."""
+
+    def test_insufficient_privilege_path_returns_write_denied_true(self):
+        self._require_live()
+        self.skipTest(
+            "live write-denial proof requires an operator-provisioned reader "
+            "role with baseline USAGE only (D-72) and a promoted fixture "
+            "table; deferred to the operator's live run"
         )
 
 
