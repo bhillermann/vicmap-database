@@ -564,11 +564,19 @@ def verify_reader_access(
     time -- never EPSG:7899's own advertised projected-meters bounds, which
     are the Lambert Conformal Conic's full mathematical domain, not
     Victoria's actual footprint (Pitfall 3). The write-denial attempt is a
-    real executed ``INSERT ... DEFAULT VALUES`` -- chosen over ``UPDATE``
-    because PostgreSQL's ACL check runs at executor startup, before any
-    ``NOT NULL`` constraint is ever evaluated -- never a grant-metadata-only
-    shortcut (research Anti-Pattern). If the write is
-    not rejected, the grant model is broken: this raises the security-critical
+    real executed zero-row ``INSERT ... SELECT ... WHERE false`` -- chosen
+    over ``INSERT ... DEFAULT VALUES`` because PostgreSQL's ACL check runs at
+    executor startup regardless of row count, so a role lacking INSERT is
+    still rejected with ``InsufficientPrivilege``, while a *writable* role's
+    probe affects zero rows and therefore never evaluates the ``NOT NULL``/
+    primary-key ``gid`` constraint that ``DEFAULT VALUES`` would trip first
+    (CR-01: on this schema ``gid`` has no default, so ``DEFAULT VALUES`` could
+    never reach the not-denied branch -- it raised ``NotNullViolation``
+    instead, misreported as an internal failure). Any row-level constraint
+    violation (``IntegrityError``) is likewise treated as proof the ACL check
+    passed -- the write itself was permitted -- and is never a grant-metadata-
+    only shortcut (research Anti-Pattern). If the write is not rejected, the
+    grant model is broken: this raises the security-critical
     ``ReaderWriteNotDenied`` and never returns a passing result (T-04-02)."""
 
     if not reader_password:
@@ -604,20 +612,30 @@ def verify_reader_access(
         except Exception:
             raise ReaderVerificationFailed() from None
 
-        # D-74/Pattern 3: the write-denial proof is a real executed INSERT,
-        # never a grant-metadata-only shortcut -- DEFAULT VALUES
-        # needs no prior SELECT and is rejected by the executor's ACL check
-        # before any NOT NULL constraint is ever evaluated.
+        # D-74/Pattern 3/CR-01: the write-denial proof is a real executed
+        # INSERT, never a grant-metadata-only shortcut. A zero-row
+        # ``INSERT ... SELECT ... WHERE false`` is still ACL-checked at
+        # executor startup (a role without INSERT trips InsufficientPrivilege)
+        # but produces no row, so a writable role's probe never reaches gid's
+        # NOT NULL/PK constraint -- unlike DEFAULT VALUES, which raised
+        # NotNullViolation on this schema and could never reach the not-denied
+        # branch below.
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    sql.SQL("INSERT INTO {table} DEFAULT VALUES").format(
-                        table=sql.Identifier(policy.publish_schema, target)
-                    )
+                    sql.SQL(
+                        "INSERT INTO {table} SELECT * FROM {table} WHERE false"
+                    ).format(table=sql.Identifier(policy.publish_schema, target))
                 )
         except pg_errors.InsufficientPrivilege:
             connection.rollback()
             write_denied = True
+        except pg_errors.IntegrityError:
+            # The ACL check passed (a row-level constraint fired, so the write
+            # itself was permitted) -- the reader can write. Broken grant model
+            # (T-04-02/CR-01): never downgrade to a warning or a pass.
+            connection.rollback()
+            raise ReaderWriteNotDenied()
         else:
             connection.rollback()
             # T-04-02/security-critical: a writable reader means the grant

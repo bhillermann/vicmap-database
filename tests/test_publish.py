@@ -482,6 +482,12 @@ class _FakeReaderCursor:
         if "INSERT INTO" in text:
             if self._connection.deny_write:
                 raise publish.pg_errors.InsufficientPrivilege("denied")
+            # A writable role passes the ACL check; the real server may then
+            # raise a row-level constraint error (CR-01: DEFAULT VALUES tripped
+            # gid's NOT NULL). Model that when write_error is set; otherwise a
+            # zero-row probe succeeds silently.
+            if self._connection.write_error is not None:
+                raise self._connection.write_error
             return
         if "information_schema.tables" in text:
             if self._connection.discovery_error is not None:
@@ -509,12 +515,14 @@ class _FakeReaderConnection:
         spatial_rows=(),
         deny_write=True,
         discovery_error=None,
+        write_error=None,
     ):
         self.executed: list[str] = []
         self.discovered_rows = discovered_rows
         self.spatial_rows = spatial_rows
         self.deny_write = deny_write
         self.discovery_error = discovery_error
+        self.write_error = write_error
         self.rollback_count = 0
         self.commit_count = 0
         self.closed = False
@@ -632,6 +640,44 @@ class ReaderVerificationTest(unittest.TestCase):
         # and always closes -- no state is ever left behind.
         self.assertGreaterEqual(connection.rollback_count, 1)
         self.assertTrue(connection.closed)
+
+    def test_writable_reader_hitting_not_null_still_raises_not_denied(self):
+        # CR-01: the exact broken-grant failure mode. A reader mistakenly
+        # granted INSERT passes the ACL check, so on this schema the write
+        # would trip gid's NOT NULL/PK constraint (NotNullViolation) rather
+        # than succeed. That is still a WRITABLE reader -- it must raise the
+        # security-critical ReaderWriteNotDenied, never fall through as an
+        # uncaught IntegrityError misreported as an internal failure.
+        connection = self._connection(
+            deny_write=False,
+            write_error=publish.pg_errors.NotNullViolation("null value in gid"),
+        )
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            with self.assertRaises(publish.ReaderWriteNotDenied):
+                publish.verify_reader_access(
+                    _publish_policy(),
+                    reader_password="sentinel-secret",
+                    published_tables=("vmadd_address",),
+                )
+        self.assertGreaterEqual(connection.rollback_count, 1)
+        self.assertTrue(connection.closed)
+
+    def test_write_probe_is_zero_row_insert_never_default_values(self):
+        # CR-01 regression guard: the write probe must be a zero-row
+        # INSERT ... SELECT ... WHERE false (ACL-checked but constraint-free),
+        # never DEFAULT VALUES (which trips gid NOT NULL before the ACL result
+        # can be observed on a writable reader).
+        connection = self._connection()
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            publish.verify_reader_access(
+                _publish_policy(),
+                reader_password="sentinel-secret",
+                published_tables=("vmadd_address",),
+            )
+        inserts = [s for s in connection.executed if "INSERT INTO" in s]
+        self.assertEqual(1, len(inserts))
+        self.assertIn("WHERE false", inserts[0])
+        self.assertNotIn("DEFAULT VALUES", inserts[0])
 
     def test_discovery_failure_is_reader_verification_failed(self):
         connection = self._connection(discovery_error=RuntimeError("driver exploded"))
@@ -1008,7 +1054,7 @@ class LiveReaderVerificationTest(_LivePublishMixin, unittest.TestCase):
 
 class LiveReaderWriteDenialTest(_LivePublishMixin, unittest.TestCase):
     """Skips without live DSNs. The reader's attempted write is denied by a
-    real executed ``INSERT ... DEFAULT VALUES`` that raises
+    real executed zero-row ``INSERT ... SELECT ... WHERE false`` that raises
     ``InsufficientPrivilege`` (PUB-04's negative half of the access proof)."""
 
     def test_insufficient_privilege_path_returns_write_denied_true(self):
