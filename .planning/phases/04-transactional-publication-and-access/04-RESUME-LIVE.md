@@ -1,7 +1,8 @@
 # Phase 4 — Live Resume Checklist
 
-**Status:** Code-complete + offline-verified (619 tests OK, 43 skipped). Live boundary deferred to operator.
+**Status:** Live-promoted (OK0VUZ → vicmap.vmadd_address, 4.22M rows). Goal verified `human_needed` — 2 live negative-path inductions remain (see 04-VERIFICATION.md). Offline suite 621 OK / 43 skipped.
 **Created:** 2026-09-23 (autonomous code-only run)
+**Updated:** 2026-09-25 — CR-01 fixed (bf6c624): `verify_reader_access` now probes with a zero-row `INSERT ... SELECT ... WHERE false` (ACL-checked, no NOT NULL/PK evaluation) and treats any `IntegrityError` as ACL-passed → `ReaderWriteNotDenied`. The §4 item-7 broken-grant induction now trips the correct reason instead of `internal_failure`.
 
 All six plans' source and offline tests are committed on `main`. What remains is everything that needs a live PostgreSQL/PostGIS server, superuser rights, the 1Password reader secret, or the one-way-door promotion decision. Work top to bottom.
 

@@ -4,10 +4,10 @@ milestone: v0.1
 current_phase: 04 — Transactional Publication and Access
 current_phase_name: Transactional Publication and Access
 status: executing
-stopped_at: Phase 4 code-only complete; live promotion + verification deferred to operator
-last_updated: "2026-09-23T02:30:00.000Z"
-last_activity: 2026-09-23
-last_activity_desc: Phase 4 planned, verified, and executed code-only (619 tests OK); stopped at live boundary
+stopped_at: Phase 4 verification human_needed (5/5 criteria, 7/7 reqs SATISFIED); CR-01 fixed; 2 live negative-path inductions pending via /gsd-verify-work 04
+last_updated: "2026-09-25T00:00:00.000Z"
+last_activity: 2026-09-25
+last_activity_desc: Phase 4 gates resumed — regression 621 OK/43 skip, code review (CR-01 fixed, bf6c624), goal verified human_needed (04-VERIFICATION.md)
 state_head: c2674e566885deebcee59acbd9143cab548a7535
 progress:
   total_phases: 5
@@ -51,9 +51,13 @@ Phase 5 (Approved Legacy Cleanup) depends on Phase 4 being published live, so it
 
 ## Session
 
-**Last session:** 2026-09-23T02:30:00.000Z
-**Stopped at:** Phase 4 code-only complete; live boundary deferred
-**Resume file:** .planning/phases/04-transactional-publication-and-access/04-RESUME-LIVE.md
+**Last session:** 2026-09-25 — phase gates resumed; 04-VERIFICATION.md produced (human_needed)
+**Stopped at:** Phase 4 goal VERIFIED (5/5 roadmap criteria, all 7 reqs SATISFIED) but status human_needed: two security/data-critical negative paths were proven only offline and need live induction against a real PostgreSQL server:
+  1. PUB-03 mid-promotion rollback preserves prior vicmap.* tables (force a rename collision on a 2nd layer).
+  2. T-04-02 broken-grant reader-write trip: grant a disposable role INSERT, confirm ReaderWriteNotDenied, then revoke. (CR-01 code gap now FIXED, bf6c624 — the fix uses a zero-row INSERT...SELECT WHERE false probe so this live induction now trips the correct reason.)
+  3. (optional) live catalog check of canonical constraint/index names on vicmap.vmadd_address.
+Next: /gsd-verify-work 04 in a DB-enabled session → walk the 3 items in 04-VERIFICATION.md → status passed → Phase 4 complete → unblocks Phase 5.
+**Resume file:** 04-VERIFICATION.md (human_verification items, primary), 04-RESUME-LIVE.md (checklist §4-5)
 
 ## Performance Metrics
 
