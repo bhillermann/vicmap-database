@@ -25,6 +25,8 @@ Vicmap updates must reach the correct PostGIS layers automatically without expos
 - ✓ A reproducible Nix development environment supplies Python and the O365 SDK — existing
 - ✓ Microsoft application credentials are injected from 1Password through opnix — existing
 - ✓ The application can authenticate with Microsoft Graph and access the `automations@vegetationlink.com.au` Inbox — existing
+- ✓ Load delivered layers into staging and migrate them into production tables in a dedicated `vicmap` schema — Phase 4
+- ✓ Make the resulting production tables queryable by database users — Phase 4
 
 ### Active
 
@@ -32,8 +34,6 @@ Vicmap updates must reach the correct PostGIS layers automatically without expos
 - [ ] Identify a real Vicmap ready-order email, download its order archive, and unpack it
 - [ ] Discover and read the delivered geospatial files
 - [ ] Connect to the existing local PostGIS instance on port 5432
-- [ ] Load delivered layers into staging and migrate them into production tables in a dedicated `vicmap` schema
-- [ ] Make the resulting production tables queryable by database users
 - [ ] Inventory abandoned WFS-attempt tables and remove only tables explicitly approved for deletion
 
 ### Out of Scope
@@ -68,7 +68,8 @@ No message interpretation, delivery ledger, download client, geodatabase inspect
 |----------|-----------|---------|
 | Discover layers automatically from downloaded geodatabases | Each recurring order may contain multiple spatial files and maintaining a manual mapping would be brittle | — Pending |
 | Normalize discovered layer names to lowercase `snake_case` tables | Provides deterministic, PostgreSQL-safe target names | — Pending |
-| Replace complete layers through validated staging and atomic swap | Prevents partial data visibility and retains the prior version on failure | — Pending |
+| Replace complete layers through validated staging and atomic swap | Prevents partial data visibility and retains the prior version on failure | ✓ Phase 4 — single-transaction promote_order; rollback-preserves-prior-tables proven live (LivePromotionRollbackTest) |
+| Prove reader write-denial with a real zero-row INSERT probe, never grant-metadata | A DEFAULT VALUES probe could not reach the not-denied branch on this schema (gid has no default) | ✓ Phase 4 (CR-01/bf6c624) — broken-grant trip proven live (LiveReaderWriteNotDeniedTest) |
 | Store delivery and load audit state in Postgres | Provides durable idempotency and a queryable operational history | — Pending |
 | Trust configured sender addresses or domains | Establishes a practical boundary before accepting emailed download links | — Pending |
 | Report through journald and failure-only email | Keeps routine operation observable without creating success-notification noise | — Pending |
@@ -91,4 +92,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-01 after starting milestone v0.1*
+*Last updated: 2026-09-25 after Phase 4*

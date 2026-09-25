@@ -31,11 +31,11 @@
 
 ### Publication and Access
 
-- [ ] **PUB-01**: Operator can publish only fully validated staging tables into the dedicated `vicmap` schema.
-- [ ] **PUB-02**: All layers from the selected order become visible together through a short transactional publication step, with no partial order publication.
-- [ ] **PUB-03**: Publication preserves the previous usable production tables if promotion fails.
-- [ ] **PUB-04**: A configured reader role receives schema `USAGE` and table `SELECT` privileges without receiving write privileges.
-- [ ] **PUB-05**: Operator can verify table discovery, row access, and a representative spatial query while acting as the non-owner reader role.
+- [x] **PUB-01**: Operator can publish only fully validated staging tables into the dedicated `vicmap` schema.
+- [x] **PUB-02**: All layers from the selected order become visible together through a short transactional publication step, with no partial order publication.
+- [x] **PUB-03**: Publication preserves the previous usable production tables if promotion fails.
+- [x] **PUB-04**: A configured reader role receives schema `USAGE` and table `SELECT` privileges without receiving write privileges.
+- [x] **PUB-05**: Operator can verify table discovery, row access, and a representative spatial query while acting as the non-owner reader role.
 
 ### Legacy Cleanup
 
@@ -47,8 +47,8 @@
 
 ### Proof Evidence
 
-- [ ] **EVID-01**: Operator receives a redacted summary connecting the selected message, artifact checksum, discovered layers, staging validation, published tables, and reader query.
-- [ ] **EVID-02**: Any failed stage returns a non-zero result and clearly identifies the failed boundary without exposing secrets.
+- [x] **EVID-01**: Operator receives a redacted summary connecting the selected message, artifact checksum, discovered layers, staging validation, published tables, and reader query.
+- [x] **EVID-02**: Any failed stage returns a non-zero result and clearly identifies the failed boundary without exposing secrets.
 
 ## Future Requirements
 
@@ -98,13 +98,13 @@
 | DB-03 | Phase 3 | Complete |
 | DB-04 | Phase 3 | Complete |
 | DB-05 | Phase 3 | Complete |
-| PUB-01 | Phase 4 | Pending |
-| PUB-02 | Phase 4 | Pending |
-| PUB-03 | Phase 4 | Pending |
-| PUB-04 | Phase 4 | Pending |
-| PUB-05 | Phase 4 | Pending |
-| EVID-01 | Phase 4 | Pending |
-| EVID-02 | Phase 4 | Pending |
+| PUB-01 | Phase 4 | Complete |
+| PUB-02 | Phase 4 | Complete |
+| PUB-03 | Phase 4 | Complete |
+| PUB-04 | Phase 4 | Complete |
+| PUB-05 | Phase 4 | Complete |
+| EVID-01 | Phase 4 | Complete |
+| EVID-02 | Phase 4 | Complete |
 | CLN-01 | Phase 5 | Pending |
 | CLN-02 | Phase 5 | Pending |
 | CLN-03 | Phase 5 | Pending |
