@@ -3,7 +3,7 @@ status: complete
 phase: 04-transactional-publication-and-access
 source: [04-01-SUMMARY.md, 04-02-SUMMARY.md, 04-03-SUMMARY.md, 04-04-SUMMARY.md, 04-05-SUMMARY.md, 04-06-SUMMARY.md]
 started: 2026-09-24T00:00:00Z
-updated: 2026-09-24T08:35:00Z
+updated: 2026-09-25T00:00:00Z
 ---
 
 ## Current Test
@@ -170,10 +170,9 @@ blocked: 0
 
 ## Gaps
 
-Two live negative-path proofs were not induced this session. Both are proven by automated tests; live induction is optional hardening, not a blocker:
+Both live negative-path proofs are now CLOSED — induced live against the real PostgreSQL server on 2026-09-25 by two fleshed-out `_LivePublishMixin` tests (previously skip-stubs), both green:
 
-- **Induced-failure rollback (test 6):** promotion rollback-and-PromotionFailed proven by automated test 18, not induced against the live table. To induce live: force a mid-transaction error during promotion and confirm every prior table survives.
-- **Writable-role ReaderWriteNotDenied (test 7):** proven by automated test 22. To induce live: grant INSERT to a disposable reader-equivalent role, assert ReaderWriteNotDenied is raised, then immediately revoke — never leave a writable reader-equivalent role provisioned.
+- **Induced-failure rollback (test 6) — CLOSED:** `tests.test_publish.LivePromotionRollbackTest.test_induced_failure_preserves_every_prior_table` provisions two throwaway layers, omits the second layer's staging table to force a mid-transaction failure, and asserts `PromotionFailed` plus the prior published table + its marker row survive, the second layer never appears, and the first layer's staging table rolled back (PUB-03). Green live.
+- **Writable-role ReaderWriteNotDenied (test 7) — CLOSED:** `tests.test_publish.LiveReaderWriteNotDeniedTest.test_writable_reader_trips_reader_write_not_denied` provisions a disposable reader role deliberately granted INSERT (broken grant) and asserts `verify_reader_access` raises `ReaderWriteNotDenied` (T-04-02/CR-01). Both throwaway roles/schemas are dropped in cleanup. Green live.
 
-Optional live confirmation of canonical names (test 6), non-destructive:
-`nix develop path:. -c psql -c "\d+ vicmap.vmadd_address"` — expect vmadd_address_pkey, vmadd_address_geom_idx, and a NOT NULL geom column.
+Optional (non-blocking) live confirmation of canonical names (test 6): `nix develop path:. -c psql -c "\d+ vicmap.vmadd_address"` — expect vmadd_address_pkey, vmadd_address_geom_idx, and a NOT NULL geom column. The rename statements are now proven to execute against a real server (they run for layer A inside LivePromotionRollbackTest before the induced rollback).

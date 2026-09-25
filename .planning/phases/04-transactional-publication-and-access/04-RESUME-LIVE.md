@@ -1,6 +1,6 @@
 # Phase 4 — Live Resume Checklist
 
-**Status:** Live-promoted (OK0VUZ → vicmap.vmadd_address, 4.22M rows). Goal verified `human_needed` — 2 live negative-path inductions remain (see 04-VERIFICATION.md). Offline suite 621 OK / 43 skipped.
+**Status:** Live-promoted (OK0VUZ → vicmap.vmadd_address, 4.22M rows). Goal verified `passed` (2026-09-25, re-verified at HEAD) — the 2 live negative-path inductions are now green (`LivePromotionRollbackTest`, `LiveReaderWriteNotDeniedTest`; see 04-VERIFICATION.md). Offline suite 621 OK / 43 skipped.
 **Created:** 2026-09-23 (autonomous code-only run)
 **Updated:** 2026-09-25 — CR-01 fixed (bf6c624): `verify_reader_access` now probes with a zero-row `INSERT ... SELECT ... WHERE false` (ACL-checked, no NOT NULL/PK evaluation) and treats any `IntegrityError` as ACL-passed → `ReaderWriteNotDenied`. The §4 item-7 broken-grant induction now trips the correct reason instead of `internal_failure`.
 

@@ -1,10 +1,11 @@
 ---
 phase: 04-transactional-publication-and-access
-verified: 2026-09-25T00:00:00Z
-status: human_needed
+verified: 2026-09-25T12:00:00Z
+status: passed
 score: 5/5 roadmap success criteria verified (0 present-behavior-unverified)
 behavior_unverified: 0
 overrides_applied: 0
+reverified_note: "2026-09-25 re-verified at HEAD after CR-01 fix (bf6c624). The two security/data-preservation negative paths that held this report at human_needed are now induced live and green (LivePromotionRollbackTest, LiveReaderWriteNotDeniedTest); full offline suite 621 OK / 43 skipped at HEAD."
 covered_files:
   - ".planning/REQUIREMENTS.md"
   - ".planning/phases/04-transactional-publication-and-access/04-01-PLAN.md"
@@ -37,25 +38,28 @@ covered_files:
   - "vicmap_acquire/manifest.py"
   - "vicmap_acquire/publish.py"
   - "vicmap_acquire/staging.py"
-covered_digest: "v1:sha256:74c8688791c266aaa2a6da4996c893a4212b9fce49d876c6e086994167d47d2b"
-human_verification:
-  - test: "Induce a mid-transaction promotion failure against a real staged order (e.g. force a rename collision on the second of two layers) and confirm every prior vicmap.* table survives untouched (PUB-03's negative path)."
-    expected: "Rollback leaves every previously-published table exactly as it was; the failed run reports pub_promotion_failed; no table is left half-renamed or half-dropped."
-    why_human: "The rollback-preserves-prior-tables invariant is proven at the unit level (PromotionRollbackCompositionTest, mocked connection, asserts rollback_count==1/commit_count==1) and the happy path is proven live (OK0VUZ -> vicmap.vmadd_address), but no live negative-path induction against the real PostgreSQL server has been run this session or the prior live session (WINDOWS.md #11, 04-UAT.md Gaps item 1). This needs a live DB and a deliberately broken second layer to observe."
+covered_digest: "v1:sha256:07755934f0e63f778cc09c6a124f7430747f2392b1e0cb172ba57def3abd9d0e"
+human_verification_resolved:
+  - test: "Induce a mid-transaction promotion failure against a real staged order and confirm every prior vicmap.* table survives untouched (PUB-03's negative path)."
+    resolved_by: "tests.test_publish.LivePromotionRollbackTest.test_induced_failure_preserves_every_prior_table"
+    resolved_at: 2026-09-25
+    evidence: "Green live against the real PostgreSQL server: the test provisions two throwaway layers with PASS audit rows, omits the second layer's staging table to force a mid-transaction failure, and asserts PromotionFailed plus the prior published table + its marker row survive, the second layer never appears, and the first layer's staging table rolled back. The unit-level PromotionRollbackCompositionTest still corroborates offline."
   - test: "Grant a disposable reader-equivalent role INSERT on a published table and confirm verify_reader_access raises ReaderWriteNotDenied against the real server, then immediately revoke."
-    expected: "The function raises ReaderWriteNotDenied (never returns a passing ReaderVerification) when a write actually succeeds."
-    why_human: "Proven at the unit level with a fake connection (ReaderVerificationTest.test_writable_reader_raises_reader_write_not_denied) and the negative half of the live proof (real write correctly denied for the true vicmap_reader role) is proven live, but the specific broken-grant-model trip has never been induced against a real PostgreSQL server (WINDOWS.md #14, 04-UAT.md Gaps item 2). Security-critical: this is the check that catches a broken grant model."
+    resolved_by: "tests.test_publish.LiveReaderWriteNotDeniedTest.test_writable_reader_trips_reader_write_not_denied"
+    resolved_at: 2026-09-25
+    evidence: "Green live: the test provisions a disposable reader role deliberately granted INSERT (broken grant) on a promoted fixture table and asserts verify_reader_access raises the security-critical ReaderWriteNotDenied; both throwaway role and schema are dropped in cleanup. This is the exact path CR-01 (bf6c624) hardened — the prior DEFAULT VALUES probe could not reach the not-denied branch on this schema."
+human_verification_optional:
   - test: "Confirm the canonical constraint/index names on the live-promoted table."
     expected: "`\\d+ vicmap.vmadd_address` shows vmadd_address_pkey, vmadd_address_geom_idx, and a NOT NULL geom column."
-    why_human: "The live UAT run promoted vmadd_address successfully but did not re-query the catalog to confirm the canonical rename took effect post-commit; the composition is proven by automated test 18 (offline, mocked cursor) and the promotion completed without error (implying the rename statements executed), but this is optional live confirmation per 04-UAT.md Gaps."
+    why_optional: "Non-blocking. The canonical rename statements are now proven to execute against a real server (they run for layer A inside LivePromotionRollbackTest before the induced rollback) and by offline test 18; a post-commit catalog re-query on vicmap.vmadd_address remains available as belt-and-braces confirmation but blocks nothing."
 ---
 
 # Phase 4: Transactional Publication and Access Verification Report
 
 **Phase Goal:** Atomically publish the order into `vicmap` and prove non-owner access with redacted evidence.
-**Verified:** 2026-09-25
-**Status:** human_needed
-**Re-verification:** No — initial verification
+**Verified:** 2026-09-25 (re-verified at HEAD)
+**Status:** passed
+**Re-verification:** Yes — re-verified at HEAD after the CR-01 fix (bf6c624). The two security/data-preservation negative paths that held this report at `human_needed` are now induced live and green.
 
 ## Goal Achievement
 
@@ -64,8 +68,8 @@ human_verification:
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
 | 1 | Only fully validated staging tables can be promoted, and every published target is schema-qualified under `vicmap`. | VERIFIED | Code: `assert_all_layers_validated` (publish.py:247) hard-stops on any missing/non-PASS row before any DDL; every DDL/DML target composed via `sql.Identifier(policy.publish_schema, target)` (publish.py:381-437). Live: `vicmap.vmadd_address` (4,222,035 rows) exists post-run (runs/OK0VUZ/20260924T083137Z/summary.json). Test: `PublicationGateTest`, `tests.test_publish.PromotionSqlCompositionTest`, all green. |
-| 2 | All order layers become visible together in one short transaction; an induced promotion failure exposes no partial order and preserves the previous usable tables. | VERIFIED | Code: `promote_order` (publish.py:440-496) loops every layer inside one connection/transaction, commits once, rolls back and re-raises `PromotionFailed` on any exception. Behavioral test: `PromotionRollbackCompositionTest.test_failure_rolls_back_and_raises_promotion_failed` induces a mid-loop failure (fails on `GRANT SELECT`) against a recording fake connection and asserts `rollback_count==1` and the final commit never ran (`commit_count==1`, only `_connect`'s setup commit). Live: happy path proven end-to-end (single-layer order). **Live negative-path induction (multi-layer rollback against a real server) was not performed — see Human Verification #1.** |
-| 3 | The configured reader role can discover tables, select rows, and run a representative spatial query, but cannot write to published tables. | VERIFIED | Code: `verify_reader_access` (publish.py:540-635) opens a fresh `psycopg.connect()` as `reader_user` (no SET ROLE), discovers via `information_schema.tables`, runs a GiST-exercising query over Victoria's real WGS84 extent, and attempts a real `INSERT ... DEFAULT VALUES` expecting `InsufficientPrivilege`; the not-denied branch raises `ReaderWriteNotDenied` and never returns a pass. Live: reader discovered 1 table, spatial query returned 10 rows, real INSERT denied (`reader_write_denied: true` in summary.json). Behavioral test: `ReaderVerificationTest.test_writable_reader_raises_reader_write_not_denied` proves the not-denied hard-stop with a fake connection whose INSERT succeeds. **The negative (broken-grant) trip was not induced live — see Human Verification #2.** |
+| 2 | All order layers become visible together in one short transaction; an induced promotion failure exposes no partial order and preserves the previous usable tables. | VERIFIED | Code: `promote_order` (publish.py:440-496) loops every layer inside one connection/transaction, commits once, rolls back and re-raises `PromotionFailed` on any exception. Behavioral test: `PromotionRollbackCompositionTest.test_failure_rolls_back_and_raises_promotion_failed` induces a mid-loop failure (fails on `GRANT SELECT`) against a recording fake connection and asserts `rollback_count==1` and the final commit never ran (`commit_count==1`, only `_connect`'s setup commit). Live: happy path proven end-to-end (single-layer order). **Live negative-path induction now proven: `LivePromotionRollbackTest.test_induced_failure_preserves_every_prior_table` (green, 2026-09-25) forces a mid-transaction failure on a second layer against the real server and asserts the prior published table + its marker row survive and the second layer never appears (PUB-03).** |
+| 3 | The configured reader role can discover tables, select rows, and run a representative spatial query, but cannot write to published tables. | VERIFIED | Code: `verify_reader_access` (publish.py:540-635) opens a fresh `psycopg.connect()` as `reader_user` (no SET ROLE), discovers via `information_schema.tables`, runs a GiST-exercising query over Victoria's real WGS84 extent, and attempts a real `INSERT ... DEFAULT VALUES` expecting `InsufficientPrivilege`; the not-denied branch raises `ReaderWriteNotDenied` and never returns a pass. Live: reader discovered 1 table, spatial query returned 10 rows, real INSERT denied (`reader_write_denied: true` in summary.json). Behavioral test: `ReaderVerificationTest.test_writable_reader_raises_reader_write_not_denied` proves the not-denied hard-stop with a fake connection whose INSERT succeeds. **The negative (broken-grant) trip is now proven live: `LiveReaderWriteNotDeniedTest.test_writable_reader_trips_reader_write_not_denied` (green, 2026-09-25) grants a disposable reader role INSERT on a promoted fixture and confirms `verify_reader_access` raises `ReaderWriteNotDenied` against the real server (T-04-02); this is the exact path CR-01/bf6c624 hardened.** |
 | 4 | A redacted run summary links the selected message, artifact checksum, discovered layers, staging validation, published tables, and reader verification. | VERIFIED | Live artifact inspected directly: `runs/OK0VUZ/20260924T083137Z/summary.json` contains `message_fingerprint`, `artifact_sha256`, `manifest_sha256`, `layer_count`, `staging_validation` (per-layer row_count/spatial/srid/geometry_type/repaired_count), `published_tables`, and a `reader` block (tables_discovered, spatial_query_row_count, write_denied). No path, password, DSN, or raw message id present. `assemble_summary`/`write_summary` (publish.py:717-883) re-read durable artifacts (provenance sidecar, manifest.json, vicmap_audit rows) rather than threading an in-memory record (D-76). |
 | 5 | Any stage failure returns a non-zero result identifying the failed boundary without exposing secrets. | VERIFIED | `publish_order.py`'s exception ladder (lines ~189-222) maps `AcquisitionFailure`/`ManifestFailure`/`PublishFailure`/`StagingFailure`/catch-all to `SafeFailure(reason, order_id=order_id)` and returns 1 in every branch; success returns 0. `tests/test_publish_order.py` (24 tests, all green) exercises every named failure boundary (config_invalid, manifest, db_audit gate, db_publish, db_reader_verify, internal_failure) and asserts the correct stage/reason and a return of 1. **Caveat (not a truth failure, but a disclosed open limitation):** WINDOWS.md #16 documents that a failure in a *post-commit* step (reader-verify/summary) strands the run with no resume path — a subsequent retry re-enters `promote_order`, hits `UndefinedTable` on the already-consumed staging table, and is misreported as `pub_promotion_failed` rather than the true cause. This affects only the *retry-after-partial-failure* scenario, which falls under OPS-03 ("retry or resume under an explicit recovery policy") — an explicitly deferred Future Requirement, not v0.1 scope. Recorded as an advisory, not a gap against EVID-02's single-run contract. |
 
@@ -122,7 +126,7 @@ Not applicable — no `scripts/*/tests/probe-*.sh` convention in this project; t
 |-------------|------------|--------------|--------|----------|
 | PUB-01 | 04-02, 04-03, 04-04 | Publish only fully validated staging tables into `vicmap` | SATISFIED | `assert_all_layers_validated` gate; live promotion of `vmadd_address` gated on a PASS row. |
 | PUB-02 | 04-04 | All layers visible together via one short transaction, no partial publication | SATISFIED | Single-transaction `promote_order`; behavioral rollback test; live single-layer success. |
-| PUB-03 | 04-04 | Publication preserves previous usable tables if promotion fails | SATISFIED (unit-proven; live negative path outstanding — Human Verification #1) | `PromotionRollbackCompositionTest`; scoped single-target `DROP TABLE IF EXISTS`. |
+| PUB-03 | 04-04 | Publication preserves previous usable tables if promotion fails | SATISFIED (live negative-path induction green) | `PromotionRollbackCompositionTest` (offline) + `LivePromotionRollbackTest` (live, 2026-09-25); scoped single-target `DROP TABLE IF EXISTS`. |
 | PUB-04 | 04-02, 04-04, 04-05 | Reader role gets schema USAGE + table SELECT, no write | SATISFIED | Provisioning SQL + in-transaction `GRANT SELECT`; live-confirmed write denial. |
 | PUB-05 | 04-05 | Reader can discover tables, read rows, run spatial query as non-owner | SATISFIED | `verify_reader_access`; live discovery (1 table) + spatial query (10 rows). |
 | EVID-01 | 04-01, 04-06 | Redacted summary connecting message, checksum, layers, validation, published tables, reader query | SATISFIED | Live `summary.json` directly inspected; contains all six linked facts, no secrets. |
@@ -138,25 +142,24 @@ None. No `TBD`/`FIXME`/`XXX`/`TODO`/`HACK` markers in any Phase-4-modified file.
 
 1. **WINDOWS.md #16 (open, deviation):** No resume path after a committed promotion. A failure in a *post-commit* step (reader-verify, read-validations, assemble-summary, write-summary) strands the run: a retry re-enters `promote_order`, hits `UndefinedTable` on the already-consumed staging table, and is misreported as `pub_promotion_failed`. This affects EVID-02's "clearly identifies the failed boundary" guarantee only in the retry-after-partial-failure case. Retry/resume policy is explicitly out of v0.1 scope (Future Requirement OPS-03: "Interrupted downloads and loads can retry or resume under an explicit recovery policy"). Not treated as a phase-blocking gap, but the window is open and should be tracked toward OPS-03.
 2. **04-VALIDATION.md is an unfilled template.** Its frontmatter still reads `status: draft`, `nyquist_compliant: false`, and its body retains placeholder tokens (`{pytest 7.x / jest 29.x / vitest / go test / other}`, `REQ-{XX}`, `~04 seconds`) rather than actual Phase-4-specific content. This does not affect the phase's functional goal (the actual test suite is real and passes), but it means the Nyquist validation record was never substantively completed for this phase — worth closing out procedurally.
-3. **WINDOWS.md #8-#15 (open, unrun-verify):** The dedicated `Live*` test classes in `tests/test_staging.py`/`tests/test_publish.py` (e.g. `LivePromoteOneLayerTest`, `LiveMultiLayerPromotionTest`, `LivePromotionRollbackTest`, `LiveReaderVerificationTest`, `LiveReaderWriteDenialTest`, `LiveReaderWriteNotDeniedTest`) are unconditional-skip stub placeholders — even with both DSN env vars set, the test body immediately calls `self.skipTest(...)`. These were never fleshed out; the actual live proof instead came from directly invoking `publish_order.py` once against the real order (successful happy path only). This is transparently disclosed in `04-UAT.md`'s own Gaps section and in `04-RESUME-LIVE.md` ("currently skip-guarded placeholders — flesh out from stubs"). Two specific negative-path behaviors (induced rollback, writable-reader trip) were never exercised against a real server — see Human Verification below.
+3. **WINDOWS.md #8-#15 (partially closed):** The two security/data-preservation `Live*` classes in `tests/test_publish.py` — `LivePromotionRollbackTest` and `LiveReaderWriteNotDeniedTest` — have been fleshed out from stubs into real fixture-provisioning tests and run green live on 2026-09-25 (superuser DSN present). `AuditValidationRecordTest` (test_staging.py) also now runs green live, closing the audit-record proof. The remaining happy-path `Live*` classes (`LivePromoteOneLayerTest`, `LiveMultiLayerPromotionTest`, `LiveReaderVerificationTest`, `LiveReaderWriteDenialTest`, `LivePublishOrderFullRunTest`) stay skip-stubs: their behavior is already proven by the real end-to-end `publish_order.py` run (OK0VUZ) whose `summary.json` was inspected directly, so fleshing them out is optional hardening, not a gap.
 
-### Human Verification Required
+### Human Verification — Resolved
 
-3 items — see frontmatter `human_verification` for full detail. Summary:
+The two security/data-preservation negative paths that held this report at `human_needed` were induced live against the real PostgreSQL server on 2026-09-25 and are green (frontmatter `human_verification_resolved`):
 
-1. **Live-induce a mid-transaction promotion failure** and confirm prior tables survive (PUB-03 negative path never run against a real server).
-2. **Live-induce a broken reader grant** (grant INSERT to a disposable role) and confirm `ReaderWriteNotDenied` trips (security-critical negative path never run against a real server).
-3. **Optional: re-query the live catalog** to confirm canonical constraint/index names on `vicmap.vmadd_address` (composition proven only by mocked test + inferred from a clean promotion).
+1. **Mid-transaction promotion failure preserves prior tables (PUB-03)** — `LivePromotionRollbackTest.test_induced_failure_preserves_every_prior_table`. Green.
+2. **Broken reader grant trips `ReaderWriteNotDenied` (T-04-02)** — `LiveReaderWriteNotDeniedTest.test_writable_reader_trips_reader_write_not_denied`. Green. This is the exact path CR-01/bf6c624 hardened — the prior `DEFAULT VALUES` probe could not reach the not-denied branch on this schema.
 
-All three are explicitly flagged as optional/deferred hardening in `04-UAT.md`'s own Gaps section (not hidden), and none block the phase's core PUB-01..05/EVID-01/EVID-02 goal, which is proven by a combination of code inspection, a real end-to-end live run with a directly-inspected `summary.json`, and 763 total passing tests (619 general + 144 Phase-4-focused, overlapping). They are surfaced here because they are genuine gaps in negative-path live proof for security-critical and data-preservation invariants, and the adversarial verification stance requires surfacing rather than silently accepting the offline-only proof as sufficient for a one-way-door production promotion capability.
+One optional, non-blocking confirmation remains available (frontmatter `human_verification_optional`): a post-commit catalog re-query of `vicmap.vmadd_address`'s canonical names. The rename statements are already proven to execute live (layer A inside `LivePromotionRollbackTest`) and by offline test 18, so this blocks nothing.
 
 ### Gaps Summary
 
-No BLOCKER-level gaps. All 5 roadmap success criteria and all 7 requirement IDs (PUB-01..05, EVID-01, EVID-02) are backed by a combination of source-code inspection, passing automated tests (offline behavioral tests for negative/rollback paths; live artifact inspection for the happy path), and a genuine, directly-inspected live production artifact (`runs/OK0VUZ/20260924T083137Z/summary.json`, `vicmap.vmadd_address` with 4.22M rows). The phase goal — "Atomically publish the order into `vicmap` and prove non-owner access with redacted evidence" — is achieved.
+No BLOCKER-level gaps and no open human-verification items. All 5 roadmap success criteria and all 7 requirement IDs (PUB-01..05, EVID-01, EVID-02) are backed by source-code inspection, passing automated tests (offline behavioral tests plus live-induced negative/rollback paths), and a genuine, directly-inspected live production artifact (`runs/OK0VUZ/20260924T083137Z/summary.json`, `vicmap.vmadd_address` with 4.22M rows). The phase goal — "Atomically publish the order into `vicmap` and prove non-owner access with redacted evidence" — is achieved.
 
-Status is `human_needed` rather than `passed` solely because two security/data-preservation-critical negative paths (induced rollback, writable-reader trip) have only unit-level (mocked-connection) proof and have never been induced against a real PostgreSQL server, despite being the specific behaviors the phase's own threat model (T-04-01, T-04-02, T-04-04) calls "critical". This is consistent with `04-UAT.md`'s own disclosed Gaps section — this verification does not discover anything hidden, it elevates two already-disclosed optional-hardening items to formal human-verification status per the adversarial verification protocol for security-critical invariants.
+Status is `passed`: the two security/data-preservation-critical negative paths (induced rollback, writable-reader trip) the threat model (T-04-01, T-04-02, T-04-04) calls "critical" are now induced live and green, not merely unit-proven. Re-verified at HEAD after the CR-01 fix (bf6c624); the full offline suite is 621 OK / 43 skipped at HEAD.
 
 ---
 
-_Verified: 2026-09-25_
-_Verifier: Claude (gsd-verifier)_
+_Verified: 2026-09-25 (re-verified at HEAD)_
+_Verifier: Claude (gsd-verifier); live negative-path proofs run by the operator_
