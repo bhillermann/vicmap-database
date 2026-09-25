@@ -38,7 +38,7 @@ covered_files:
   - "vicmap_acquire/manifest.py"
   - "vicmap_acquire/publish.py"
   - "vicmap_acquire/staging.py"
-covered_digest: "v1:sha256:07755934f0e63f778cc09c6a124f7430747f2392b1e0cb172ba57def3abd9d0e"
+covered_digest: "v1:sha256:50f993a94695ba0cf8cf08fafadf3172c29e3331f66c8d23fb9b47dd0fe38a35"
 human_verification_resolved:
   - test: "Induce a mid-transaction promotion failure against a real staged order and confirm every prior vicmap.* table survives untouched (PUB-03's negative path)."
     resolved_by: "tests.test_publish.LivePromotionRollbackTest.test_induced_failure_preserves_every_prior_table"
