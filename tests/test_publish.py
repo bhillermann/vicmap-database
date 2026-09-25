@@ -23,7 +23,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vicmap_acquire import download, publish
+from vicmap_acquire import download, publish, staging
 
 
 _RUN_TS = "20260918t041500z"
@@ -992,6 +992,44 @@ class _LivePublishMixin:
             connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
         )
 
+    def _superuser_params(self) -> dict:
+        """host/port/dbname/user/password parsed from the superuser DSN. The
+        live promotion and reader connections both target this exact database,
+        so the throwaway fixtures created on the superuser connection are the
+        ones the code under test actually operates on. Only ever called after
+        ``_require_live`` has proven both DSNs are set."""
+
+        from psycopg.conninfo import conninfo_to_dict
+
+        parsed = conninfo_to_dict(os.environ[self._SUPERUSER_DSN_ENV_VAR])
+        return {
+            "host": str(parsed.get("host") or "127.0.0.1"),
+            "port": int(parsed.get("port") or 5432),
+            "dbname": str(parsed.get("dbname") or "vicmap"),
+            "user": str(parsed.get("user") or "postgres"),
+            "password": str(parsed.get("password") or ""),
+        }
+
+    def _open_superuser(self):
+        """Open an autocommit superuser connection for fixture setup, or skip
+        (never fail) if it is unreachable. Mirrors ``AuditValidationRecordTest``
+        in ``tests/test_staging.py``."""
+
+        import psycopg
+
+        try:
+            connection = psycopg.connect(
+                os.environ[self._SUPERUSER_DSN_ENV_VAR],
+                connect_timeout=self._CONNECT_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 -- any connect failure just skips
+            self.skipTest(
+                "no reachable PostgreSQL superuser connection for live publish "
+                f"fixture: {exc}"
+            )
+        connection.autocommit = True
+        return connection
+
 
 class LivePromoteOneLayerTest(_LivePublishMixin, unittest.TestCase):
     """Skips without live DSNs. Stages a tiny fixture table plus a PASS audit
@@ -1027,12 +1065,197 @@ class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
     table -- including any dropped earlier in the same transaction -- remains
     exactly as it was (PUB-03)."""
 
+    _READER_ROLE_PREFIX = "livetest_rbrdr_"
+    _RUN_TS = "20260925t000000z"
+    _DIGEST = "d" * 64
+
+    def _ensure_audit_table(self, cursor, created):
+        """Create ``vicmap_audit.staging_validation`` only if it is absent,
+        recording what was created so tearDown drops only that. Mirrors
+        ``AuditValidationRecordTest``'s provision-if-missing shape."""
+
+        cursor.execute("SELECT to_regnamespace('vicmap_audit')")
+        (schema_oid,) = cursor.fetchone()
+        if schema_oid is None:
+            cursor.execute("CREATE SCHEMA vicmap_audit")
+            created["audit_schema"] = True
+        cursor.execute("SELECT to_regclass('vicmap_audit.staging_validation')")
+        (table_oid,) = cursor.fetchone()
+        if table_oid is None:
+            cursor.execute(
+                "CREATE TABLE vicmap_audit.staging_validation ("
+                "run_ts text NOT NULL, manifest_digest text NOT NULL, "
+                "target_table text NOT NULL, staging_table text NOT NULL, "
+                "verdict text NOT NULL, spatial boolean NOT NULL, "
+                "row_count bigint NOT NULL, srid integer, geometry_type text, "
+                "repaired_count bigint, "
+                "recorded_at timestamptz NOT NULL DEFAULT now(), "
+                "PRIMARY KEY (run_ts, manifest_digest, target_table))"
+            )
+            created["audit_table"] = True
+
     def test_induced_failure_preserves_every_prior_table(self):
         self._require_live()
-        self.skipTest(
-            "live rollback proof requires operator-provisioned schemas, roles, "
-            "and staged fixtures; deferred to the operator's live run"
+        connection = self._open_superuser()
+        self.addCleanup(connection.close)
+        su = self._superuser_params()
+        sql = publish.sql
+
+        pid = os.getpid()
+        pub_schema = f"livetest_rbpub_{pid}"
+        stg_schema = f"livetest_rbstg_{pid}"
+        reader_role = f"{self._READER_ROLE_PREFIX}{pid}"
+        target_a = f"livetest_a_{pid}"
+        target_b = f"livetest_b_{pid}"
+        staging_a = staging.staging_table_name(target_a, self._RUN_TS)
+        gist_index = f"livetest_a_geom_gix_{pid}"
+        # staging_b is deliberately never created: its absence is the induced
+        # mid-transaction failure on the second layer (PUB-03).
+
+        created = {"audit_schema": False, "audit_table": False}
+
+        def _cleanup():
+            with connection.cursor() as cur:
+                cur.execute("SELECT to_regclass('vicmap_audit.staging_validation')")
+                (audit_oid,) = cur.fetchone()
+                if audit_oid is not None:
+                    cur.execute(
+                        "DELETE FROM vicmap_audit.staging_validation WHERE run_ts = %s",
+                        (self._RUN_TS,),
+                    )
+                for schema in (pub_schema, stg_schema):
+                    cur.execute(
+                        sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                            sql.Identifier(schema)
+                        )
+                    )
+                cur.execute(
+                    sql.SQL("DROP ROLE IF EXISTS {}").format(
+                        sql.Identifier(reader_role)
+                    )
+                )
+                if created["audit_table"]:
+                    cur.execute("DROP TABLE IF EXISTS vicmap_audit.staging_validation")
+                if created["audit_schema"]:
+                    cur.execute("DROP SCHEMA IF EXISTS vicmap_audit")
+
+        self.addCleanup(_cleanup)
+
+        with connection.cursor() as cursor:
+            # Fresh throwaway schemas + the reader role _promote_layer grants to.
+            for schema in (pub_schema, stg_schema):
+                cursor.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(schema)
+                    )
+                )
+                cursor.execute(
+                    sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema))
+                )
+            cursor.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(reader_role))
+            )
+            cursor.execute(
+                sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(reader_role))
+            )
+
+            # Prior published table for layer A, with a marker row that must
+            # survive the rollback exactly as it was (PUB-03).
+            cursor.execute(
+                sql.SQL("CREATE TABLE {} (gid bigint, note text)").format(
+                    sql.Identifier(pub_schema, target_a)
+                )
+            )
+            cursor.execute(
+                sql.SQL("INSERT INTO {} (gid, note) VALUES (999, 'prior-marker')").format(
+                    sql.Identifier(pub_schema, target_a)
+                )
+            )
+
+            # Staging table for layer A: a PK and a GiST geometry index for
+            # _promote_layer's catalog-driven canonical renames to find.
+            cursor.execute(
+                sql.SQL(
+                    "CREATE TABLE {} (gid bigint PRIMARY KEY, "
+                    "geom geometry(Point, 7899))"
+                ).format(sql.Identifier(stg_schema, staging_a))
+            )
+            cursor.execute(
+                sql.SQL("CREATE INDEX {} ON {} USING gist (geom)").format(
+                    sql.Identifier(gist_index),
+                    sql.Identifier(stg_schema, staging_a),
+                )
+            )
+            cursor.execute(
+                sql.SQL(
+                    "INSERT INTO {} (gid, geom) VALUES (1, "
+                    "ST_Transform(ST_SetSRID(ST_MakePoint(145.0, -37.0), 4326), 7899))"
+                ).format(sql.Identifier(stg_schema, staging_a))
+            )
+
+            # D-68 gate rows: both layers PASS, so promotion is gated in and the
+            # failure is the induced DDL error on layer B, not a missing PASS row.
+            self._ensure_audit_table(cursor, created)
+            for target in (target_a, target_b):
+                cursor.execute(
+                    "INSERT INTO vicmap_audit.staging_validation "
+                    "(run_ts, manifest_digest, target_table, staging_table, "
+                    "verdict, spatial, row_count) "
+                    "VALUES (%s, %s, %s, %s, 'pass', true, 1)",
+                    (
+                        self._RUN_TS,
+                        self._DIGEST,
+                        target,
+                        staging.staging_table_name(target, self._RUN_TS),
+                    ),
+                )
+
+        manifest = types.SimpleNamespace(
+            layers=(
+                types.SimpleNamespace(target_table=target_a),
+                types.SimpleNamespace(target_table=target_b),
+            )
         )
+        policy = _publish_policy(
+            host=su["host"],
+            port=su["port"],
+            dbname=su["dbname"],
+            user=su["user"],
+            staging_schema=stg_schema,
+            publish_schema=pub_schema,
+            reader_user=reader_role,
+            target_srid=7899,
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+        )
+
+        with self.assertRaises(publish.PromotionFailed):
+            publish.promote_order(
+                manifest,
+                policy,
+                su["password"],
+                run_timestamp=self._RUN_TS,
+                manifest_digest=self._DIGEST,
+            )
+
+        # PUB-03 invariant: the whole transaction rolled back.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("SELECT count(*) FROM {} WHERE gid = 999").format(
+                    sql.Identifier(pub_schema, target_a)
+                )
+            )
+            (marker_count,) = cursor.fetchone()
+            cursor.execute("SELECT to_regclass(%s)", (f"{pub_schema}.{target_b}",))
+            (promoted_b,) = cursor.fetchone()
+            cursor.execute("SELECT to_regclass(%s)", (f"{stg_schema}.{staging_a}",))
+            (staging_a_regclass,) = cursor.fetchone()
+
+        # Prior published table and its exact marker row are untouched...
+        self.assertEqual(1, marker_count)
+        # ...no layer was partially published...
+        self.assertIsNone(promoted_b)
+        # ...and layer A's staging table rolled back to the staging schema.
+        self.assertIsNotNone(staging_a_regclass)
 
 
 class LiveReaderVerificationTest(_LivePublishMixin, unittest.TestCase):
@@ -1072,13 +1295,97 @@ class LiveReaderWriteNotDeniedTest(_LivePublishMixin, unittest.TestCase):
     the check actually detects a broken grant, not just the happy path
     (T-04-02, security-critical)."""
 
+    _READER_PASSWORD = "livetest-reader-pw-7c2f"
+
     def test_writable_reader_trips_reader_write_not_denied(self):
         self._require_live()
-        self.skipTest(
-            "live negative write-denial proof requires an operator-provisioned "
-            "role deliberately granted INSERT on a promoted fixture table "
-            "(a broken-grant simulation); deferred to the operator's live run"
+        connection = self._open_superuser()
+        self.addCleanup(connection.close)
+        su = self._superuser_params()
+        sql = publish.sql
+
+        pid = os.getpid()
+        pub_schema = f"livetest_wpub_{pid}"
+        # Never created -- PublishPolicy only needs a valid, distinct name.
+        stg_schema = f"livetest_wstg_{pid}"
+        reader_role = f"livetest_wrdr_{pid}"
+        target = f"livetest_wr_{pid}"
+
+        def _cleanup():
+            with connection.cursor() as cur:
+                cur.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(pub_schema)
+                    )
+                )
+                cur.execute(
+                    sql.SQL("DROP ROLE IF EXISTS {}").format(
+                        sql.Identifier(reader_role)
+                    )
+                )
+
+        self.addCleanup(_cleanup)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(pub_schema)
+                )
+            )
+            cursor.execute(
+                sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(reader_role))
+            )
+            cursor.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(pub_schema)))
+            cursor.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                    sql.Identifier(reader_role), sql.Literal(self._READER_PASSWORD)
+                )
+            )
+            cursor.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                    sql.Identifier(pub_schema), sql.Identifier(reader_role)
+                )
+            )
+            cursor.execute(
+                sql.SQL(
+                    "CREATE TABLE {} (gid bigint PRIMARY KEY, "
+                    "geom geometry(Point, 7899))"
+                ).format(sql.Identifier(pub_schema, target))
+            )
+            cursor.execute(
+                sql.SQL(
+                    "INSERT INTO {} (gid, geom) VALUES (1, "
+                    "ST_Transform(ST_SetSRID(ST_MakePoint(145.0, -37.0), 4326), 7899))"
+                ).format(sql.Identifier(pub_schema, target))
+            )
+            # The broken grant: the reader is deliberately given INSERT as well
+            # as the baseline USAGE/SELECT. verify_reader_access must detect it.
+            cursor.execute(
+                sql.SQL("GRANT SELECT, INSERT ON {} TO {}").format(
+                    sql.Identifier(pub_schema, target), sql.Identifier(reader_role)
+                )
+            )
+
+        policy = _publish_policy(
+            host=su["host"],
+            port=su["port"],
+            dbname=su["dbname"],
+            user=su["user"],
+            staging_schema=stg_schema,
+            publish_schema=pub_schema,
+            reader_user=reader_role,
+            target_srid=7899,
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
         )
+
+        # The zero-row INSERT probe's ACL check passes for this writable role,
+        # so the not-denied branch fires: security-critical trip (T-04-02/CR-01).
+        with self.assertRaises(publish.ReaderWriteNotDenied):
+            publish.verify_reader_access(
+                policy,
+                reader_password=self._READER_PASSWORD,
+                published_tables=(target,),
+            )
 
 
 class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
