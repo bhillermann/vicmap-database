@@ -4,7 +4,7 @@ slug: "transactional-publication-and-access"
 # status lifecycle: draft (seeded by plan-phase) → validated (set by validate-phase §6)
 # audit-milestone §5.5 distinguishes NOT-VALIDATED (draft) from PARTIAL (validated + nyquist_compliant: false) (#2117)
 status: validated
-nyquist_compliant: false
+nyquist_compliant: true
 wave_0_complete: true
 created: "2026-09-23"
 validated: "2026-09-28"
@@ -25,9 +25,9 @@ validated: "2026-09-28"
 | **Quick run command** | `nix develop path:. -c python -m unittest tests.test_evidence tests.test_publish tests.test_publish_order -v` |
 | **Full suite command** | `nix develop path:. -c python -m unittest discover -s tests -p 'test_*.py'` |
 | **Live DB run** | `VICMAP_TEST_POSTGRES_DSN=<dsn> VICMAP_TEST_POSTGRES_SUPERUSER_DSN=<superuser-dsn> nix develop path:. -c python -m unittest tests.test_publish tests.test_publish_order -v` |
-| **Estimated runtime** | ~8 seconds (phase modules, offline); ~22 s including devshell entry |
+| **Estimated runtime** | ~8 s phase modules offline; ~50 s full suite with live DSNs |
 
-Live-DB test classes skip (not fail) when `VICMAP_TEST_POSTGRES_DSN` / `VICMAP_TEST_POSTGRES_SUPERUSER_DSN` are unset.
+Live-DB test classes skip (not fail) when `VICMAP_TEST_POSTGRES_DSN` / `VICMAP_TEST_POSTGRES_SUPERUSER_DSN` are unset. Both are exported by the operator's gitignored `.envrc` (passwords from opnix); the loader DSN must be exported *after* `use flake` so `$VICMAP_DB_PASSWORD` is resolved.
 
 ---
 
@@ -35,8 +35,8 @@ Live-DB test classes skip (not fail) when `VICMAP_TEST_POSTGRES_DSN` / `VICMAP_T
 
 - **After every task commit:** Run the quick run command
 - **After every plan wave:** Run the full suite command
-- **Before `/gsd-verify-work`:** Full suite must be green; live DB run for PUB-03/PUB-04 negative paths
-- **Max feedback latency:** ~22 seconds
+- **Before `/gsd-verify-work`:** Full suite must be green with live DSNs set (0 skipped)
+- **Max feedback latency:** ~50 seconds (live)
 
 ---
 
@@ -50,14 +50,14 @@ Live-DB test classes skip (not fail) when `VICMAP_TEST_POSTGRES_DSN` / `VICMAP_T
 | 04-02-01 | 02 | 1 | PUB-04 | — | Reader role distinct from loader in config | unit | `python -m unittest tests.test_staging.DatabaseConfigTest` | ✅ | ✅ green |
 | 04-02-02 | 02 | 1 | PUB-01, PUB-04 | T-04-02 | Loader append-only on audit; reader USAGE only, no write | static | plan inline `python -c` SQL checks (provision/least-privilege) | ✅ | ✅ green |
 | 04-02-03 | 02 | 1 | PUB-04 | — | Reader password via opnix, never literal | static | plan inline `python -c` flake check | ✅ | ✅ green |
-| 04-03-01 | 03 | 2 | PUB-01, EVID-01 | — | PASS row keyed by (run_ts, manifest_digest, target_table) | unit + live | `python -m unittest tests.test_manifest tests.test_staging` | ✅ | ✅ green |
+| 04-03-01 | 03 | 2 | PUB-01, EVID-01 | — | PASS row keyed by (run_ts, manifest_digest, target_table) | unit + live | `python -m unittest tests.test_manifest tests.test_staging` (`AuditValidationRecordTest` live) | ✅ | ✅ green |
 | 04-03-02 | 03 | 2 | PUB-01 | — | Audit rows written only after successful `run_staging` | unit | `python -m unittest tests.test_staging` | ✅ | ✅ green |
-| 04-04-01 | 04 | 3 | PUB-01, PUB-04 | T-04-04 | Catalog-discovered names; scoped drop, no CASCADE | unit | `python -m unittest tests.test_publish tests.test_staging.DriverImportPolicyTest` | ✅ | ✅ green |
-| 04-04-02 | 04 | 3 | PUB-01, PUB-02, PUB-03 | T-04-01, T-04-04 | All-or-nothing; prior tables survive failure; gate requires PASS rows | unit + live | `python -m unittest tests.test_publish` (`PromotionRollbackCompositionTest`, `LivePromotionRollbackTest`) | ✅ | ✅ green |
-| 04-05-01 | 05 | 4 | PUB-05 | — | Real reader login discovers + spatially queries | unit | `python -m unittest tests.test_publish` (`ReaderVerificationTest`) | ✅ | ✅ green |
-| 04-05-02 | 05 | 4 | PUB-04 | T-04-02 | Writable reader hard-stops with `ReaderWriteNotDenied` | unit + live | `python -m unittest tests.test_publish` (`LiveReaderWriteNotDeniedTest`) | ✅ | ✅ green |
+| 04-04-01 | 04 | 3 | PUB-01, PUB-04 | T-04-04 | Catalog-discovered names; scoped drop, no CASCADE | unit + live | `python -m unittest tests.test_publish tests.test_staging.DriverImportPolicyTest` (`LivePromoteOneLayerTest`) | ✅ | ✅ green |
+| 04-04-02 | 04 | 3 | PUB-01, PUB-02, PUB-03 | T-04-01, T-04-04 | All-or-nothing; prior tables survive failure; gate requires PASS rows | unit + live | `python -m unittest tests.test_publish` (`PromotionRollbackCompositionTest`, `LiveMultiLayerPromotionTest`, `LivePromotionRollbackTest`) | ✅ | ✅ green |
+| 04-05-01 | 05 | 4 | PUB-05 | — | Real reader login discovers + spatially queries | unit + live | `python -m unittest tests.test_publish` (`ReaderVerificationTest`, `LiveReaderVerificationTest`) | ✅ | ✅ green |
+| 04-05-02 | 05 | 4 | PUB-04 | T-04-02 | Writable reader hard-stops with `ReaderWriteNotDenied` | unit + live | `python -m unittest tests.test_publish` (`LiveReaderWriteDenialTest`, `LiveReaderWriteNotDeniedTest`) | ✅ | ✅ green |
 | 04-06-01 | 06 | 5 | EVID-01 | — | Summary re-read from durable artifacts; redacted | unit | `python -m unittest tests.test_publish` | ✅ | ✅ green |
-| 04-06-02 | 06 | 5 | EVID-01 | — | CLI composes promote → verify → summary | unit | `python -m unittest tests.test_publish` | ✅ | ✅ green |
+| 04-06-02 | 06 | 5 | EVID-01 | — | CLI composes promote → verify → summary | unit + live | `python -m unittest tests.test_publish` (`LivePublishOrderFullRunTest`) | ✅ | ✅ green |
 | 04-06-03 | 06 | 5 | EVID-02 | — | Non-zero exit naming boundary; no secrets | unit | `python -m unittest tests.test_publish_order` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
@@ -76,15 +76,9 @@ Existing infrastructure covers all phase requirements.
 
 ## Manual-Only Verifications
 
-These five `Live*` classes in `tests/test_publish.py` are skip-stubs: they call `skipTest` unconditionally even with live DSNs set. Their happy-path behavior is proven by the operator's live `publish_order.py` run and by the offline behavioral tests above.
+All phase behaviors have automated verification.
 
-| Behavior | Requirement | Why Manual | Test Instructions |
-|----------|-------------|------------|-------------------|
-| Single layer promotes into `vicmap`, staging table gone, `{target}_geom_idx` named, reader holds SELECT (`LivePromoteOneLayerTest`) | PUB-01, PUB-04 | Needs superuser-provisioned fixtures; stub never exercised | Run `publish_order.py` live; confirm `vicmap.<target>` exists, staging table dropped, index name via `pg_indexes`, `has_table_privilege('vicmap_reader', ..., 'SELECT')` |
-| Multiple layers commit together (`LiveMultiLayerPromotionTest`) | PUB-02 | Only a single-layer order (OK0VUZ) has been published live | Publish a multi-layer order; confirm all target tables appear in one commit |
-| Reader discovers tables and runs spatial query (`LiveReaderVerificationTest`) | PUB-05 | Stub | Inspect `summary.json` `reader.tables_discovered` > 0 and `spatial_query_row_count` > 0 |
-| Correctly-granted reader's INSERT is denied (`LiveReaderWriteDenialTest`) | PUB-04 | Stub | Inspect `summary.json` `reader.write_denied: true` |
-| Full `publish_order.py` run exits 0 and writes `summary.json` (`LivePublishOrderFullRunTest`) | EVID-01, EVID-02 | Stub | Run `publish_order.py`; confirm exit 0 and redacted `summary.json` (evidence: `runs/OK0VUZ/20260924T083137Z/summary.json`) |
+The five `Live*` classes previously listed here (skip-stubs) were implemented as real fixture-provisioning tests on 2026-09-28 and run green against the live server.
 
 ---
 
@@ -94,10 +88,10 @@ These five `Live*` classes in `tests/test_publish.py` are skip-stubs: they call 
 - [x] Sampling continuity: no 3 consecutive tasks without automated verify
 - [x] Wave 0 covers all MISSING references
 - [x] No watch-mode flags
-- [x] Feedback latency < 30s
-- [ ] `nyquist_compliant: true` set in frontmatter — held false: five live happy-path checks are manual-only
+- [x] Feedback latency < 60s (live)
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** approved 2026-09-28 (partial — manual-only live items above)
+**Approval:** approved 2026-09-28
 
 ---
 
@@ -110,3 +104,13 @@ These five `Live*` classes in `tests/test_publish.py` are skip-stubs: they call 
 | Escalated | 5 (manual-only, by operator choice) |
 
 Evidence: phase test modules `Ran 299 tests ... OK (skipped=42)` (skips are the live-DB classes, no DSN in this session); 15/16 plan inline checks pass, 1 stale literal (see ¹).
+
+## Validation Audit 2026-09-28 (re-run)
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 5 (prior manual-only live stubs) |
+| Resolved | 5 |
+| Escalated | 0 |
+
+Evidence: full suite with both live DSNs set — `Ran 621 tests ... OK` (0 skipped). All seven `tests.test_publish` `Live*` classes and all four `AuditValidationRecordTest` cases executed and passed. Post-run catalog check: 0 `livetest%` schemas, 0 roles, 0 audit rows left behind.
