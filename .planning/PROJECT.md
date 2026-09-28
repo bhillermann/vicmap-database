@@ -27,6 +27,7 @@ Vicmap updates must reach the correct PostGIS layers automatically without expos
 - ✓ The application can authenticate with Microsoft Graph and access the `automations@vegetationlink.com.au` Inbox — existing
 - ✓ Load delivered layers into staging and migrate them into production tables in a dedicated `vicmap` schema — Phase 4
 - ✓ Make the resulting production tables queryable by database users — Phase 4
+- ✓ Inventory abandoned WFS-attempt tables and remove only tables explicitly approved for deletion — Phase 5 (satisfied by manual cleanup; no WFS tables remained)
 
 ### Active
 
@@ -34,7 +35,6 @@ Vicmap updates must reach the correct PostGIS layers automatically without expos
 - [ ] Identify a real Vicmap ready-order email, download its order archive, and unpack it
 - [ ] Discover and read the delivered geospatial files
 - [ ] Connect to the existing local PostGIS instance on port 5432
-- [ ] Inventory abandoned WFS-attempt tables and remove only tables explicitly approved for deletion
 
 ### Out of Scope
 
@@ -73,6 +73,7 @@ No message interpretation, delivery ledger, download client, geodatabase inspect
 | Store delivery and load audit state in Postgres | Provides durable idempotency and a queryable operational history | — Pending |
 | Trust configured sender addresses or domains | Establishes a practical boundary before accepting emailed download links | — Pending |
 | Report through journald and failure-only email | Keeps routine operation observable without creating success-notification noise | — Pending |
+| Close legacy cleanup (Phase 5) as satisfied by manual action | Operator removed abandoned WFS tables manually; live 2026-09-28 catalog check found none, so building approval-gated deletion tooling had no targets | ✓ Phase 5 — CLN-01–CLN-05 satisfied; deletion tool deferred |
 
 ## Evolution
 
@@ -92,4 +93,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-25 after Phase 4*
+*Last updated: 2026-09-28 after Phase 5*

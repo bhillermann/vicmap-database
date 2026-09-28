@@ -10,7 +10,7 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 - [x] **Phase 2: Safe Geospatial Discovery** — Safely unpack the artifact and build a complete, collision-free layer manifest. (completed 2026-09-17)
 - [x] **Phase 3: Validated PostGIS Staging** — Preflight the live database and load every selected layer into validated isolated staging tables. (completed 2026-09-22)
 - [x] **Phase 4: Transactional Publication and Access** — Atomically publish the order into `vicmap` and prove non-owner access with redacted evidence. (completed 2026-09-25)
-- [ ] **Phase 5: Approved Legacy Cleanup** — Inventory suspected abandoned WFS tables and delete only exact, revalidated, explicitly approved targets.
+- [x] **Phase 5: Approved Legacy Cleanup** — Inventory suspected abandoned WFS tables and delete only exact, revalidated, explicitly approved targets. (completed 2026-09-28)
 
 ### Phase 1: Trusted Graph Acquisition
 
@@ -209,7 +209,9 @@ Plans:
 3. Execution drops only the approved exact targets, using neither wildcards nor `CASCADE`.
 4. Post-cleanup verification shows legitimate GIS tables and every unapproved table remain unchanged.
 
-**Plans:** TBD
+**Plans:** 0/0 plans complete
+
+**Status:** Complete — satisfied by operator manual cleanup; live catalog inspection 2026-09-28 confirmed no abandoned WFS tables remain (`05-VERIFICATION.md`, `05-CLOSEOUT.md`). No deletion tooling built.
 
 ## Progress
 
@@ -219,7 +221,7 @@ Plans:
 | 2. Safe Geospatial Discovery | 9/9 | Complete    | 2026-09-17 |
 | 3. Validated PostGIS Staging | 6/6 | Complete    | 2026-09-22 |
 | 4. Transactional Publication and Access | 6/6 | Complete    | 2026-09-25 |
-| 5. Approved Legacy Cleanup | 0/TBD | Not started | — |
+| 5. Approved Legacy Cleanup | 0/0 | Complete    | 2026-09-28 |
 
 ---
 *Roadmap created: 2026-09-01*

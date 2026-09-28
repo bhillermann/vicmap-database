@@ -1,14 +1,14 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.1
-current_phase: 5 — Approved Legacy Cleanup
+current_phase: 5
 current_phase_name: Approved Legacy Cleanup
-status: planning
-stopped_at: Phase 04 complete, ready to plan Phase 5
-last_updated: "2026-09-25T02:38:25.999Z"
-last_activity: 2026-09-25
-last_activity_desc: Phase 04 complete, transitioned to Phase 5
-state_head: 53115e03b12463f1905b9d6d8243eda9967ac44f
+status: completed
+stopped_at: Phase 5 closed as satisfied by manual cleanup; milestone v0.1 all phases complete
+last_updated: "2026-09-28T00:35:06.997Z"
+last_activity: 2026-09-28
+last_activity_desc: Phase 5 complete
+state_head: f83ab5880dea04280ad735ec553a13eb43f301e2
 progress:
   total_phases: 5
   completed_phases: 1
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 ## Position
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
-**Current phase:** 5 — Approved Legacy Cleanup
-**Status:** Ready to plan
+**Current phase:** 5
+**Status:** All phases complete
 
 ## Session Log
 
@@ -43,13 +43,13 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 Phase: 05 (Approved Legacy Cleanup) — ready to plan
 Plan: Not started
 Status: Ready to plan
-Last activity: 2026-09-25 — Phase 04 complete (verified passed), transitioned to Phase 5
+Last activity: 2026-09-28 — Phase 5 complete
 
 ## Session
 
-**Last session:** 2026-09-25 — Phase 4 verified `passed` and transitioned.
-**Stopped at:** Phase 04 complete, ready to plan Phase 5. The two live negative-path proofs (PUB-03 rollback, T-04-02 broken-grant reader trip) were induced live and green; 04-VERIFICATION.md re-verified at HEAD → `passed`. Phase 5 (Approved Legacy Cleanup) is now runnable.
-**Resume file:** None
+**Last session:** 2026-09-28T00:35:06.941Z
+**Stopped at:** Phase 5 closed as satisfied by manual cleanup; milestone v0.1 all phases complete
+**Resume file:** .planning/phases/05-approved-legacy-cleanup/05-CLOSEOUT.md
 
 Next: /gsd-verify-work 04 in a DB-enabled session → walk the 3 items in 04-VERIFICATION.md → status passed → Phase 4 complete → unblocks Phase 5.
 **Resume file:** 04-VERIFICATION.md (human_verification items, primary), 04-RESUME-LIVE.md (checklist §4-5)

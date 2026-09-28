@@ -39,11 +39,11 @@
 
 ### Legacy Cleanup
 
-- [ ] **CLN-01**: Operator can produce a read-only inventory of suspected abandoned WFS tables, including qualified name, owner, size, row estimate, geometry metadata, and dependencies.
-- [ ] **CLN-02**: No legacy table can be deleted unless its exact schema-qualified name appears in an explicitly approved cleanup list.
-- [ ] **CLN-03**: Operator can review a dry run after the database identity, target identity, and dependencies have been revalidated.
-- [ ] **CLN-04**: Operator can delete only the approved exact targets without wildcards or `CASCADE`.
-- [ ] **CLN-05**: Legitimate GIS tables and all unapproved tables remain unchanged.
+- [x] **CLN-01**: Operator can produce a read-only inventory of suspected abandoned WFS tables, including qualified name, owner, size, row estimate, geometry metadata, and dependencies.
+- [x] **CLN-02**: No legacy table can be deleted unless its exact schema-qualified name appears in an explicitly approved cleanup list.
+- [x] **CLN-03**: Operator can review a dry run after the database identity, target identity, and dependencies have been revalidated.
+- [x] **CLN-04**: Operator can delete only the approved exact targets without wildcards or `CASCADE`.
+- [x] **CLN-05**: Legitimate GIS tables and all unapproved tables remain unchanged.
 
 ### Proof Evidence
 
@@ -105,11 +105,11 @@
 | PUB-05 | Phase 4 | Complete |
 | EVID-01 | Phase 4 | Complete |
 | EVID-02 | Phase 4 | Complete |
-| CLN-01 | Phase 5 | Pending |
-| CLN-02 | Phase 5 | Pending |
-| CLN-03 | Phase 5 | Pending |
-| CLN-04 | Phase 5 | Pending |
-| CLN-05 | Phase 5 | Pending |
+| CLN-01 | Phase 5 | Complete |
+| CLN-02 | Phase 5 | Complete |
+| CLN-03 | Phase 5 | Complete |
+| CLN-04 | Phase 5 | Complete |
+| CLN-05 | Phase 5 | Complete |
 
 **Coverage:**
 
