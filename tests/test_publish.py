@@ -15,15 +15,25 @@ driver-isolation posture is respected in the tests too.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import io
 import json
 import os
+import secrets
+import shutil
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vicmap_acquire import download, publish, staging
+import publish_order
+from vicmap_acquire import discovery, download, publish, staging
+from vicmap_acquire import manifest as manifest_module
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 _RUN_TS = "20260918t041500z"
@@ -1030,48 +1040,15 @@ class _LivePublishMixin:
         connection.autocommit = True
         return connection
 
-
-class LivePromoteOneLayerTest(_LivePublishMixin, unittest.TestCase):
-    """Skips without live DSNs. Stages a tiny fixture table plus a PASS audit
-    row, promotes it, and asserts the committed post-state: ``vicmap.{target}``
-    exists, the staging table is gone, the geometry index is named
-    ``{target}_geom_idx``, and the reader role holds SELECT (PUB-01/PUB-04)."""
-
-    def test_single_layer_promotes_into_publish_schema(self):
-        self._require_live()
-        self.skipTest(
-            "live single-layer promotion requires an operator-provisioned "
-            "vicmap_audit schema, reader role, and staged fixture; deferred to "
-            "the operator's live run (see 04-04-SUMMARY.md)"
-        )
-
-
-class LiveMultiLayerPromotionTest(_LivePublishMixin, unittest.TestCase):
-    """Skips without live DSNs. All layers of a multi-layer order become
-    visible together in one committed transaction; no session ever sees a
-    partial order (PUB-02)."""
-
-    def test_all_layers_commit_together(self):
-        self._require_live()
-        self.skipTest(
-            "live multi-layer promotion requires operator-provisioned schemas, "
-            "roles, and staged fixtures; deferred to the operator's live run"
-        )
-
-
-class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
-    """Skips without live DSNs. An induced failure on a later layer rolls the
-    whole transaction back: no layer is promoted and every prior ``vicmap.*``
-    table -- including any dropped earlier in the same transaction -- remains
-    exactly as it was (PUB-03)."""
-
-    _READER_ROLE_PREFIX = "livetest_rbrdr_"
-    _RUN_TS = "20260925t000000z"
-    _DIGEST = "d" * 64
+    # Three points inside Victoria's WGS84 extent (the envelope
+    # verify_reader_access queries) and one far outside it (Perth), so the
+    # spatial query's row count proves the envelope actually filters.
+    _VICTORIA_POINTS = ((145.0, -37.0), (144.96, -37.81), (147.0, -36.5))
+    _OUTSIDE_POINT = (115.86, -31.95)
 
     def _ensure_audit_table(self, cursor, created):
         """Create ``vicmap_audit.staging_validation`` only if it is absent,
-        recording what was created so tearDown drops only that. Mirrors
+        recording what was created so cleanup drops only that. Mirrors
         ``AuditValidationRecordTest``'s provision-if-missing shape."""
 
         cursor.execute("SELECT to_regnamespace('vicmap_audit')")
@@ -1093,6 +1070,383 @@ class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
                 "PRIMARY KEY (run_ts, manifest_digest, target_table))"
             )
             created["audit_table"] = True
+
+    def _register_fixture_cleanup(
+        self, connection, *, schemas=(), roles=(), audit_keys=(), created=None
+    ):
+        """Drop exactly the throwaway objects a live test made: its audit rows
+        (by ``(run_ts, manifest_digest)`` only, never a real run's), its
+        schemas, and its roles -- ``DROP OWNED BY`` first so a role's grants on
+        the shared ``vicmap_audit`` table never block ``DROP ROLE`` -- then the
+        audit table/schema only if this test created them. Also run once
+        immediately, so leftovers from a crashed earlier run with the same pid
+        never make fixture setup fail."""
+
+        sql = publish.sql
+        created = created if created is not None else {}
+
+        def _cleanup():
+            with connection.cursor() as cur:
+                cur.execute("SELECT to_regclass('vicmap_audit.staging_validation')")
+                (audit_oid,) = cur.fetchone()
+                if audit_oid is not None:
+                    for run_ts, digest in audit_keys:
+                        cur.execute(
+                            "DELETE FROM vicmap_audit.staging_validation "
+                            "WHERE run_ts = %s AND manifest_digest = %s",
+                            (run_ts, digest),
+                        )
+                for schema in schemas:
+                    cur.execute(
+                        sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                            sql.Identifier(schema)
+                        )
+                    )
+                for role in roles:
+                    cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+                    if cur.fetchone() is not None:
+                        cur.execute(
+                            sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role))
+                        )
+                        cur.execute(
+                            sql.SQL("DROP ROLE {}").format(sql.Identifier(role))
+                        )
+                if created.get("audit_table"):
+                    cur.execute("DROP TABLE IF EXISTS vicmap_audit.staging_validation")
+                if created.get("audit_schema"):
+                    cur.execute("DROP SCHEMA IF EXISTS vicmap_audit")
+
+        _cleanup()
+        self.addCleanup(_cleanup)
+
+    def _create_point_table(self, cursor, schema, table, *, gist_index, points):
+        """A ``(gid bigint PRIMARY KEY, geom geometry(Point, 7899))`` table
+        with a GiST index -- the shape staging produces and
+        ``_promote_layer``'s catalog-driven renames and ``verify_reader_access``'s
+        ``gid``/``geom`` queries expect -- holding one row per WGS84 point."""
+
+        sql = publish.sql
+        cursor.execute(
+            sql.SQL(
+                "CREATE TABLE {} (gid bigint PRIMARY KEY, geom geometry(Point, 7899))"
+            ).format(sql.Identifier(schema, table))
+        )
+        cursor.execute(
+            sql.SQL("CREATE INDEX {} ON {} USING gist (geom)").format(
+                sql.Identifier(gist_index), sql.Identifier(schema, table)
+            )
+        )
+        for gid, (lon, lat) in enumerate(points, start=1):
+            cursor.execute(
+                sql.SQL(
+                    "INSERT INTO {} (gid, geom) VALUES (%s, "
+                    "ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 7899))"
+                ).format(sql.Identifier(schema, table)),
+                (gid, lon, lat),
+            )
+
+    def _insert_pass_row(self, cursor, *, run_ts, digest, target, row_count):
+        """One D-68 PASS gate row carrying the spatial facts
+        ``assemble_summary`` requires of a spatial layer."""
+
+        cursor.execute(
+            "INSERT INTO vicmap_audit.staging_validation "
+            "(run_ts, manifest_digest, target_table, staging_table, verdict, "
+            "spatial, row_count, srid, geometry_type, repaired_count) "
+            "VALUES (%s, %s, %s, %s, 'pass', true, %s, 7899, 'POINT', 0)",
+            (
+                run_ts,
+                digest,
+                target,
+                staging.staging_table_name(target, run_ts),
+                row_count,
+            ),
+        )
+
+    def _superuser_loader_policy(self, *, stg_schema, pub_schema, reader_role):
+        """A policy whose loader is the superuser itself -- as
+        ``LivePromotionRollbackTest`` does -- so fixtures need no ownership
+        transfers. The reader is always a distinct throwaway role."""
+
+        su = self._superuser_params()
+        return _publish_policy(
+            host=su["host"],
+            port=su["port"],
+            dbname=su["dbname"],
+            user=su["user"],
+            staging_schema=stg_schema,
+            publish_schema=pub_schema,
+            reader_user=reader_role,
+            target_srid=7899,
+            connect_timeout_seconds=self._CONNECT_TIMEOUT_SECONDS,
+        )
+
+    def _scalar(self, connection, query, params=()):
+        with connection.cursor() as cursor:
+            cursor.execute(query, params)
+            (value,) = cursor.fetchone()
+        return value
+
+
+class LivePromoteOneLayerTest(_LivePublishMixin, unittest.TestCase):
+    """Skips without live DSNs. Stages a tiny fixture table plus a PASS audit
+    row over an existing published table, promotes it, and asserts the
+    committed post-state: ``{publish}.{target}`` is the staged table (the
+    prior one replaced), the staging table is gone, the PK and geometry index
+    carry canonical names, and the reader role holds SELECT but not INSERT
+    (PUB-01/PUB-04/D-67/D-71/D-73)."""
+
+    _RUN_TS = "20260928t000001z"
+    _DIGEST = "e" * 64
+
+    def test_single_layer_promotes_into_publish_schema(self):
+        self._require_live()
+        connection = self._open_superuser()
+        self.addCleanup(connection.close)
+        sql = publish.sql
+
+        pid = os.getpid()
+        pub_schema = f"livetest_p1pub_{pid}"
+        stg_schema = f"livetest_p1stg_{pid}"
+        reader_role = f"livetest_p1rdr_{pid}"
+        target = f"livetest_p1_{pid}"
+        staging_table = staging.staging_table_name(target, self._RUN_TS)
+
+        created = {"audit_schema": False, "audit_table": False}
+        self._register_fixture_cleanup(
+            connection,
+            schemas=(pub_schema, stg_schema),
+            roles=(reader_role,),
+            audit_keys=((self._RUN_TS, self._DIGEST),),
+            created=created,
+        )
+
+        with connection.cursor() as cursor:
+            for schema in (pub_schema, stg_schema):
+                cursor.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(schema)
+                    )
+                )
+                cursor.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            cursor.execute(
+                sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(reader_role))
+            )
+            # The prior published table the promotion must replace (D-71).
+            cursor.execute(
+                sql.SQL("CREATE TABLE {} (gid bigint, note text)").format(
+                    sql.Identifier(pub_schema, target)
+                )
+            )
+            cursor.execute(
+                sql.SQL("INSERT INTO {} VALUES (999, 'prior-marker')").format(
+                    sql.Identifier(pub_schema, target)
+                )
+            )
+            self._create_point_table(
+                cursor,
+                stg_schema,
+                staging_table,
+                gist_index=f"livetest_p1_gix_{pid}",
+                points=self._VICTORIA_POINTS,
+            )
+            self._ensure_audit_table(cursor, created)
+            self._insert_pass_row(
+                cursor,
+                run_ts=self._RUN_TS,
+                digest=self._DIGEST,
+                target=target,
+                row_count=len(self._VICTORIA_POINTS),
+            )
+
+        policy = self._superuser_loader_policy(
+            stg_schema=stg_schema, pub_schema=pub_schema, reader_role=reader_role
+        )
+        result = publish.promote_order(
+            _one_layer_manifest(target),
+            policy,
+            self._superuser_params()["password"],
+            run_timestamp=self._RUN_TS,
+            manifest_digest=self._DIGEST,
+        )
+
+        self.assertEqual((target,), result.published_tables)
+        self.assertTrue(result.server_version.startswith("PostgreSQL"))
+
+        qualified = f"{pub_schema}.{target}"
+        # The staged rows replaced the prior table: no marker row survives.
+        self.assertEqual(
+            len(self._VICTORIA_POINTS),
+            self._scalar(
+                connection,
+                sql.SQL("SELECT count(*) FROM {}").format(
+                    sql.Identifier(pub_schema, target)
+                ),
+            ),
+        )
+        self.assertEqual(
+            0,
+            self._scalar(
+                connection,
+                sql.SQL("SELECT count(*) FROM {} WHERE gid = 999").format(
+                    sql.Identifier(pub_schema, target)
+                ),
+            ),
+        )
+        # The staging table moved; nothing is left behind in staging.
+        self.assertIsNone(
+            self._scalar(
+                connection, "SELECT to_regclass(%s)", (f"{stg_schema}.{staging_table}",)
+            )
+        )
+        # D-67 canonical names, read back from the catalog after commit.
+        self.assertEqual(
+            1,
+            self._scalar(
+                connection,
+                "SELECT count(*) FROM pg_indexes "
+                "WHERE schemaname = %s AND tablename = %s AND indexname = %s",
+                (pub_schema, target, f"{target}_geom_idx"),
+            ),
+        )
+        self.assertEqual(
+            1,
+            self._scalar(
+                connection,
+                "SELECT count(*) FROM pg_constraint "
+                "WHERE conrelid = to_regclass(%s) AND contype = 'p' AND conname = %s",
+                (qualified, f"{target}_pkey"),
+            ),
+        )
+        # D-73: SELECT granted in the same transaction; no write privilege.
+        self.assertTrue(
+            self._scalar(
+                connection,
+                "SELECT has_table_privilege(%s, %s, 'SELECT')",
+                (reader_role, qualified),
+            )
+        )
+        self.assertFalse(
+            self._scalar(
+                connection,
+                "SELECT has_table_privilege(%s, %s, 'INSERT')",
+                (reader_role, qualified),
+            )
+        )
+
+
+class LiveMultiLayerPromotionTest(_LivePublishMixin, unittest.TestCase):
+    """Skips without live DSNs. All layers of a multi-layer order become
+    visible together in one committed transaction; no session ever sees a
+    partial order (PUB-02). The single-transaction proof is read from the
+    catalog itself: every promoted table's ``pg_class`` row was last written
+    by the same transaction id (``xmin``)."""
+
+    _RUN_TS = "20260928t000002z"
+    _DIGEST = "f" * 64
+
+    def test_all_layers_commit_together(self):
+        self._require_live()
+        connection = self._open_superuser()
+        self.addCleanup(connection.close)
+        sql = publish.sql
+
+        pid = os.getpid()
+        pub_schema = f"livetest_mlpub_{pid}"
+        stg_schema = f"livetest_mlstg_{pid}"
+        reader_role = f"livetest_mlrdr_{pid}"
+        targets = tuple(f"livetest_ml{i}_{pid}" for i in range(3))
+
+        created = {"audit_schema": False, "audit_table": False}
+        self._register_fixture_cleanup(
+            connection,
+            schemas=(pub_schema, stg_schema),
+            roles=(reader_role,),
+            audit_keys=((self._RUN_TS, self._DIGEST),),
+            created=created,
+        )
+
+        with connection.cursor() as cursor:
+            for schema in (pub_schema, stg_schema):
+                cursor.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(schema)
+                    )
+                )
+                cursor.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            cursor.execute(
+                sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(reader_role))
+            )
+            self._ensure_audit_table(cursor, created)
+            for i, target in enumerate(targets):
+                self._create_point_table(
+                    cursor,
+                    stg_schema,
+                    staging.staging_table_name(target, self._RUN_TS),
+                    gist_index=f"livetest_ml{i}_gix_{pid}",
+                    points=self._VICTORIA_POINTS[: i + 1],
+                )
+                self._insert_pass_row(
+                    cursor,
+                    run_ts=self._RUN_TS,
+                    digest=self._DIGEST,
+                    target=target,
+                    row_count=i + 1,
+                )
+
+        manifest = types.SimpleNamespace(
+            layers=tuple(types.SimpleNamespace(target_table=t) for t in targets)
+        )
+        policy = self._superuser_loader_policy(
+            stg_schema=stg_schema, pub_schema=pub_schema, reader_role=reader_role
+        )
+        result = publish.promote_order(
+            manifest,
+            policy,
+            self._superuser_params()["password"],
+            run_timestamp=self._RUN_TS,
+            manifest_digest=self._DIGEST,
+        )
+
+        self.assertEqual(targets, result.published_tables)
+        xmins = set()
+        for i, target in enumerate(targets):
+            self.assertEqual(
+                i + 1,
+                self._scalar(
+                    connection,
+                    sql.SQL("SELECT count(*) FROM {}").format(
+                        sql.Identifier(pub_schema, target)
+                    ),
+                ),
+            )
+            self.assertIsNone(
+                self._scalar(
+                    connection,
+                    "SELECT to_regclass(%s)",
+                    (f"{stg_schema}.{staging.staging_table_name(target, self._RUN_TS)}",),
+                )
+            )
+            xmins.add(
+                self._scalar(
+                    connection,
+                    "SELECT xmin::text FROM pg_class WHERE oid = to_regclass(%s)",
+                    (f"{pub_schema}.{target}",),
+                )
+            )
+        # PUB-02: one transaction made every layer visible at once.
+        self.assertEqual(1, len(xmins), xmins)
+
+
+class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
+    """Skips without live DSNs. An induced failure on a later layer rolls the
+    whole transaction back: no layer is promoted and every prior ``vicmap.*``
+    table -- including any dropped earlier in the same transaction -- remains
+    exactly as it was (PUB-03)."""
+
+    _READER_ROLE_PREFIX = "livetest_rbrdr_"
+    _RUN_TS = "20260925t000000z"
+    _DIGEST = "d" * 64
 
     def test_induced_failure_preserves_every_prior_table(self):
         self._require_live()
@@ -1265,27 +1619,173 @@ class LiveReaderVerificationTest(_LivePublishMixin, unittest.TestCase):
     Victoria-extent GiST-exercising spatial query, and confirms the rows are
     selectable (PUB-04/PUB-05/D-74)."""
 
+    _READER_PASSWORD = "livetest-reader-pw-3a91"
+
     def test_reader_discovers_and_spatially_queries_published_tables(self):
         self._require_live()
-        self.skipTest(
-            "live reader verification requires an operator-provisioned reader "
-            "role (D-72), VICMAP_READER_PASSWORD (D-74 opnix wiring), and a "
-            "promoted spatial fixture from a completed 04-04 run; deferred to "
-            "the operator's live run (see 04-05-SUMMARY.md)"
+        connection = self._open_superuser()
+        self.addCleanup(connection.close)
+        sql = publish.sql
+
+        pid = os.getpid()
+        pub_schema = f"livetest_rvpub_{pid}"
+        # Never created -- PublishPolicy only needs a valid, distinct name.
+        stg_schema = f"livetest_rvstg_{pid}"
+        reader_role = f"livetest_rvrdr_{pid}"
+        target = f"livetest_rv_{pid}"
+        hidden = f"livetest_rvhidden_{pid}"
+
+        self._register_fixture_cleanup(
+            connection, schemas=(pub_schema,), roles=(reader_role,)
         )
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(pub_schema)
+                )
+            )
+            cursor.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(pub_schema)))
+            cursor.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                    sql.Identifier(reader_role), sql.Literal(self._READER_PASSWORD)
+                )
+            )
+            cursor.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                    sql.Identifier(pub_schema), sql.Identifier(reader_role)
+                )
+            )
+            self._create_point_table(
+                cursor,
+                pub_schema,
+                target,
+                gist_index=f"livetest_rv_gix_{pid}",
+                points=self._VICTORIA_POINTS + (self._OUTSIDE_POINT,),
+            )
+            cursor.execute(
+                sql.SQL("GRANT SELECT ON {} TO {}").format(
+                    sql.Identifier(pub_schema, target), sql.Identifier(reader_role)
+                )
+            )
+            # A sibling table the reader holds no privilege on: discovery via
+            # information_schema must not list it (PUB-05's discovery proof is
+            # privilege-filtered, not a bare catalog listing).
+            cursor.execute(
+                sql.SQL("CREATE TABLE {} (gid bigint)").format(
+                    sql.Identifier(pub_schema, hidden)
+                )
+            )
+
+        policy = self._superuser_loader_policy(
+            stg_schema=stg_schema, pub_schema=pub_schema, reader_role=reader_role
+        )
+        verification = publish.verify_reader_access(
+            policy,
+            reader_password=self._READER_PASSWORD,
+            published_tables=(target,),
+        )
+
+        self.assertEqual((target,), verification.tables_discovered)
+        # Only the in-Victoria rows fall inside the transformed envelope.
+        self.assertEqual(len(self._VICTORIA_POINTS), verification.spatial_query_row_count)
+        self.assertIs(True, verification.write_denied)
 
 
 class LiveReaderWriteDenialTest(_LivePublishMixin, unittest.TestCase):
     """Skips without live DSNs. The reader's attempted write is denied by a
     real executed zero-row ``INSERT ... SELECT ... WHERE false`` that raises
-    ``InsufficientPrivilege`` (PUB-04's negative half of the access proof)."""
+    ``InsufficientPrivilege`` (PUB-04's negative half of the access proof).
+    The reader holds only the D-72 baseline schema ``USAGE``; its table
+    privilege comes solely from ``promote_order``'s own D-73 grant, so this
+    proves the grant the promotion actually issues is read-only."""
+
+    _READER_PASSWORD = "livetest-reader-pw-5d0e"
+    _RUN_TS = "20260928t000003z"
+    _DIGEST = "0" * 64
 
     def test_insufficient_privilege_path_returns_write_denied_true(self):
         self._require_live()
-        self.skipTest(
-            "live write-denial proof requires an operator-provisioned reader "
-            "role with baseline USAGE only (D-72) and a promoted fixture "
-            "table; deferred to the operator's live run"
+        connection = self._open_superuser()
+        self.addCleanup(connection.close)
+        sql = publish.sql
+
+        pid = os.getpid()
+        pub_schema = f"livetest_wdpub_{pid}"
+        stg_schema = f"livetest_wdstg_{pid}"
+        reader_role = f"livetest_wdrdr_{pid}"
+        target = f"livetest_wd_{pid}"
+
+        created = {"audit_schema": False, "audit_table": False}
+        self._register_fixture_cleanup(
+            connection,
+            schemas=(pub_schema, stg_schema),
+            roles=(reader_role,),
+            audit_keys=((self._RUN_TS, self._DIGEST),),
+            created=created,
+        )
+
+        with connection.cursor() as cursor:
+            for schema in (pub_schema, stg_schema):
+                cursor.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(schema)
+                    )
+                )
+                cursor.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            cursor.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                    sql.Identifier(reader_role), sql.Literal(self._READER_PASSWORD)
+                )
+            )
+            cursor.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                    sql.Identifier(pub_schema), sql.Identifier(reader_role)
+                )
+            )
+            self._create_point_table(
+                cursor,
+                stg_schema,
+                staging.staging_table_name(target, self._RUN_TS),
+                gist_index=f"livetest_wd_gix_{pid}",
+                points=self._VICTORIA_POINTS,
+            )
+            self._ensure_audit_table(cursor, created)
+            self._insert_pass_row(
+                cursor,
+                run_ts=self._RUN_TS,
+                digest=self._DIGEST,
+                target=target,
+                row_count=len(self._VICTORIA_POINTS),
+            )
+
+        policy = self._superuser_loader_policy(
+            stg_schema=stg_schema, pub_schema=pub_schema, reader_role=reader_role
+        )
+        result = publish.promote_order(
+            _one_layer_manifest(target),
+            policy,
+            self._superuser_params()["password"],
+            run_timestamp=self._RUN_TS,
+            manifest_digest=self._DIGEST,
+        )
+        verification = publish.verify_reader_access(
+            policy,
+            reader_password=self._READER_PASSWORD,
+            published_tables=result.published_tables,
+        )
+
+        self.assertIs(True, verification.write_denied)
+        self.assertEqual((target,), verification.tables_discovered)
+        # The denied probe left the published rows exactly as promoted.
+        self.assertEqual(
+            len(self._VICTORIA_POINTS),
+            self._scalar(
+                connection,
+                sql.SQL("SELECT count(*) FROM {}").format(
+                    sql.Identifier(pub_schema, target)
+                ),
+            ),
         )
 
 
@@ -1391,24 +1891,270 @@ class LiveReaderWriteNotDeniedTest(_LivePublishMixin, unittest.TestCase):
 class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
     """Skips without live DSNs. ``publish_order.py``'s full ordered
     composition (load-config -> gate -> promote -> reader-verify -> summary,
-    D-77) exits 0 and writes ``summary.json`` into the run directory on a
-    real, fully-provisioned order (D-70's ``vicmap_audit`` schema, D-72's
-    reader role, a completed Phase 3 staging run, and both
-    ``VICMAP_DB_PASSWORD``/``VICMAP_READER_PASSWORD`` resolvable). This is a
-    code-only phase delivery (per plan): the CLI composition itself is
-    exercised offline by the CLI-composition and exit-code contract tests in
-    this file and in ``tests/test_publish_order.py``; this live case is
-    deferred to the operator's own end-to-end run."""
+    D-77) exits 0 and writes ``summary.json`` into the run directory against
+    a real server. The fixture is a throwaway but complete order: the
+    repository's own ``vicmap.toml`` re-pointed at throwaway schemas/roles, a
+    real artifact + provenance sidecar, a real ``manifest.json``, a staged
+    table owned by a genuine non-superuser loader login, a PASS audit row
+    (D-70), and a reader login holding only baseline schema ``USAGE`` (D-72),
+    both passwords supplied through the environment exactly as in production
+    (D-58/D-74). Asserts the summary's every EVID-01 link fact, the single
+    rendered success event, and that no secret or local path leaks."""
+
+    _RUN_DIR_NAME = "20260928T000004Z"
+    _FINGERPRINT = "0123456789abcdef"
+
+    def _write_config(self, config_root: Path, *, order_id, loader_role, reader_role,
+                      stg_schema, pub_schema) -> Path:
+        """The repository's own ``vicmap.toml`` with only the order, database
+        identity, and schema/role names swapped for this test's throwaway
+        ones -- so the config loaders' full five-section contract is exercised
+        exactly as in production. Each substitution must match exactly once,
+        so a drifted ``vicmap.toml`` fails loudly instead of silently testing
+        the wrong database."""
+
+        su = self._superuser_params()
+        host = "127.0.0.1" if su["host"] == "localhost" else su["host"]
+        text = (REPO_ROOT / "vicmap.toml").read_text(encoding="utf-8")
+        for old, new in (
+            ('allowed_order_ids = ["OK0VUZ"]', f'allowed_order_ids = ["{order_id}"]'),
+            ('host = "127.0.0.1"', f'host = "{host}"'),
+            ("port = 5432", f"port = {su['port']}"),
+            ('dbname = "vicmap"', f'dbname = "{su["dbname"]}"'),
+            ('user = "vicmap_loader"', f'user = "{loader_role}"'),
+            ('staging_schema = "vicmap_staging"', f'staging_schema = "{stg_schema}"'),
+            ('publish_schema = "vicmap"', f'publish_schema = "{pub_schema}"'),
+            ('reader_user = "vicmap_reader"', f'reader_user = "{reader_role}"'),
+        ):
+            self.assertEqual(1, text.count(old), f"vicmap.toml drifted: {old!r}")
+            text = text.replace(old, new)
+        config_path = config_root / "vicmap.toml"
+        config_path.write_text(text, encoding="utf-8")
+        return config_path
+
+    def _write_run_artifacts(self, config_root: Path, *, order_id, target) -> tuple:
+        """A real Phase 1 artifact + provenance sidecar and a real Phase 2
+        ``manifest.json`` (+ digest sidecar) under ``config_root``, laid out
+        exactly where ``publish_order`` looks for them. Returns
+        ``(run_directory, artifact_sha256, manifest_digest)``."""
+
+        artifacts_dir = config_root / "artifacts"
+        artifacts_dir.mkdir()
+        artifact_path = artifacts_dir / f"Order_{order_id}.zip"
+        artifact_bytes = b"livetest artifact bytes\n"
+        artifact_path.write_bytes(artifact_bytes)
+        artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+        download.write_provenance_sidecar(
+            artifact_path,
+            order_id=order_id,
+            message_fingerprint=self._FINGERPRINT,
+            sha256=artifact_sha256,
+            byte_count=len(artifact_bytes),
+        )
+
+        run_directory = config_root / "runs" / order_id / self._RUN_DIR_NAME
+        run_directory.mkdir(parents=True)
+        profile = discovery.LayerProfile(
+            dataset_relative_path="livetest/LIVETEST.gdb",
+            dataset_stem="LIVETEST",
+            layer_name="POINTS",
+            driver="OpenFileGDB",
+            spatial=True,
+            geometry_type="Point",
+            geometry_column="SHAPE",
+            fid_column="OBJECTID",
+            feature_count=len(self._VICTORIA_POINTS),
+            source_wkt='PROJCRS["GDA2020 / Vicgrid"]',
+            epsg=7899,
+            extent=(2126780.0, 2259755.0, 2934322.0, 2826389.0),
+            fields=(
+                discovery.FieldProfile(
+                    name="UFI", ogr_type="Integer", width=None, precision=None,
+                    nullable=True,
+                ),
+            ),
+        )
+        manifest = manifest_module.build_manifest(
+            order_id=order_id,
+            run_timestamp=self._RUN_DIR_NAME,
+            run_directory=run_directory,
+            artifact_sha256=artifact_sha256,
+            artifact_byte_count=len(artifact_bytes),
+            message_fingerprint=self._FINGERPRINT,
+            layers=(manifest_module.ManifestLayer(profile=profile, target_table=target),),
+            companions=(),
+        )
+        digest = manifest_module.write_manifest(manifest, run_directory)
+        return run_directory, artifact_sha256, digest
 
     def test_full_run_exits_zero_and_writes_summary_json(self):
         self._require_live()
-        self.skipTest(
-            "a live end-to-end publish_order.py run requires an "
-            "operator-provisioned vicmap_audit schema (D-70), a vicmap_reader "
-            "role plus a resolvable VICMAP_READER_PASSWORD (D-72/D-74), and a "
-            "completed Phase 3 staging run over a real order; deferred to the "
-            "operator's live run (see this plan's SUMMARY.md for exact resume "
-            "steps)"
+        connection = self._open_superuser()
+        self.addCleanup(connection.close)
+        sql = publish.sql
+
+        pid = os.getpid()
+        order_id = f"LIVETEST{pid}"
+        pub_schema = f"livetest_frpub_{pid}"
+        stg_schema = f"livetest_frstg_{pid}"
+        # A genuine non-superuser loader login, so the CLI's whole path runs
+        # with exactly the privileges D-70/D-72 provisioning grants.
+        loader_role = f"livetest_frld_{pid}"
+        reader_role = f"livetest_frrd_{pid}"
+        target = f"livetest_fr_{pid}"
+        loader_password = secrets.token_hex(16)
+        reader_password = secrets.token_hex(16)
+
+        config_root = Path(tempfile.mkdtemp(prefix="livetest-publish-order-"))
+        self.addCleanup(shutil.rmtree, config_root, ignore_errors=True)
+        config_path = self._write_config(
+            config_root,
+            order_id=order_id,
+            loader_role=loader_role,
+            reader_role=reader_role,
+            stg_schema=stg_schema,
+            pub_schema=pub_schema,
+        )
+        run_directory, artifact_sha256, digest = self._write_run_artifacts(
+            config_root, order_id=order_id, target=target
+        )
+
+        created = {"audit_schema": False, "audit_table": False}
+        self._register_fixture_cleanup(
+            connection,
+            schemas=(pub_schema, stg_schema),
+            roles=(loader_role, reader_role),
+            audit_keys=((self._RUN_DIR_NAME, digest),),
+            created=created,
+        )
+
+        staging_table = staging.staging_table_name(target, self._RUN_DIR_NAME)
+        with connection.cursor() as cursor:
+            for role, password in (
+                (loader_role, loader_password),
+                (reader_role, reader_password),
+            ):
+                cursor.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                        sql.Identifier(role), sql.Literal(password)
+                    )
+                )
+            for schema in (pub_schema, stg_schema):
+                cursor.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(schema)
+                    )
+                )
+                cursor.execute(
+                    sql.SQL("CREATE SCHEMA {} AUTHORIZATION {}").format(
+                        sql.Identifier(schema), sql.Identifier(loader_role)
+                    )
+                )
+            # D-72 baseline: the reader holds schema USAGE only; its table
+            # SELECT must come from the promotion's own D-73 grant.
+            cursor.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                    sql.Identifier(pub_schema), sql.Identifier(reader_role)
+                )
+            )
+            self._create_point_table(
+                cursor,
+                stg_schema,
+                staging_table,
+                gist_index=f"livetest_fr_gix_{pid}",
+                points=self._VICTORIA_POINTS,
+            )
+            cursor.execute(
+                sql.SQL("ALTER TABLE {} OWNER TO {}").format(
+                    sql.Identifier(stg_schema, staging_table),
+                    sql.Identifier(loader_role),
+                )
+            )
+            # D-70: the loader reads (and in production appends to) the audit
+            # table; this test only needs the gate's and summary's reads.
+            self._ensure_audit_table(cursor, created)
+            cursor.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA vicmap_audit TO {}").format(
+                    sql.Identifier(loader_role)
+                )
+            )
+            cursor.execute(
+                sql.SQL("GRANT SELECT ON vicmap_audit.staging_validation TO {}").format(
+                    sql.Identifier(loader_role)
+                )
+            )
+            self._insert_pass_row(
+                cursor,
+                run_ts=self._RUN_DIR_NAME,
+                digest=digest,
+                target=target,
+                row_count=len(self._VICTORIA_POINTS),
+            )
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.dict(
+            os.environ,
+            {
+                staging.PASSWORD_ENV_VAR: loader_password,
+                publish.READER_PASSWORD_ENV_VAR: reader_password,
+            },
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exit_code = publish_order.main(["--config", str(config_path)])
+
+        output = stdout.getvalue() + stderr.getvalue()
+        self.assertEqual(0, exit_code, output)
+
+        summary_path = run_directory / "summary.json"
+        summary_text = summary_path.read_text(encoding="utf-8")
+        summary = json.loads(summary_text)
+        self.assertEqual(order_id, summary["order_id"])
+        self.assertEqual(self._FINGERPRINT, summary["message_fingerprint"])
+        self.assertEqual(artifact_sha256, summary["artifact_sha256"])
+        self.assertEqual(digest, summary["manifest_sha256"])
+        self.assertEqual(1, summary["layer_count"])
+        self.assertEqual([target], summary["published_tables"])
+        self.assertEqual(
+            [
+                {
+                    "target_table": target,
+                    "spatial": True,
+                    "row_count": len(self._VICTORIA_POINTS),
+                    "srid": 7899,
+                    "geometry_type": "POINT",
+                    "repaired_count": 0,
+                }
+            ],
+            summary["staging_validation"],
+        )
+        self.assertEqual(
+            {
+                "tables_discovered": [target],
+                "tables_discovered_count": 1,
+                "spatial_query_row_count": len(self._VICTORIA_POINTS),
+                "write_denied": True,
+            },
+            summary["reader"],
+        )
+
+        # Exactly one rendered event: the publication_summary mirror.
+        events = [json.loads(line) for line in stdout.getvalue().splitlines() if line]
+        self.assertEqual(["publication_summary"], [e.get("event") for e in events])
+
+        # EVID-01 redaction: no secret or local path reaches either output.
+        for text in (summary_text, output):
+            self.assertNotIn(loader_password, text)
+            self.assertNotIn(reader_password, text)
+            self.assertNotIn(str(config_root), text)
+
+        # The promotion really committed under the throwaway loader.
+        self.assertEqual(
+            len(self._VICTORIA_POINTS),
+            self._scalar(
+                connection,
+                sql.SQL("SELECT count(*) FROM {}").format(
+                    sql.Identifier(pub_schema, target)
+                ),
+            ),
         )
 
 
