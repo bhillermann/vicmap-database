@@ -62,7 +62,7 @@ Live-DB test classes skip (not fail) when `VICMAP_TEST_POSTGRES_DSN` / `VICMAP_T
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
-¹ The plan's inline check for 04-01-02 hardcodes 16 stages / 41 reasons and fails (actual 20 / 54). This was a documented plan deviation (baseline was larger than estimated); the behavioral tests in `tests.test_evidence` are green. The stale literal is plan noise, not a code defect.
+¹ The plan's inline check for 04-01-02 originally hardcoded 16 stages / 41 reasons (stale 13/34 baseline; real baseline 17/47, documented in 04-01-SUMMARY.md Deviations). Corrected in 04-01-PLAN.md on 2026-09-28 to 20 / 54; the check now passes.
 
 The 04-04 `checkpoint:decision` task (D-66/D-67 contract confirmation) is a human decision gate and has no automated verify by design.
 
@@ -103,7 +103,7 @@ The five `Live*` classes previously listed here (skip-stubs) were implemented as
 | Resolved | 0 |
 | Escalated | 5 (manual-only, by operator choice) |
 
-Evidence: phase test modules `Ran 299 tests ... OK (skipped=42)` (skips are the live-DB classes, no DSN in this session); 15/16 plan inline checks pass, 1 stale literal (see ¹).
+Evidence: phase test modules `Ran 299 tests ... OK (skipped=42)` (skips are the live-DB classes, no DSN in this session); 15/16 plan inline checks pass, 1 stale literal (see ¹; since corrected, 16/16 pass).
 
 ## Validation Audit 2026-09-28 (re-run)
 
