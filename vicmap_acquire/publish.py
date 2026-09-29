@@ -651,10 +651,28 @@ def promotion_result_from_records(
     this order's earlier, committed run already wrote -- never by
     re-querying ``SELECT version()`` live, which would describe this run's
     own connection, not the promotion that actually happened. Pure: no
-    connection, no DDL."""
+    connection, no DDL.
 
-    by_table = {record.target_table: record for record in records}
+    Enforces single-promotion consistency (D-81/D-82) over the rows for
+    ``target_tables``: every target must have exactly one row, and the
+    distinct ``server_version`` values and the distinct ``published_at``
+    values across those rows must each number exactly one -- rows that
+    disagree, even by one microsecond, were not written by one promotion
+    transaction. A row for a target outside ``target_tables`` is ignored
+    (D-80 subset rule). Any violation raises ``PublicationAmbiguous``."""
+
+    by_table = {
+        record.target_table: record
+        for record in records
+        if record.target_table in target_tables
+    }
+    if set(target_tables) - set(by_table):
+        raise PublicationAmbiguous()
     ordered = [by_table[table] for table in target_tables]
+    server_versions = {record.server_version for record in ordered}
+    published_ats = {record.published_at for record in ordered}
+    if len(server_versions) != 1 or len(published_ats) != 1:
+        raise PublicationAmbiguous()
     first = ordered[0]
     return PromotionResult(
         server_version=first.server_version,
