@@ -17,14 +17,21 @@ connection is attempted; a missing reader password is left to
 ``READER_ROLE_UNAVAILABLE`` -- deliberately *after* promotion has already
 committed, since D-66..D-73's metadata-move publish is durable the moment its
 own transaction commits, independent of whether the reader proof that follows
-it can run.
+it can run. A plain re-run with the reader password now set completes that
+same order: ``promote_or_resume`` resumes from the durable markers (D-78..D-83)
+instead of re-entering promotion, so a run that only ever failed on the
+reader proof can be finished by a bare retry (closes WINDOWS.md #16).
 
-``promote_order`` already runs the D-68 publication gate
-(``assert_all_layers_validated``) as its own first action, so this CLI does
-not call the gate a second time -- composing ``promote_order`` already is
-"gate then promote" in one call. ``publish.read_layer_validations`` re-reads
-the same durable ``vicmap_audit`` rows independently (D-76) for the EVID-01
-summary, never threading the gate's own in-memory pass/fail result forward.
+``publish.promote_or_resume`` runs the D-68 publication gate
+(``assert_all_layers_validated``) first on every invocation (D-89), whether
+this run promotes or resumes -- so this CLI does not call the gate a second
+time. It then classifies the order's published state (D-86) and either
+promotes a freshly staged order or resumes a committed one by reconstructing
+``PromotionResult`` from the durable ``vicmap_audit.publication`` markers
+(D-82) -- auto-detected on a plain re-run, with no flag (D-83).
+``publish.read_layer_validations`` re-reads the same durable ``vicmap_audit``
+rows independently (D-76) for the EVID-01 summary, never threading the
+gate's own in-memory pass/fail result forward.
 """
 
 from __future__ import annotations
@@ -139,11 +146,13 @@ def main(argv: list[str] | None = None) -> int:
         run_timestamp = run_directory.name
         target_tables = tuple(layer.target_table for layer in manifest.layers)
 
-        # D-68/D-66..D-73: the gate runs as promote_order's own first action;
-        # a hard-stopped gate never reaches any DDL (T-04-06). A successful
-        # promotion commits durably right here, independent of everything
-        # that follows.
-        publication_result = publish.promote_order(
+        # D-68/D-83/D-86: the gate runs as promote_or_resume's own first
+        # action; a hard-stopped gate never reaches any DDL (T-04-06). The
+        # classify-then-branch step that follows either commits a fresh
+        # promotion durably right here, independent of everything that
+        # follows, or resumes from an already-committed one without opening
+        # a promotion connection at all.
+        publication_result = publish.promote_or_resume(
             manifest, policy, loader_password, run_timestamp, digest
         )
 

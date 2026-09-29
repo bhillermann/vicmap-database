@@ -38,12 +38,28 @@ object discovery stays version-agnostic without ever hardcoding the server's
 major version (research Open Question 1). Every failure maps to one closed,
 code-only exception whose ``.code`` equals the matching ``evidence.ReasonCode``;
 no exception message ever carries driver, subprocess, or SQL text.
+
+D-78..D-86 (05.1): a durable per-layer ``vicmap_audit.publication`` marker is
+written inside the same promotion transaction (D-79), carrying the published
+table's ``pg_class`` OID plus ``server_version``/``published_at`` (D-81/D-82).
+Every ``publish_order.py`` invocation classifies each manifest layer before
+any DDL runs (D-86): staging present with no marker promotes normally;
+staging absent with a marker whose OID matches the live table resumes by
+reconstructing ``PromotionResult`` from the durable rows, never re-entering
+the promotion transaction. ``promote_or_resume`` is the one seam
+``publish_order.py`` calls (D-83) -- auto-detected on a plain re-run, no
+flag. Classification and other read-only audit reads run on a distinct
+connect helper (``_connect_for_audit_read``) whose failures map to the
+closed ``AuditReadFailed``, never ``PromotionFailed`` (D-90) -- a read-only
+failure before any DDL must never be misreported as a promotion failure.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 import psycopg
@@ -59,6 +75,15 @@ from vicmap_acquire.staging import AuditPrivilegeDenied
 # D-70: the durable publication-gate record 04-03 writes and this module reads.
 AUDIT_SCHEMA = "vicmap_audit"
 AUDIT_TABLE = "staging_validation"
+
+# D-78: the durable per-layer publication generation marker this module
+# writes inside promote_order's own transaction and reads on every
+# publish_order.py invocation to classify resumability (D-86).
+PUBLICATION_TABLE = "publication"
+
+# D-84: PromotionResult.promotion's two closed values.
+PROMOTION_PERFORMED = "performed"
+PROMOTION_RESUMED = "resumed"
 
 # D-74: the reader's own secret, exactly parallel to staging.PASSWORD_ENV_VAR
 # (the loader's VICMAP_DB_PASSWORD) -- never a config key, never argv.
@@ -133,13 +158,86 @@ class ReaderVerification:
 
 @dataclass(frozen=True)
 class PromotionResult:
-    """What ``promote_order`` returns on a committed promotion: the live
-    server's ``version()`` string (surfaced for the EVID-01 summary and proof
-    that discovery was version-aware, Open Question 1) and the canonical target
-    tables that are now published, in the manifest's own layer order."""
+    """What ``promote_or_resume`` returns, whether it promoted or resumed
+    (D-84): the live server's ``version()`` string (surfaced for the EVID-01
+    summary and proof that discovery was version-aware, Open Question 1), the
+    canonical target tables that are now published in the manifest's own
+    layer order, the server timestamp the promotion actually committed at
+    (D-82 -- on resume, this is the *original* run's ``published_at``, read
+    back from the durable marker, never this run's own clock), and
+    ``promotion`` -- exactly ``PROMOTION_PERFORMED`` or ``PROMOTION_RESUMED``,
+    validated so a typo can never silently produce a third, unrecognised
+    value."""
 
     server_version: str
     published_tables: tuple[str, ...]
+    published_at: datetime
+    promotion: str
+
+    def __post_init__(self) -> None:
+        if self.promotion not in (PROMOTION_PERFORMED, PROMOTION_RESUMED):
+            raise ValueError(
+                "promotion must be exactly PROMOTION_PERFORMED or PROMOTION_RESUMED"
+            )
+
+
+@dataclass(frozen=True)
+class PublicationRecord:
+    """One durable ``vicmap_audit.publication`` row (D-78..D-82): the
+    published table's identity (``table_oid``, read server-side from
+    ``pg_class`` and never round-tripped through Python before being
+    written) plus the facts needed to rebuild a resumed ``PromotionResult``
+    without re-querying the live server."""
+
+    target_table: str
+    table_oid: int
+    server_version: str
+    published_at: datetime
+
+
+class LayerCase(str, Enum):
+    """D-86's per-layer classification, computed before any DDL runs for any
+    layer. ``STAGED``: this run's staging table exists (case A -- promote
+    normally). ``RESUMABLE``: staging absent, this run's marker exists, and
+    the live OID matches it (case B -- resume). ``SUPERSEDED``: staging
+    absent, a marker exists, but the live table is missing or its OID
+    differs (case C -- refined by Plan 05.1-02). ``UNPROVEN``: staging
+    absent and no marker for this run (case D -- includes every table
+    published before this fix, per D-88's explicit no-backfill rule).
+    ``CONFLICTED``: staging present *and* a marker already exists for this
+    run (an inconsistent state no ordinary retry produces)."""
+
+    STAGED = "staged"
+    RESUMABLE = "resumable"
+    SUPERSEDED = "superseded"
+    UNPROVEN = "unproven"
+    CONFLICTED = "conflicted"
+
+
+class PublicationVerdict(str, Enum):
+    """The order-level D-86 verdict: ``PROMOTE`` only when every layer is
+    ``STAGED``; ``RESUME`` only when every layer is ``RESUMABLE``; every
+    other combination -- any ``SUPERSEDED``, any ``UNPROVEN``, or a mixed
+    order -- is ``AMBIGUOUS`` in this plan (Plan 05.1-02 splits out a
+    dedicated ``SUPERSEDED`` outcome). Every ambiguous outcome issues no
+    ``DROP`` and no DDL."""
+
+    PROMOTE = "promote"
+    RESUME = "resume"
+    SUPERSEDED = "superseded"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class PublicationClassification:
+    """``classify_publication_state``'s result: the order-level verdict, the
+    per-layer cases in manifest order, and the durable records for this
+    order's layers (manifest order) -- empty unless every layer is
+    ``RESUMABLE``."""
+
+    verdict: PublicationVerdict
+    cases: tuple[LayerCase, ...]
+    records: tuple[PublicationRecord, ...]
 
 
 class PublishFailure(RuntimeError):
@@ -170,6 +268,27 @@ class PublicationValidationMissing(PublishFailure):
     identically -- table presence is never trusted as a proxy for validation."""
 
     code = "pub_validation_missing"
+
+
+class AuditReadFailed(PublishFailure):
+    """D-90: a classification/detection read against ``vicmap_audit`` (or
+    the catalog) failed for a reason other than privilege -- a connection
+    problem, a transient network blip -- raised from a connect helper that
+    is deliberately distinct from ``_connect`` so this never resolves to
+    ``PromotionFailed`` (Pitfall 1): these reads run before any DDL, and a
+    read-only failure here is not a promotion failure."""
+
+    code = "db_audit_read_failed"
+
+
+class PublicationAmbiguous(PublishFailure):
+    """D-86/D-87: the order's published state cannot be proven -- at least
+    one layer has no provenance for this run (case D/UNPROVEN, which
+    includes every table published before this fix per D-88), or the
+    order's layers land in inconsistent cases (case E). Raised before any
+    DDL; the fail-closed outcome issues no ``DROP`` and no DDL."""
+
+    code = "pub_generation_ambiguous"
 
 
 class ReaderRoleUnavailable(PublishFailure):
@@ -290,6 +409,214 @@ def assert_all_layers_validated(
     passed = {row[0] for row in rows if row[1] == "pass"}
     if not required.issubset(passed):
         raise PublicationValidationMissing()
+
+
+def _connect_for_audit_read(policy: PublishPolicy, password: str) -> "psycopg.Connection":
+    """D-90: open one connection for classification/detection reads only --
+    copies ``_connect``'s shape (timeout SETs, single connection) but maps
+    every connect or setup failure to the closed ``AuditReadFailed``, never
+    ``PromotionFailed`` (Pitfall 1). A read-only failure that happens before
+    any DDL must never be misreported as a promotion failure.
+
+    After the two timeout SETs, this also sets
+    ``default_transaction_read_only`` and ``default_transaction_isolation``
+    to ``repeatable read``, so every subsequent read in the classification
+    session runs against one consistent, read-only snapshot."""
+
+    try:
+        connection = psycopg.connect(
+            host=policy.host,
+            port=policy.port,
+            dbname=policy.dbname,
+            user=policy.user,
+            password=password,
+            connect_timeout=policy.connect_timeout_seconds,
+        )
+    except Exception:
+        raise AuditReadFailed() from None
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("SET statement_timeout = {}").format(
+                    sql.Literal(policy.statement_timeout_seconds * 1000)
+                )
+            )
+            cursor.execute(
+                sql.SQL("SET lock_timeout = {}").format(
+                    sql.Literal(policy.lock_timeout_seconds * 1000)
+                )
+            )
+            cursor.execute("SET default_transaction_read_only = on")
+            cursor.execute("SET default_transaction_isolation = 'repeatable read'")
+        connection.commit()
+    except Exception:
+        connection.close()
+        raise AuditReadFailed() from None
+    return connection
+
+
+def _relation_oid(cursor, *, schema: str, table: str) -> int | None:
+    """D-81/D-86: the live ``pg_class`` OID of ``{schema}.{table}``, or
+    ``None`` if it does not exist. Used both for the staging-table-exists
+    probe and the live-table-identity comparison -- the same catalog join
+    ``_discover_constraints``/``_discover_indexes`` already use in this
+    module, reused here for an OID lookup instead of a constraint/index
+    list."""
+
+    cursor.execute(
+        "SELECT t.oid FROM pg_class t "
+        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+        "WHERE n.nspname = %s AND t.relname = %s",
+        (schema, table),
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def classify_layer(
+    *,
+    staging_oid: int | None,
+    record: PublicationRecord | None,
+    live_oid: int | None,
+) -> LayerCase:
+    """D-86's pure per-layer classification from three independently-read
+    facts. Staging present with no marker is a fresh, never-promoted layer
+    (STAGED); staging present with a marker already recorded for this run is
+    an inconsistency no ordinary retry produces (CONFLICTED). Staging absent
+    with no marker has no provenance at all (UNPROVEN, D-88's exact case --
+    never inferred as resumable just because staging is gone). Staging
+    absent with a marker is RESUMABLE only when the live OID equals the
+    marker's own recorded OID (``live_oid is None`` is never equal to
+    anything); any other live state -- missing table, out-of-band replace --
+    is SUPERSEDED."""
+
+    if staging_oid is not None:
+        return LayerCase.CONFLICTED if record is not None else LayerCase.STAGED
+    if record is None:
+        return LayerCase.UNPROVEN
+    if live_oid is not None and live_oid == record.table_oid:
+        return LayerCase.RESUMABLE
+    return LayerCase.SUPERSEDED
+
+
+def order_verdict(cases: tuple[LayerCase, ...]) -> PublicationVerdict:
+    """D-86's pure order-level verdict. A non-empty tuple that is entirely
+    ``STAGED`` promotes; a non-empty tuple that is entirely ``RESUMABLE``
+    resumes. Every other combination -- any ``SUPERSEDED``, any
+    ``UNPROVEN``, ``CONFLICTED``, a mixed order, or an empty tuple -- is
+    ``AMBIGUOUS`` in this plan. Plan 05.1-02 refines a dedicated
+    ``SUPERSEDED`` outcome."""
+
+    if cases and all(case == LayerCase.STAGED for case in cases):
+        return PublicationVerdict.PROMOTE
+    if cases and all(case == LayerCase.RESUMABLE for case in cases):
+        return PublicationVerdict.RESUME
+    return PublicationVerdict.AMBIGUOUS
+
+
+def classify_publication_state(
+    policy: PublishPolicy,
+    password: str,
+    *,
+    run_timestamp: str,
+    manifest_digest: str,
+    target_tables: tuple[str, ...],
+) -> PublicationClassification:
+    """D-86: classify every manifest layer before any DDL runs for any
+    layer, on one read-only, repeatable-read connection distinct from the
+    promotion transaction (D-90). Mirrors ``assert_all_layers_validated``'s
+    skeleton: read every relevant fact on one short-lived connection, then
+    compute a pure result. Issues no DDL and mutates nothing.
+
+    Every ``staging.staging_table_name`` is computed before connecting, so a
+    naming failure keeps its own ``StagingFailure`` code rather than being
+    swallowed by this function's own exception mapping. On an
+    ``AMBIGUOUS`` verdict this raises ``PublicationAmbiguous`` directly, so
+    callers never have to re-derive the fail-closed outcome themselves."""
+
+    staging_names = {
+        target: staging.staging_table_name(target, run_timestamp)
+        for target in target_tables
+    }
+
+    connection = _connect_for_audit_read(policy, password)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL(
+                    "SELECT target_table, table_oid, server_version, published_at "
+                    "FROM {table} WHERE run_ts = %s AND manifest_digest = %s"
+                ).format(table=sql.Identifier(AUDIT_SCHEMA, PUBLICATION_TABLE)),
+                (run_timestamp, manifest_digest),
+            )
+            marker_rows = cursor.fetchall()
+
+            records_by_table: dict[str, PublicationRecord] = {}
+            for target_table, table_oid, server_version, published_at in marker_rows:
+                if target_table in target_tables:
+                    records_by_table[target_table] = PublicationRecord(
+                        target_table=target_table,
+                        table_oid=table_oid,
+                        server_version=server_version,
+                        published_at=published_at,
+                    )
+
+            cases: list[LayerCase] = []
+            records: list[PublicationRecord] = []
+            for target in target_tables:
+                staging_oid = _relation_oid(
+                    cursor,
+                    schema=policy.staging_schema,
+                    table=staging_names[target],
+                )
+                live_oid = _relation_oid(
+                    cursor, schema=policy.publish_schema, table=target
+                )
+                record = records_by_table.get(target)
+                case = classify_layer(
+                    staging_oid=staging_oid, record=record, live_oid=live_oid
+                )
+                cases.append(case)
+                if record is not None:
+                    records.append(record)
+    except pg_errors.InsufficientPrivilege:
+        raise AuditPrivilegeDenied() from None
+    except PublishFailure:
+        raise
+    except Exception:
+        raise AuditReadFailed() from None
+    finally:
+        connection.close()
+
+    verdict = order_verdict(tuple(cases))
+    if verdict == PublicationVerdict.AMBIGUOUS:
+        raise PublicationAmbiguous()
+
+    return PublicationClassification(
+        verdict=verdict, cases=tuple(cases), records=tuple(records)
+    )
+
+
+def promotion_result_from_records(
+    records: tuple[PublicationRecord, ...], target_tables: tuple[str, ...]
+) -> PromotionResult:
+    """D-82/D-76's re-read-durable-artifacts pattern: rebuild the
+    ``PromotionResult`` a resumed run reports from the durable marker rows
+    this order's earlier, committed run already wrote -- never by
+    re-querying ``SELECT version()`` live, which would describe this run's
+    own connection, not the promotion that actually happened. Pure: no
+    connection, no DDL."""
+
+    by_table = {record.target_table: record for record in records}
+    ordered = [by_table[table] for table in target_tables]
+    first = ordered[0]
+    return PromotionResult(
+        server_version=first.server_version,
+        published_tables=tuple(target_tables),
+        published_at=first.published_at,
+        promotion=PROMOTION_RESUMED,
+    )
 
 
 def _discover_constraints(
@@ -437,6 +764,113 @@ def _promote_layer(cursor, policy: PublishPolicy, *, staging_table: str, target:
     )
 
 
+def _record_publication(
+    cursor,
+    *,
+    run_timestamp: str,
+    manifest_digest: str,
+    target_table: str,
+    publish_schema: str,
+    server_version: str,
+) -> datetime:
+    """D-79/D-81/D-82: write this layer's durable publication marker inside
+    the caller's already-open promotion transaction (no commit/rollback
+    here), immediately after ``_promote_layer`` has renamed it into place.
+
+    The published table's ``pg_class`` OID is read server-side by the same
+    statement that inserts the row -- it is never round-tripped through
+    Python first, so there is no window in which a stale OID could be
+    written. Deliberately carries no ``ON CONFLICT`` clause (unlike
+    ``staging.record_validation``'s idempotent backfill insert): a duplicate
+    key here means the classifier already misjudged this layer as freshly
+    staged when a marker existed, which is a bug, not a benign retry, and
+    must roll back the whole transaction like any other promotion failure.
+    A ``RETURNING`` clause with no row -- the OID lookup found nothing --
+    raises the same closed ``PromotionFailed`` a DDL failure would."""
+
+    statement = sql.SQL(
+        "INSERT INTO {table} "
+        "(run_ts, manifest_digest, target_table, table_oid, server_version, "
+        "published_at) "
+        "SELECT %s, %s, %s, t.oid, %s, now() "
+        "FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace "
+        "WHERE n.nspname = %s AND t.relname = %s "
+        "RETURNING published_at"
+    ).format(table=sql.Identifier(AUDIT_SCHEMA, PUBLICATION_TABLE))
+    cursor.execute(
+        statement,
+        (
+            run_timestamp,
+            manifest_digest,
+            target_table,
+            server_version,
+            publish_schema,
+            target_table,
+        ),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise PromotionFailed()
+    return row[0]
+
+
+def _promote_in_transaction(
+    manifest,
+    policy: PublishPolicy,
+    password: str,
+    run_timestamp: str,
+    manifest_digest: str,
+) -> PromotionResult:
+    """The promotion transaction itself (D-66..D-73, D-79): one connection,
+    ``SELECT version()`` first, every layer promoted and its durable marker
+    recorded, one commit or a complete rollback. Never called except after
+    ``promote_or_resume``'s own D-86 classification has already determined
+    every layer is freshly staged -- this function issues DDL unconditionally
+    for every layer it is given (D-92: ``PromotionFailed`` is raised only
+    from inside this transaction)."""
+
+    connection = _connect(policy, password)
+    published: list[str] = []
+    published_at: datetime | None = None
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT version()")
+            (server_version,) = cursor.fetchone()
+            for layer in manifest.layers:
+                target = layer.target_table
+                staging_table = staging.staging_table_name(target, run_timestamp)
+                _promote_layer(
+                    cursor, policy, staging_table=staging_table, target=target
+                )
+                layer_published_at = _record_publication(
+                    cursor,
+                    run_timestamp=run_timestamp,
+                    manifest_digest=manifest_digest,
+                    target_table=target,
+                    publish_schema=policy.publish_schema,
+                    server_version=server_version,
+                )
+                if published_at is None:
+                    published_at = layer_published_at
+                published.append(target)
+        connection.commit()
+    except PublishFailure:
+        connection.rollback()
+        raise
+    except Exception:
+        connection.rollback()
+        raise PromotionFailed() from None
+    finally:
+        connection.close()
+
+    return PromotionResult(
+        server_version=server_version,
+        published_tables=tuple(published),
+        published_at=published_at,
+        promotion=PROMOTION_PERFORMED,
+    )
+
+
 def promote_order(
     manifest,
     policy: PublishPolicy,
@@ -444,16 +878,23 @@ def promote_order(
     run_timestamp: str,
     manifest_digest: str,
 ) -> PromotionResult:
-    """Promote every layer of ``manifest`` into the publish schema in one
+    """The D-68 gate followed unconditionally by the promotion transaction --
+    promote every layer of ``manifest`` into the publish schema in one
     transaction that commits once or rolls back completely (PUB-02/PUB-03).
+
+    This function always promotes; it never classifies or resumes (that is
+    ``promote_or_resume``'s job). It stays callable directly and keeps its
+    exact historical signature so existing callers -- and a caller that
+    already knows an order is freshly staged -- are unaffected by D-83's new
+    seam (T-04-06 compatibility).
 
     ``SELECT version()`` is the first live action, keeping catalog discovery
     version-agnostic (Open Question 1). Each layer's staging table is computed
     with ``staging.staging_table_name`` (never string-formatted here), promoted
-    by ``_promote_layer``, and only after every layer has moved, renamed, and
-    granted does the single ``commit()`` run. Any exception rolls the whole
-    transaction back -- so no layer is ever partially published and every prior
-    ``vicmap.*`` table is left exactly as it was -- and re-raises the closed
+    by ``_promote_layer``, and its durable publication marker recorded
+    (D-79) immediately after. Any exception rolls the whole transaction back
+    -- so no layer is ever partially published and every prior ``vicmap.*``
+    table is left exactly as it was -- and re-raises the closed
     ``PromotionFailed`` with no driver or SQL text (a ``PublishFailure`` such as
     the gate's ``PublicationValidationMissing`` is re-raised unchanged)."""
 
@@ -468,32 +909,60 @@ def promote_order(
         target_tables=tuple(layer.target_table for layer in manifest.layers),
     )
 
-    connection = _connect(policy, password)
-    published: list[str] = []
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT version()")
-            (server_version,) = cursor.fetchone()
-            for layer in manifest.layers:
-                target = layer.target_table
-                staging_table = staging.staging_table_name(target, run_timestamp)
-                _promote_layer(
-                    cursor, policy, staging_table=staging_table, target=target
-                )
-                published.append(target)
-        connection.commit()
-    except PublishFailure:
-        connection.rollback()
-        raise
-    except Exception:
-        connection.rollback()
-        raise PromotionFailed() from None
-    finally:
-        connection.close()
-
-    return PromotionResult(
-        server_version=server_version, published_tables=tuple(published)
+    return _promote_in_transaction(
+        manifest, policy, password, run_timestamp, manifest_digest
     )
+
+
+def promote_or_resume(
+    manifest,
+    policy: PublishPolicy,
+    password: str,
+    run_timestamp: str,
+    manifest_digest: str,
+) -> PromotionResult:
+    """D-83: the one publication seam ``publish_order.py`` calls -- runs the
+    D-68 gate first on every invocation regardless of outcome (D-89), then
+    classifies the order's published state (D-86), and either promotes a
+    freshly staged order or resumes a committed one by reconstructing
+    ``PromotionResult`` from the durable ``vicmap_audit.publication`` markers
+    (D-82), auto-detected with no flag and no CLI surface change.
+
+    Same positional shape as ``promote_order`` -- a drop-in replacement at
+    the CLI's one call site. A resumed order never opens a promotion
+    connection: ``classify_publication_state`` already raises the closed
+    ``PublicationAmbiguous`` on any outcome other than PROMOTE/RESUME, so the
+    defensive ``else`` below is unreachable today and exists only so a future
+    verdict can never silently fall through to a promotion attempt."""
+
+    target_tables = tuple(layer.target_table for layer in manifest.layers)
+
+    # D-89: the gate runs first on every invocation, whether this run will
+    # promote or resume -- a resumed run has exactly the same preconditions
+    # as a fresh one.
+    assert_all_layers_validated(
+        policy,
+        password,
+        run_timestamp=run_timestamp,
+        manifest_digest=manifest_digest,
+        target_tables=target_tables,
+    )
+
+    classification = classify_publication_state(
+        policy,
+        password,
+        run_timestamp=run_timestamp,
+        manifest_digest=manifest_digest,
+        target_tables=target_tables,
+    )
+
+    if classification.verdict == PublicationVerdict.PROMOTE:
+        return _promote_in_transaction(
+            manifest, policy, password, run_timestamp, manifest_digest
+        )
+    if classification.verdict == PublicationVerdict.RESUME:
+        return promotion_result_from_records(classification.records, target_tables)
+    raise PublicationAmbiguous()  # pragma: no cover -- defensive, see docstring
 
 
 def _connect_as_reader(policy: PublishPolicy, reader_password: str) -> "psycopg.Connection":
@@ -768,6 +1237,16 @@ def assemble_summary(
 
     provenance = download.read_provenance_sidecar(artifact_path, order_id=order_id)
 
+    # D-84: the summary's new promotion field -- whether this run performed
+    # or resumed the promotion. Re-checked here even though PromotionResult
+    # already validates it at construction, so assemble_summary itself never
+    # trusts an untyped value into the returned dict.
+    if publication_result.promotion not in (PROMOTION_PERFORMED, PROMOTION_RESUMED):
+        raise ValueError(
+            "publication_result.promotion must be PROMOTION_PERFORMED or "
+            "PROMOTION_RESUMED"
+        )
+
     target_tables = tuple(layer.target_table for layer in manifest.layers)
     layer_count = len(manifest.layers)
 
@@ -841,6 +1320,7 @@ def assemble_summary(
         "server_version": evidence._require_server_version(
             publication_result.server_version
         ),
+        "promotion": publication_result.promotion,
         "staging_validation": staging_validation,
         "reader": {
             "tables_discovered": [

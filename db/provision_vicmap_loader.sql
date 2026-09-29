@@ -73,6 +73,26 @@ CREATE TABLE IF NOT EXISTS vicmap_audit.staging_validation (
 GRANT USAGE ON SCHEMA vicmap_audit TO vicmap_loader;
 GRANT SELECT, INSERT ON vicmap_audit.staging_validation TO vicmap_loader;
 
+-- D-78/D-79/D-80/D-81: the publication generation marker, one row per
+-- (run_ts, manifest_digest, target_table), written only inside
+-- promote_order's own transaction and read by every publish_order.py run to
+-- classify resumability (D-86) instead of inferring it from staging-table
+-- absence alone. vicmap_loader is granted SELECT, INSERT only -- no
+-- UPDATE/DELETE -- so a written marker can never be silently rewritten by
+-- the pipeline that reads and writes it (T-04-08/D-88's no-backfill rule).
+CREATE TABLE IF NOT EXISTS vicmap_audit.publication (
+    run_ts text NOT NULL,
+    manifest_digest text NOT NULL,
+    target_table text NOT NULL,
+    table_oid oid NOT NULL,
+    server_version text NOT NULL,
+    published_at timestamptz NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_ts, manifest_digest, target_table)
+);
+
+GRANT SELECT, INSERT ON vicmap_audit.publication TO vicmap_loader;
+
 -- ---------------------------------------------------------------------
 -- D-72: the reader role is provisioned once by hand here -- never by the
 -- pipeline. LOGIN + USAGE ON SCHEMA vicmap only: no CREATE, no table
@@ -105,6 +125,14 @@ GRANT USAGE ON SCHEMA vicmap TO vicmap_reader;
 -- SELECT has_table_privilege('vicmap_loader', 'vicmap_audit.staging_validation', 'INSERT');
 --   -- expect: true
 -- SELECT has_table_privilege('vicmap_loader', 'vicmap_audit.staging_validation', 'UPDATE');
+--   -- expect: false
+-- SELECT has_table_privilege('vicmap_loader', 'vicmap_audit.publication', 'INSERT');
+--   -- expect: true
+-- SELECT has_table_privilege('vicmap_loader', 'vicmap_audit.publication', 'SELECT');
+--   -- expect: true
+-- SELECT has_table_privilege('vicmap_loader', 'vicmap_audit.publication', 'UPDATE');
+--   -- expect: false
+-- SELECT has_table_privilege('vicmap_loader', 'vicmap_audit.publication', 'DELETE');
 --   -- expect: false
 -- SELECT has_schema_privilege('vicmap_reader', 'vicmap', 'USAGE');
 --   -- expect: true
