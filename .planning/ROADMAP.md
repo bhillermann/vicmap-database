@@ -242,7 +242,7 @@ Plans:
 4. An ambiguous state (published tables from a different run or digest, or a partial promotion) fails closed with a named reason and issues no `DROP`.
 5. Tests cover the retry-after-post-commit-failure path, and WINDOWS.md #16 is marked fixed with evidence.
 
-**Plans:** 2/5 plans executed
+**Plans:** 3/5 plans executed
 
 Plans:
 
@@ -256,7 +256,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 05.1-03-PLAN.md — Make a resumed run visible (`publication_resumed` event, `promotion`/`published_at` summary fields), make a re-run after success an idempotent resume, and write `summary.json` atomically behind a `pub_summary_failed` boundary.
+- [x] 05.1-03-PLAN.md — Make a resumed run visible (`publication_resumed` event, `promotion`/`published_at` summary fields), make a re-run after success an idempotent resume, and write `summary.json` atomically behind a `pub_summary_failed` boundary.
 
 **Wave 4** *(blocked on Wave 3 completion)*
 

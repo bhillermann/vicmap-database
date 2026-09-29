@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: "05.1"
 current_phase_name: "Address tech debt: publish resume path (#16) (INSERTED)"
 status: executing
-stopped_at: Completed 05.1-02-PLAN.md
-last_updated: "2026-09-29T04:39:06.520Z"
+stopped_at: Completed 05.1-03-PLAN.md
+last_updated: "2026-09-29T05:02:51.147Z"
 last_activity: 2026-09-29
 last_activity_desc: Phase 05.1 execution started
-state_head: 5af7281234425a55ea26b132509beeef5f42611a
+state_head: f65c815a27f6576697780ca59505b66d5a3b473b
 progress:
   total_phases: 6
   completed_phases: 5
   total_plans: 40
-  completed_plans: 37
+  completed_plans: 38
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -42,14 +42,14 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 ## Current Position
 
 Phase: 05.1 (Address tech debt: publish resume path (#16) (INSERTED)) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Ready to execute
 Last activity: 2026-09-29 — Phase 05.1 execution started
 
 ## Session
 
-**Last session:** 2026-09-29T04:39:06.456Z
-**Stopped at:** Completed 05.1-02-PLAN.md
+**Last session:** 2026-09-29T05:02:50.929Z
+**Stopped at:** Completed 05.1-03-PLAN.md
 **Resume file:** None
 
 Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd-complete-milestone v0.1.
@@ -90,6 +90,7 @@ Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd
 | Phase 03 P06 | ~45min | 2 tasks | 4 files |
 | Phase 05.1 P01 | 90min | 2 tasks | 7 files |
 | Phase 05.1 P02 | 25min | 2 tasks | 2 files |
+| Phase 05.1 P03 | 25min | 2 tasks | 4 files |
 
 ## Decisions
 
@@ -176,6 +177,9 @@ Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd
 - [Phase 05.1]: Task 2 registers the closed vocabulary (PublicationSuperseded/PublicationSummaryFailed, 21 stages/58 codes) without wiring D-91 into assemble_summary/write_summary yet -- deferred to Plan 05.1-03.
 - [Phase 05.1]: order_verdict's SUPERSEDED rule requires every layer resumable-or-superseded with at least one superseded; a mix with staged or unproven stays ambiguous
 - [Phase 05.1]: promotion_result_from_records enforces single-promotion consistency (one server_version, one published_at) as a backstop independent of classify_layer's per-layer OID check
+- [Phase 05.1]: PromotionResult now rejects a naive published_at at construction, mirroring evidence._require_utc_timestamp
+- [Phase 05.1]: internal_failure catch-all regression retargeted from assemble_summary (now dedicated-boundary) onto read_manifest
+- [Phase 05.1]: write_summary's atomic replace follows manifest.py's own same-directory fsync idiom via a private per-module _fsync_directory copy
 
 ### Blockers
 
