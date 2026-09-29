@@ -109,6 +109,8 @@ class _FakeCursor:
             raise self._connection.audit_error
         if "version()" in text:
             self._rows = [("PostgreSQL 18.6 (fake build)",)]
+        elif "has_table_privilege" in text:
+            self._rows = [(self._connection.insert_privilege,)]
         elif "INSERT INTO" in text and "publication" in text:
             self._rows = list(self._connection.marker_rows)
         elif "staging_validation" in text:
@@ -145,6 +147,7 @@ class _FakeConnection:
         marker_rows=None,
         fail_on=None,
         audit_error=None,
+        insert_privilege=True,
     ):
         self.executed: list[str] = []
         self.executed_params: list = []
@@ -161,6 +164,10 @@ class _FakeConnection:
         )
         self.fail_on = fail_on
         self.audit_error = audit_error
+        # D-78/Open Question 2: whether current_user has INSERT on the
+        # marker table -- answers classify_publication_state's PROMOTE-only
+        # has_table_privilege pre-check.
+        self.insert_privilege = insert_privilege
 
     def cursor(self):
         return _FakeCursor(self)
@@ -1231,12 +1238,241 @@ class PublicationMarkerProvenanceTest(unittest.TestCase):
                 if (
                     isinstance(node, ast.Constant)
                     and isinstance(node.value, str)
-                    and "INSERT" in node.value.upper()
+                    # "INSERT INTO" (not bare "INSERT") -- an actual write
+                    # statement always says INTO; a read-only privilege-type
+                    # literal like the has_table_privilege check's 'INSERT'
+                    # argument (Plan 05.1-04) must not false-positive here.
+                    and "INSERT INTO" in node.value.upper()
                 ):
                     has_insert_constant = True
             if references_table and has_insert_constant:
                 referrers_with_insert.append(func.name)
         self.assertEqual(["_record_publication"], referrers_with_insert)
+
+
+class PublicationInsertPrivilegeTest(unittest.TestCase):
+    """No database. Open Question 2 (D-78, resolved by Plan 05.1-04): a
+    PROMOTE verdict pre-checks INSERT privilege on
+    ``vicmap_audit.publication`` while the classification connection is
+    still open, failing closed with ``AuditPrivilegeDenied`` before any
+    promotion connection opens. RESUME and every fail-closed verdict issue
+    no ``has_table_privilege`` statement at all."""
+
+    _TARGET = "vmadd_address"
+    _DIGEST = "d" * 64
+
+    def _staging_table(self, target=_TARGET):
+        return staging.staging_table_name(target, _RUN_TS)
+
+    def _gate_connection(self, target=_TARGET):
+        return _FakeConnection(audit_rows=((target, "pass"),))
+
+    def test_promote_verdict_with_denied_insert_privilege_fails_closed(self):
+        gate_conn = self._gate_connection()
+        classify_conn = _FakeConnection(
+            relation_oids={("vicmap_staging", self._staging_table()): (111,)},
+            insert_privilege=False,
+        )
+
+        def _no_third_connection(*args, **kwargs):
+            self.fail("a denied marker grant must not open a promotion connection")
+
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, _no_third_connection],
+        ):
+            with self.assertRaises(publish.AuditPrivilegeDenied):
+                publish.promote_or_resume(
+                    _one_layer_manifest(self._TARGET),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    self._DIGEST,
+                )
+        privilege_checks = [
+            s for s in classify_conn.executed if "has_table_privilege" in s
+        ]
+        self.assertEqual(1, len(privilege_checks))
+        for statement in classify_conn.executed:
+            upper = statement.upper()
+            self.assertNotIn("DROP", upper)
+            self.assertNotIn("ALTER TABLE", upper)
+            self.assertNotIn("GRANT SELECT", upper)
+
+    def test_promote_verdict_with_granted_insert_privilege_promotes(self):
+        gate_conn = self._gate_connection()
+        classify_conn = _FakeConnection(
+            relation_oids={("vicmap_staging", self._staging_table()): (111,)},
+            insert_privilege=True,
+        )
+        promote_conn = _FakeConnection(
+            constraint_rows=(_PK_ROW, _NOT_NULL_ROW), index_rows=(_GEOM_INDEX_ROW,)
+        )
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, promote_conn],
+        ):
+            result = publish.promote_or_resume(
+                _one_layer_manifest(self._TARGET),
+                _publish_policy(),
+                "sentinel-secret",
+                _RUN_TS,
+                self._DIGEST,
+            )
+        self.assertEqual(publish.PROMOTION_PERFORMED, result.promotion)
+        privilege_checks = [
+            s for s in classify_conn.executed if "has_table_privilege" in s
+        ]
+        self.assertEqual(1, len(privilege_checks))
+
+    def test_resume_verdict_issues_no_privilege_check(self):
+        marker_row = (
+            self._TARGET,
+            222,
+            "PostgreSQL 18.6 (fake build)",
+            _FIXED_PUBLISHED_AT,
+        )
+        gate_conn = self._gate_connection()
+        classify_conn = _FakeConnection(
+            publication_rows=(marker_row,),
+            relation_oids={("vicmap", self._TARGET): (222,)},
+        )
+
+        def _no_third_connection(*args, **kwargs):
+            self.fail("resume must not open a promotion connection")
+
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, _no_third_connection],
+        ):
+            publish.promote_or_resume(
+                _one_layer_manifest(self._TARGET),
+                _publish_policy(),
+                "sentinel-secret",
+                _RUN_TS,
+                self._DIGEST,
+            )
+        self.assertFalse(
+            any("has_table_privilege" in s for s in classify_conn.executed)
+        )
+
+    def test_fail_closed_verdict_issues_no_privilege_check(self):
+        gate_conn = self._gate_connection()
+        classify_conn = _FakeConnection(publication_rows=(), relation_oids={})
+        with patch.object(
+            publish.psycopg, "connect", side_effect=[gate_conn, classify_conn]
+        ):
+            with self.assertRaises(publish.PublicationAmbiguous):
+                publish.promote_or_resume(
+                    _one_layer_manifest(self._TARGET),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    self._DIGEST,
+                )
+        self.assertFalse(
+            any("has_table_privilege" in s for s in classify_conn.executed)
+        )
+
+
+class PromotionFailedBoundaryTest(unittest.TestCase):
+    """No database. D-92: ``PromotionFailed`` is raised only from inside the
+    promotion transaction. An AST proof pins the exact function set, and
+    three regression cases prove failures at different points inside the
+    transaction still roll back and raise ``PromotionFailed`` with the
+    expected commit/rollback counts."""
+
+    def _module_tree(self) -> ast.AST:
+        source = Path(publish.__file__).read_text(encoding="utf-8")
+        return ast.parse(source, filename=publish.__file__)
+
+    def test_promotion_failed_is_raised_only_inside_the_promotion_transaction(self):
+        tree = self._module_tree()
+        raisers = set()
+        for func in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+            for node in ast.walk(func):
+                if isinstance(node, ast.Raise) and node.exc is not None:
+                    target = node.exc
+                    if isinstance(target, ast.Call):
+                        target = target.func
+                    if isinstance(target, ast.Name) and target.id == "PromotionFailed":
+                        raisers.add(func.name)
+        self.assertEqual(
+            {"_connect", "_promote_in_transaction", "_record_publication"}, raisers
+        )
+
+    def _fixture(self, **promote_overrides):
+        gate_conn = _FakeConnection(audit_rows=(("vmadd_address", "pass"),))
+        classify_conn = _FakeConnection(
+            relation_oids={
+                (
+                    "vicmap_staging",
+                    staging.staging_table_name("vmadd_address", _RUN_TS),
+                ): (111,)
+            }
+        )
+        params = dict(
+            constraint_rows=(_PK_ROW, _NOT_NULL_ROW), index_rows=(_GEOM_INDEX_ROW,)
+        )
+        params.update(promote_overrides)
+        promote_conn = _FakeConnection(**params)
+        return gate_conn, classify_conn, promote_conn
+
+    def test_connect_failure_on_the_promotion_connection_raises_promotion_failed(self):
+        gate_conn, classify_conn, _unused = self._fixture()
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, RuntimeError("boom")],
+        ):
+            with self.assertRaises(publish.PromotionFailed):
+                publish.promote_or_resume(
+                    _one_layer_manifest(),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    "e" * 64,
+                )
+
+    def test_set_schema_failure_rolls_back_and_raises_promotion_failed(self):
+        gate_conn, classify_conn, promote_conn = self._fixture(fail_on="SET SCHEMA")
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, promote_conn],
+        ):
+            with self.assertRaises(publish.PromotionFailed):
+                publish.promote_or_resume(
+                    _one_layer_manifest(),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    "e" * 64,
+                )
+        self.assertEqual(1, promote_conn.rollback_count)
+
+    def test_publication_identifier_failure_rolls_back_and_raises_promotion_failed(
+        self,
+    ):
+        gate_conn, classify_conn, promote_conn = self._fixture(fail_on='"publication"')
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, promote_conn],
+        ):
+            with self.assertRaises(publish.PromotionFailed):
+                publish.promote_or_resume(
+                    _one_layer_manifest(),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    "e" * 64,
+                )
+        self.assertEqual(1, promote_conn.rollback_count)
+        self.assertEqual(1, promote_conn.commit_count)
 
 
 class _FakeReaderCursor:
