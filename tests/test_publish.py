@@ -788,6 +788,97 @@ class PromoteOrResumeTest(unittest.TestCase):
         self.assertLess(read_only_index, first_read_index)
 
 
+class SupersededClassificationTest(unittest.TestCase):
+    """No database. Covers order_verdict's SUPERSEDED rule and
+    classify_publication_state's PublicationSuperseded raise (D-86/D-87),
+    proven before any DDL runs."""
+
+    _TARGET = "vmadd_address"
+    _TARGET_2 = "vmroad_road"
+    _DIGEST = "b" * 64
+
+    def test_order_verdict_superseded_rules(self):
+        C = publish.LayerCase
+        V = publish.PublicationVerdict
+        self.assertIs(V.SUPERSEDED, publish.order_verdict((C.RESUMABLE, C.SUPERSEDED)))
+        self.assertIs(V.SUPERSEDED, publish.order_verdict((C.SUPERSEDED,)))
+
+    def _gate_connection(self, targets):
+        return _FakeConnection(audit_rows=tuple((t, "pass") for t in targets))
+
+    def _no_third_connection(self):
+        def _fail(*args, **kwargs):
+            self.fail("a superseded verdict must not open a promotion connection")
+
+        return _fail
+
+    def _assert_no_ddl(self, connection):
+        for statement in connection.executed:
+            upper = statement.upper()
+            self.assertNotIn("DROP", upper)
+            self.assertNotIn("ALTER", upper)
+            self.assertNotIn("GRANT", upper)
+            self.assertNotIn("INSERT", upper)
+
+    def test_two_layer_order_with_one_replaced_oid_raises_superseded(self):
+        target_a, target_b = self._TARGET, self._TARGET_2
+        marker_rows = (
+            (target_a, 111, "PostgreSQL 18.6 (fake build)", _FIXED_PUBLISHED_AT),
+            (target_b, 222, "PostgreSQL 18.6 (fake build)", _FIXED_PUBLISHED_AT),
+        )
+        gate_conn = self._gate_connection((target_a, target_b))
+        classify_conn = _FakeConnection(
+            publication_rows=marker_rows,
+            relation_oids={
+                ("vicmap", target_a): (111,),  # unchanged -- resumable
+                ("vicmap", target_b): (999,),  # replaced -- oid differs
+            },
+        )
+        manifest = types.SimpleNamespace(
+            layers=(
+                types.SimpleNamespace(target_table=target_a),
+                types.SimpleNamespace(target_table=target_b),
+            )
+        )
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, self._no_third_connection()],
+        ):
+            with self.assertRaises(publish.PublicationSuperseded):
+                publish.promote_or_resume(
+                    manifest,
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    self._DIGEST,
+                )
+        self._assert_no_ddl(classify_conn)
+
+    def test_one_layer_order_with_missing_live_table_raises_superseded(self):
+        target = self._TARGET
+        marker_row = (target, 333, "PostgreSQL 18.6 (fake build)", _FIXED_PUBLISHED_AT)
+        gate_conn = self._gate_connection((target,))
+        classify_conn = _FakeConnection(
+            publication_rows=(marker_row,),
+            relation_oids={},  # the live table is gone entirely
+        )
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, self._no_third_connection()],
+        ):
+            with self.assertRaises(publish.PublicationSuperseded):
+                publish.promote_or_resume(
+                    _one_layer_manifest(target),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    self._DIGEST,
+                )
+        self._assert_no_ddl(classify_conn)
+
+
 class _FakeReaderCursor:
     """Records every executed statement and answers discovery/spatial-query
     reads from the owning connection's fixed fixture rows. The write attempt
@@ -2755,6 +2846,125 @@ class LivePublishOrderResumeTest(_LivePublishOrderMixin, unittest.TestCase):
         )
 
         for text in (summary_text, output_1, output_2):
+            self.assertNotIn(fixture.loader_password, text)
+            self.assertNotIn(fixture.reader_password, text)
+            self.assertNotIn(str(fixture.config_path.parent), text)
+
+    _SUPERSEDED_RUN_DIR_NAME = "20260929T000006Z"
+
+    def test_superseded_generation_fails_closed_without_ddl(self):
+        """A generation this run itself published, later replaced out of
+        band (a rename plus a fresh table under the same name), is
+        pub_generation_superseded -- proven live with no DDL against the
+        replacement and no publication_summary event (D-86/D-87)."""
+
+        self._require_live()
+        fixture = self._provision_order_fixture(
+            tag="sp", run_dir_name=self._SUPERSEDED_RUN_DIR_NAME
+        )
+        sql = publish.sql
+
+        # Run 1: a normal full run -- both passwords set.
+        stdout1, stderr1 = io.StringIO(), io.StringIO()
+        with patch.dict(
+            os.environ,
+            {
+                staging.PASSWORD_ENV_VAR: fixture.loader_password,
+                publish.READER_PASSWORD_ENV_VAR: fixture.reader_password,
+            },
+        ), contextlib.redirect_stdout(stdout1), contextlib.redirect_stderr(stderr1):
+            exit_code_1 = publish_order.main(["--config", str(fixture.config_path)])
+        output_1 = stdout1.getvalue() + stderr1.getvalue()
+        self.assertEqual(0, exit_code_1, output_1)
+
+        summary_path = fixture.run_directory / "summary.json"
+        summary_bytes_1 = summary_path.read_bytes()
+
+        # Replace the published generation out of band: rename the table
+        # this run published, then create a fresh one under the same name.
+        old_name = f"{fixture.target}_old"
+        with fixture.connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("ALTER TABLE {} RENAME TO {}").format(
+                    sql.Identifier(fixture.pub_schema, fixture.target),
+                    sql.Identifier(old_name),
+                )
+            )
+            self._create_point_table(
+                cursor,
+                fixture.pub_schema,
+                fixture.target,
+                gist_index=f"livetest_sp_replacement_gix_{os.getpid()}",
+                points=self._VICTORIA_POINTS,
+            )
+        replacement_oid = self._scalar(
+            fixture.connection,
+            "SELECT to_regclass(%s)::oid",
+            (f"{fixture.pub_schema}.{fixture.target}",),
+        )
+        replacement_xmin = self._scalar(
+            fixture.connection,
+            "SELECT xmin::text FROM pg_class WHERE oid = to_regclass(%s)",
+            (f"{fixture.pub_schema}.{fixture.target}",),
+        )
+
+        # Run 2: re-run against the replaced generation.
+        stdout2, stderr2 = io.StringIO(), io.StringIO()
+        with patch.dict(
+            os.environ,
+            {
+                staging.PASSWORD_ENV_VAR: fixture.loader_password,
+                publish.READER_PASSWORD_ENV_VAR: fixture.reader_password,
+            },
+        ), contextlib.redirect_stdout(stdout2), contextlib.redirect_stderr(stderr2):
+            exit_code_2 = publish_order.main(["--config", str(fixture.config_path)])
+        output_2 = stdout2.getvalue() + stderr2.getvalue()
+        self.assertEqual(1, exit_code_2, output_2)
+
+        failure_lines = [line for line in stderr2.getvalue().splitlines() if line]
+        self.assertEqual(1, len(failure_lines))
+        failure = json.loads(failure_lines[0])
+        self.assertEqual("db_publish", failure["stage"])
+        self.assertEqual("pub_generation_superseded", failure["reason"])
+
+        events = [json.loads(line) for line in stdout2.getvalue().splitlines() if line]
+        self.assertNotIn("publication_summary", [e.get("event") for e in events])
+
+        self.assertEqual(
+            replacement_oid,
+            self._scalar(
+                fixture.connection,
+                "SELECT to_regclass(%s)::oid",
+                (f"{fixture.pub_schema}.{fixture.target}",),
+            ),
+        )
+        self.assertEqual(
+            replacement_xmin,
+            self._scalar(
+                fixture.connection,
+                "SELECT xmin::text FROM pg_class WHERE oid = to_regclass(%s)",
+                (f"{fixture.pub_schema}.{fixture.target}",),
+            ),
+        )
+        self.assertIsNotNone(
+            self._scalar(
+                fixture.connection,
+                "SELECT to_regclass(%s)",
+                (f"{fixture.pub_schema}.{old_name}",),
+            )
+        )
+        self.assertEqual(
+            1,
+            self._scalar(
+                fixture.connection,
+                "SELECT count(*) FROM vicmap_audit.publication "
+                "WHERE run_ts = %s AND manifest_digest = %s",
+                (self._SUPERSEDED_RUN_DIR_NAME, fixture.digest),
+            ),
+        )
+        self.assertEqual(summary_bytes_1, summary_path.read_bytes())
+
+        for text in (output_1, output_2):
             self.assertNotIn(fixture.loader_password, text)
             self.assertNotIn(fixture.reader_password, text)
             self.assertNotIn(str(fixture.config_path.parent), text)
