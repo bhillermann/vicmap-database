@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v0.1
 current_phase: "05.1"
-current_phase_name: "Address tech debt: publish resume path (#16)"
-status: completed
-stopped_at: Phase 05.1 context gathered
-last_updated: "2026-09-29T02:40:44.307Z"
-last_activity: 2026-09-28
-last_activity_desc: Phase 5 complete
-state_head: 467424492b1d121ec8854394ad59aa5002d8c00b
+current_phase_name: "Address tech debt: publish resume path (#16) (INSERTED)"
+status: executing
+stopped_at: Completed 05.1-01-PLAN.md
+last_updated: "2026-09-29T04:13:38.081Z"
+last_activity: 2026-09-29
+last_activity_desc: Phase 05.1 execution started
+state_head: 308b0442543cbb65ecca5af8366fee720da3cb80
 progress:
   total_phases: 6
   completed_phases: 5
   total_plans: 40
-  completed_plans: 35
+  completed_plans: 36
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -24,13 +24,13 @@ milestone_name: End-to-End Vicmap Import Proof
 See: .planning/PROJECT.md (updated 2026-09-25)
 
 **Core value:** End-to-end Vicmap import proof
-**Current focus:** Phase 5 — Approved Legacy Cleanup
+**Current focus:** Phase 05.1 — Address tech debt: publish resume path (#16) (INSERTED)
 
 ## Position
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
 **Current phase:** 05.1
-**Status:** All phases complete
+**Status:** Ready to execute
 
 ## Session Log
 
@@ -41,16 +41,16 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 
 ## Current Position
 
-Phase: 05.1 (Address tech debt: publish resume path (#16)) — READY TO EXECUTE
-Plan: n/a (closed by manual cleanup, 05-CLOSEOUT.md)
-Status: All phases complete; milestone audited (tech_debt)
-Last activity: 2026-09-28 — v0.1 milestone audit
+Phase: 05.1 (Address tech debt: publish resume path (#16) (INSERTED)) — EXECUTING
+Plan: 2 of 5
+Status: Ready to execute
+Last activity: 2026-09-29 — Phase 05.1 execution started
 
 ## Session
 
-**Last session:** 2026-09-29T01:50:13.513Z
-**Stopped at:** Phase 05.1 context gathered
-**Resume file:** .planning/phases/05.1-address-tech-debt-publish-resume-path-16/05.1-CONTEXT.md
+**Last session:** 2026-09-29T04:13:38.018Z
+**Stopped at:** Completed 05.1-01-PLAN.md
+**Resume file:** None
 
 Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd-complete-milestone v0.1.
 **Resume file:** .planning/v0.1-MILESTONE-AUDIT.md
@@ -88,6 +88,7 @@ Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd
 | Phase 03 P04 | 95min | 3 tasks | 6 files |
 | Phase 03 P05 | 55min | 2 tasks | 2 files |
 | Phase 03 P06 | ~45min | 2 tasks | 4 files |
+| Phase 05.1 P01 | 90min | 2 tasks | 7 files |
 
 ## Decisions
 
@@ -169,6 +170,9 @@ Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd
 - [Phase 03]: PrivilegePreflightTest's 5 methods remain skipped: a real superuser role exists for the dev database but this session's tool-use sandbox blocked routing that credential through Bash; recorded as WINDOWS.md #6, owned by future test-DSN provisioning.
 - [Phase 03]: [Phase 03] apply_post_validation_ddl runs primary key, typed geometry column, NOT NULL, GiST index, and allowlisted btree indexes as one transaction; Open Question 1 answered empirically (GDAL already creates both the PK and typed column via FID=gid/known geometry type).
 - [Phase 03]: [Phase 03] GDA94/GDA2020 grid-vs-Helmert question settled with decisive live evidence: ogr2ogr's ONLY_BEST=YES transform matches a grid-free Helmert computation to 4dp, not the vendored ICSM grid, because PROJ's own accuracy metadata (0.01m Helmert vs 0.05m grid) ranks Helmert higher regardless of PROJ_DATA resolution. WINDOWS.md #3 (verification-method blindness) fixed; #2 (grid not selected) remains open with evidence, not a null result.
+- [Phase 05.1]: Server-side OID capture in the marker INSERT (never round-tripped through Python) so no window exists for a stale OID (D-81).
+- [Phase 05.1]: promote_order keeps its exact historical signature (gate then promote); promote_or_resume is the new seam publish_order.py calls, classify-then-branch (D-83/D-86).
+- [Phase 05.1]: Task 2 registers the closed vocabulary (PublicationSuperseded/PublicationSummaryFailed, 21 stages/58 codes) without wiring D-91 into assemble_summary/write_summary yet -- deferred to Plan 05.1-03.
 
 ### Blockers
 

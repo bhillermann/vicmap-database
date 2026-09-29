@@ -242,13 +242,13 @@ Plans:
 4. An ambiguous state (published tables from a different run or digest, or a partial promotion) fails closed with a named reason and issues no `DROP`.
 5. Tests cover the retry-after-post-commit-failure path, and WINDOWS.md #16 is marked fixed with evidence.
 
-**Plans:** 5 plans
+**Plans:** 1/5 plans executed
 
 Plans:
 
 **Wave 1**
 
-- [ ] 05.1-01-PLAN.md — Tracer: write a per-layer `vicmap_audit.publication` marker inside the promotion transaction, classify before any DDL, and resume a committed promotion via `promote_or_resume`, proven live by reproducing the 2026-09-24 incident; register the closed resume vocabulary.
+- [x] 05.1-01-PLAN.md — Tracer: write a per-layer `vicmap_audit.publication` marker inside the promotion transaction, classify before any DDL, and resume a committed promotion via `promote_or_resume`, proven live by reproducing the 2026-09-24 incident; register the closed resume vocabulary.
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
