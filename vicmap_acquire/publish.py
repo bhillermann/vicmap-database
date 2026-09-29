@@ -57,6 +57,8 @@ failure before any DDL must never be misreported as a promotion failure.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -1303,10 +1305,7 @@ def assemble_summary(
     round-tripped through ``SuccessEvent.publication_summary`` (04-01's own
     redaction contract for the event mirror), and the additional per-layer
     staging-validation detail ``summary.json`` carries beyond that minimal
-    vocabulary is checked with the same closed validators directly. A
-    malformed input -- an unsafe scalar, a non-PASS verdict, or a manifest
-    layer with no matching ``validation_rows`` entry -- raises ``ValueError``
-    before anything is returned; there is no partially assembled summary.
+    vocabulary is checked with the same closed validators directly.
 
     D-84: the summary also records whether this run performed or resumed the
     promotion (``"promotion"``) and the original promotion's own timestamp
@@ -1315,112 +1314,129 @@ def assemble_summary(
     rows via ``promotion_result_from_records`` -- never from this run's own
     connection -- so a resumed summary always describes the promotion that
     actually happened, never this re-run's own clock or server session.
+
+    D-91: this function reports at its own ``publication_summary`` boundary.
+    Any exception raised while assembling the summary -- a malformed input
+    (an unsafe scalar, a non-PASS verdict, a manifest layer with no matching
+    ``validation_rows`` entry, a naive ``published_at``), or a missing/
+    unreadable provenance sidecar (``download.ProvenanceUnavailable``) -- is
+    reported as the closed ``PublicationSummaryFailed``, never a raw
+    ``ValueError``/``ProvenanceUnavailable`` and never the CLI's generic
+    ``internal_failure`` fall-through. There is no partially assembled
+    summary: a ``PublishFailure`` (this one included) is re-raised unchanged.
     """
 
-    provenance = download.read_provenance_sidecar(artifact_path, order_id=order_id)
+    try:
+        provenance = download.read_provenance_sidecar(artifact_path, order_id=order_id)
 
-    # D-84: the summary's new promotion field -- whether this run performed
-    # or resumed the promotion. Re-checked here even though PromotionResult
-    # already validates it at construction, so assemble_summary itself never
-    # trusts an untyped value into the returned dict.
-    if publication_result.promotion not in (PROMOTION_PERFORMED, PROMOTION_RESUMED):
-        raise ValueError(
-            "publication_result.promotion must be PROMOTION_PERFORMED or "
-            "PROMOTION_RESUMED"
-        )
-
-    # D-84: the original promotion's own timestamp, timezone-normalized and
-    # fixed-microsecond -- lossless against PostgreSQL timestamptz. A real
-    # PromotionResult already rejects a naive published_at at construction;
-    # this call is what a duck-typed stand-in's naive value trips instead.
-    published_at = evidence._require_utc_timestamp(publication_result.published_at)
-
-    target_tables = tuple(layer.target_table for layer in manifest.layers)
-    layer_count = len(manifest.layers)
-
-    # D-75: round-trip the six EVID-01 link facts through the redacted event
-    # vocabulary 04-01 already defined -- this is the guarantee, not a
-    # decorative parallel construction.
-    event = SuccessEvent.publication_summary(
-        order_id=order_id,
-        message_fingerprint=provenance.message_fingerprint,
-        artifact_sha256=provenance.sha256,
-        manifest_sha256=manifest_digest,
-        layer_count=layer_count,
-        published_tables=publication_result.published_tables,
-        reader_tables_discovered=len(reader_verification.tables_discovered),
-        reader_spatial_query_row_count=reader_verification.spatial_query_row_count,
-        reader_write_denied=reader_verification.write_denied,
-        fingerprint_hex_chars=fingerprint_hex_chars,
-    )
-
-    by_table = {record.target_table: record for record in validation_rows}
-    missing = [table for table in target_tables if table not in by_table]
-    if missing:
-        raise ValueError(
-            "validation_rows is missing a durable PASS row for a manifest layer"
-        )
-
-    staging_validation = []
-    for table in target_tables:
-        record = by_table[table]
-        if record.verdict != "pass":
+        # D-84: the summary's new promotion field -- whether this run
+        # performed or resumed the promotion. Re-checked here even though
+        # PromotionResult already validates it at construction, so
+        # assemble_summary itself never trusts an untyped value into the
+        # returned dict.
+        if publication_result.promotion not in (PROMOTION_PERFORMED, PROMOTION_RESUMED):
             raise ValueError(
-                "validation_rows must carry only a durable PASS verdict"
+                "publication_result.promotion must be PROMOTION_PERFORMED or "
+                "PROMOTION_RESUMED"
             )
-        if isinstance(record.spatial, bool) is False:
-            raise ValueError("spatial must be a bool")
-        if record.spatial:
-            srid = record.srid
-            geometry_type = record.geometry_type
-            repaired_count = record.repaired_count
-            if srid is None or geometry_type is None or repaired_count is None:
-                raise ValueError(
-                    "a spatial layer's staging validation must carry geometry facts"
-                )
-        else:
-            srid = evidence.NOT_APPLICABLE
-            geometry_type = evidence.NOT_APPLICABLE
-            repaired_count = evidence.NOT_APPLICABLE
 
-        staging_validation.append(
-            {
-                "target_table": evidence._require_target_table(record.target_table),
-                "spatial": record.spatial,
-                "row_count": evidence._require_count(record.row_count),
-                "srid": evidence._require_srid_or_not_applicable(srid),
-                "geometry_type": evidence._require_geometry_type_or_not_applicable(
-                    geometry_type
-                ),
-                "repaired_count": evidence._require_count_or_not_applicable(
-                    repaired_count
-                ),
-            }
+        # D-84: the original promotion's own timestamp, timezone-normalized
+        # and fixed-microsecond -- lossless against PostgreSQL timestamptz.
+        # A real PromotionResult already rejects a naive published_at at
+        # construction; this call is what a duck-typed stand-in's naive
+        # value trips instead.
+        published_at = evidence._require_utc_timestamp(publication_result.published_at)
+
+        target_tables = tuple(layer.target_table for layer in manifest.layers)
+        layer_count = len(manifest.layers)
+
+        # D-75: round-trip the six EVID-01 link facts through the redacted
+        # event vocabulary 04-01 already defined -- this is the guarantee,
+        # not a decorative parallel construction.
+        event = SuccessEvent.publication_summary(
+            order_id=order_id,
+            message_fingerprint=provenance.message_fingerprint,
+            artifact_sha256=provenance.sha256,
+            manifest_sha256=manifest_digest,
+            layer_count=layer_count,
+            published_tables=publication_result.published_tables,
+            reader_tables_discovered=len(reader_verification.tables_discovered),
+            reader_spatial_query_row_count=reader_verification.spatial_query_row_count,
+            reader_write_denied=reader_verification.write_denied,
+            fingerprint_hex_chars=fingerprint_hex_chars,
         )
 
-    return {
-        "order_id": event["order_id"],
-        "message_fingerprint": event["message_fingerprint"],
-        "artifact_sha256": event["artifact_sha256"],
-        "manifest_sha256": event["manifest_sha256"],
-        "layer_count": event["layer_count"],
-        "published_tables": event["published_tables"],
-        "server_version": evidence._require_server_version(
-            publication_result.server_version
-        ),
-        "promotion": publication_result.promotion,
-        "published_at": published_at,
-        "staging_validation": staging_validation,
-        "reader": {
-            "tables_discovered": [
-                evidence._require_target_table(table)
-                for table in reader_verification.tables_discovered
-            ],
-            "tables_discovered_count": event["reader_tables_discovered"],
-            "spatial_query_row_count": event["reader_spatial_query_row_count"],
-            "write_denied": event["reader_write_denied"],
-        },
-    }
+        by_table = {record.target_table: record for record in validation_rows}
+        missing = [table for table in target_tables if table not in by_table]
+        if missing:
+            raise ValueError(
+                "validation_rows is missing a durable PASS row for a manifest layer"
+            )
+
+        staging_validation = []
+        for table in target_tables:
+            record = by_table[table]
+            if record.verdict != "pass":
+                raise ValueError(
+                    "validation_rows must carry only a durable PASS verdict"
+                )
+            if isinstance(record.spatial, bool) is False:
+                raise ValueError("spatial must be a bool")
+            if record.spatial:
+                srid = record.srid
+                geometry_type = record.geometry_type
+                repaired_count = record.repaired_count
+                if srid is None or geometry_type is None or repaired_count is None:
+                    raise ValueError(
+                        "a spatial layer's staging validation must carry geometry facts"
+                    )
+            else:
+                srid = evidence.NOT_APPLICABLE
+                geometry_type = evidence.NOT_APPLICABLE
+                repaired_count = evidence.NOT_APPLICABLE
+
+            staging_validation.append(
+                {
+                    "target_table": evidence._require_target_table(record.target_table),
+                    "spatial": record.spatial,
+                    "row_count": evidence._require_count(record.row_count),
+                    "srid": evidence._require_srid_or_not_applicable(srid),
+                    "geometry_type": evidence._require_geometry_type_or_not_applicable(
+                        geometry_type
+                    ),
+                    "repaired_count": evidence._require_count_or_not_applicable(
+                        repaired_count
+                    ),
+                }
+            )
+
+        return {
+            "order_id": event["order_id"],
+            "message_fingerprint": event["message_fingerprint"],
+            "artifact_sha256": event["artifact_sha256"],
+            "manifest_sha256": event["manifest_sha256"],
+            "layer_count": event["layer_count"],
+            "published_tables": event["published_tables"],
+            "server_version": evidence._require_server_version(
+                publication_result.server_version
+            ),
+            "promotion": publication_result.promotion,
+            "published_at": published_at,
+            "staging_validation": staging_validation,
+            "reader": {
+                "tables_discovered": [
+                    evidence._require_target_table(table)
+                    for table in reader_verification.tables_discovered
+                ],
+                "tables_discovered_count": event["reader_tables_discovered"],
+                "spatial_query_row_count": event["reader_spatial_query_row_count"],
+                "write_denied": event["reader_write_denied"],
+            },
+        }
+    except PublishFailure:
+        raise
+    except Exception:
+        raise PublicationSummaryFailed() from None
 
 
 def summary_to_publication_event(summary: dict) -> SuccessEvent:
@@ -1429,42 +1445,111 @@ def summary_to_publication_event(summary: dict) -> SuccessEvent:
     ``assemble_summary`` already ran -- so the event ``publish_order.py``
     renders is provably the ``summary.json`` file's own mirror, never a
     second, independently constructed payload (the one-output-mechanism
-    guarantee D-75 describes)."""
+    guarantee D-75 describes).
 
-    reader = summary["reader"]
-    return SuccessEvent.publication_summary(
-        order_id=summary["order_id"],
-        message_fingerprint=summary["message_fingerprint"],
-        artifact_sha256=summary["artifact_sha256"],
-        manifest_sha256=summary["manifest_sha256"],
-        layer_count=summary["layer_count"],
-        published_tables=tuple(summary["published_tables"]),
-        reader_tables_discovered=reader["tables_discovered_count"],
-        reader_spatial_query_row_count=reader["spatial_query_row_count"],
-        reader_write_denied=reader["write_denied"],
-    )
+    D-91: reports at the same ``publication_summary`` boundary as
+    ``assemble_summary`` -- a malformed ``summary`` dict (e.g. missing its
+    ``"reader"`` key, a ``KeyError``) raises the closed
+    ``PublicationSummaryFailed``, never a raw ``KeyError`` or the CLI's
+    generic ``internal_failure``. A ``PublishFailure`` is re-raised
+    unchanged."""
+
+    try:
+        reader = summary["reader"]
+        return SuccessEvent.publication_summary(
+            order_id=summary["order_id"],
+            message_fingerprint=summary["message_fingerprint"],
+            artifact_sha256=summary["artifact_sha256"],
+            manifest_sha256=summary["manifest_sha256"],
+            layer_count=summary["layer_count"],
+            published_tables=tuple(summary["published_tables"]),
+            reader_tables_discovered=reader["tables_discovered_count"],
+            reader_spatial_query_row_count=reader["spatial_query_row_count"],
+            reader_write_denied=reader["write_denied"],
+        )
+    except PublishFailure:
+        raise
+    except Exception:
+        raise PublicationSummaryFailed() from None
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Fsync a directory entry after ``write_summary``'s atomic replace, so a
+    completed (over)write is durably recorded (D-85).
+
+    A private per-module copy of ``manifest.py``'s own helper of the same
+    name and shape -- that module's docstring already records the same
+    convention ``extraction.py`` and ``download.py`` follow, so a third
+    private copy here follows the established pattern rather than importing
+    across modules for no contract reason. Any ``OSError`` from opening,
+    syncing, or closing the directory descriptor is swallowed: the summary
+    write itself has already been durably replaced by the time this runs,
+    and this call only strengthens durability, never correctness."""
+
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
 
 
 def write_summary(run_directory: Path, summary: dict) -> Path:
-    """Durably write ``summary.json`` into ``run_directory`` (D-75's file
-    deliverable) as canonical UTF-8 JSON, mirroring ``manifest.py``'s own
-    ``json.dumps(..., sort_keys=True, ensure_ascii=False)`` idiom exactly, so
-    the file is byte-stable given the same summary content.
+    """Durably (over)write ``summary.json`` into ``run_directory`` (D-75's
+    file deliverable) as canonical UTF-8 JSON, mirroring ``manifest.py``'s
+    own ``json.dumps(..., sort_keys=True, ensure_ascii=False)`` idiom
+    exactly, so the file is byte-stable given the same summary content.
 
-    Unlike ``manifest.json``, this file is never digest-verified by another
-    process (it lives in the git-ignored ``runs/`` tree as the milestone's
-    proof artifact, not a durable receipt something else reads back), so a
-    plain write -- not the atomic exclusive-create dance ``write_manifest``
-    uses -- is sufficient; a retried publish simply overwrites it. Any
-    ``OSError`` propagates unwrapped -- there is no dedicated reason code for
-    a summary-write failure, so it is deliberately left for the CLI's
-    catch-all ``INTERNAL_FAILURE`` mapping, exactly as an unexpected failure
-    should be.
+    D-85: a re-run after a fully successful run is an ordinary resume, which
+    makes this a real overwrite path -- so the write is atomic. A
+    same-directory temporary file (``tempfile.NamedTemporaryFile`` with
+    ``delete=False``, so it survives the ``with`` block's close) is written,
+    flushed, and fsynced, then ``os.replace``-d over ``summary.json`` -- one
+    atomic rename the kernel never exposes half-done -- and the run
+    directory's own entry is fsynced afterward (mirroring ``manifest.py``'s
+    same-directory fsync durability idiom via this module's own private
+    ``_fsync_directory`` copy).
+
+    D-91: any exception before the replace completes -- a nonexistent
+    ``run_directory``, a failed write, or a failed ``os.replace`` -- is
+    reported as the closed ``PublicationSummaryFailed``, with the temp file
+    best-effort unlinked first. A failed write therefore always leaves any
+    prior ``summary.json`` byte-identical and no temp file behind.
     """
 
     canonical = json.dumps(
         summary, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
     summary_path = Path(run_directory) / "summary.json"
-    summary_path.write_text(canonical + "\n", encoding="utf-8")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=run_directory,
+            prefix=".summary.",
+            suffix=".json.tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(canonical + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, summary_path)
+        temp_path = None
+        _fsync_directory(Path(run_directory))
+    except Exception:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        raise PublicationSummaryFailed() from None
     return summary_path

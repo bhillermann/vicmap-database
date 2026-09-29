@@ -1862,8 +1862,9 @@ class WriteSummaryTest(unittest.TestCase):
                     publish.write_summary(run_directory, {"a": 2})
 
             entries = sorted(p.name for p in run_directory.iterdir())
+            after_bytes = (run_directory / "summary.json").read_bytes()
         self.assertEqual(["summary.json"], entries)
-        self.assertEqual(prior_bytes, (run_directory / "summary.json").read_bytes())
+        self.assertEqual(prior_bytes, after_bytes)
 
 
 class _LivePublishMixin:
