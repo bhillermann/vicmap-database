@@ -167,7 +167,8 @@ class PromotionResult:
     back from the durable marker, never this run's own clock), and
     ``promotion`` -- exactly ``PROMOTION_PERFORMED`` or ``PROMOTION_RESUMED``,
     validated so a typo can never silently produce a third, unrecognised
-    value."""
+    value. ``published_at`` must also be timezone-aware (D-84), validated
+    identically to ``evidence._require_utc_timestamp``."""
 
     server_version: str
     published_tables: tuple[str, ...]
@@ -179,6 +180,16 @@ class PromotionResult:
             raise ValueError(
                 "promotion must be exactly PROMOTION_PERFORMED or PROMOTION_RESUMED"
             )
+        # D-84: published_at must be timezone-aware, exactly like
+        # evidence._require_utc_timestamp's own check -- validated here too
+        # so a naive timestamp can never reach assemble_summary through a
+        # real result (only a duck-typed stand-in can exercise that guard).
+        if (
+            not isinstance(self.published_at, datetime)
+            or self.published_at.tzinfo is None
+            or self.published_at.utcoffset() is None
+        ):
+            raise ValueError("published_at must be a timezone-aware datetime")
 
 
 @dataclass(frozen=True)
@@ -1296,6 +1307,14 @@ def assemble_summary(
     malformed input -- an unsafe scalar, a non-PASS verdict, or a manifest
     layer with no matching ``validation_rows`` entry -- raises ``ValueError``
     before anything is returned; there is no partially assembled summary.
+
+    D-84: the summary also records whether this run performed or resumed the
+    promotion (``"promotion"``) and the original promotion's own timestamp
+    (``"published_at"``, rendered through ``evidence._require_utc_timestamp``).
+    On a resumed run both come from the durable ``vicmap_audit.publication``
+    rows via ``promotion_result_from_records`` -- never from this run's own
+    connection -- so a resumed summary always describes the promotion that
+    actually happened, never this re-run's own clock or server session.
     """
 
     provenance = download.read_provenance_sidecar(artifact_path, order_id=order_id)
@@ -1309,6 +1328,12 @@ def assemble_summary(
             "publication_result.promotion must be PROMOTION_PERFORMED or "
             "PROMOTION_RESUMED"
         )
+
+    # D-84: the original promotion's own timestamp, timezone-normalized and
+    # fixed-microsecond -- lossless against PostgreSQL timestamptz. A real
+    # PromotionResult already rejects a naive published_at at construction;
+    # this call is what a duck-typed stand-in's naive value trips instead.
+    published_at = evidence._require_utc_timestamp(publication_result.published_at)
 
     target_tables = tuple(layer.target_table for layer in manifest.layers)
     layer_count = len(manifest.layers)
@@ -1384,6 +1409,7 @@ def assemble_summary(
             publication_result.server_version
         ),
         "promotion": publication_result.promotion,
+        "published_at": published_at,
         "staging_validation": staging_validation,
         "reader": {
             "tables_discovered": [

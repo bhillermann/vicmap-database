@@ -156,6 +156,18 @@ def main(argv: list[str] | None = None) -> int:
             manifest, policy, loader_password, run_timestamp, digest
         )
 
+        # D-84: a resumed run is visible on the JSON Lines stream, before the
+        # reader proof and validation re-read that follow run exactly as they
+        # do for a fresh promotion (D-85/D-89) -- resuming changes nothing
+        # about the rest of this pipeline.
+        if publication_result.promotion == publish.PROMOTION_RESUMED:
+            render_event(
+                ProgressEvent.publication_resumed(
+                    published_tables=publication_result.published_tables,
+                    published_at=publication_result.published_at,
+                )
+            )
+
         # D-74/PUB-04/PUB-05: a real, independently-authenticated reader
         # login -- never SET ROLE from the loader connection.
         reader_verification = publish.verify_reader_access(
