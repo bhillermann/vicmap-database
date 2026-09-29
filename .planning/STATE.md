@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 milestone: v0.1
 current_phase: "05.1"
-current_phase_name: Approved Legacy Cleanup
+current_phase_name: "Address tech debt: publish resume path (#16)"
 status: completed
 stopped_at: Phase 05.1 context gathered
-last_updated: "2026-09-29T01:50:13.685Z"
+last_updated: "2026-09-29T02:40:44.307Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 5 complete
-state_head: f0f1c3d15631b4fbd985eee35866826dd3f0a63e
+state_head: 467424492b1d121ec8854394ad59aa5002d8c00b
 progress:
   total_phases: 6
   completed_phases: 5
-  total_plans: 35
+  total_plans: 40
   completed_plans: 35
 milestone_name: End-to-End Vicmap Import Proof
 ---
@@ -41,7 +41,7 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 
 ## Current Position
 
-Phase: 05 (Approved Legacy Cleanup) — complete
+Phase: 05.1 (Address tech debt: publish resume path (#16)) — READY TO EXECUTE
 Plan: n/a (closed by manual cleanup, 05-CLOSEOUT.md)
 Status: All phases complete; milestone audited (tech_debt)
 Last activity: 2026-09-28 — v0.1 milestone audit
