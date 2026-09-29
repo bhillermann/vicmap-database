@@ -380,6 +380,68 @@ class ProvisionScriptTest(unittest.TestCase):
             config = read_mailbox.load_database_config(_write_policy(directory))
         self.assertIn(f"create role {config.reader_user} login", self._sql_text().lower())
 
+    def test_publication_marker_table_created(self):
+        # D-78/D-80/D-81: the publication marker table's shape and primary
+        # key, scoped to the CREATE TABLE statement's own body so a match
+        # elsewhere in the script (e.g. staging_validation's own primary
+        # key) can never satisfy this assertion.
+        low = self._sql_text().lower()
+        marker = "create table if not exists vicmap_audit.publication"
+        self.assertIn(marker, low)
+        start = low.index(marker)
+        end = low.index(");", start) + len(");")
+        block = low[start:end]
+        self.assertIn("table_oid oid not null", block)
+        self.assertIn("server_version text not null", block)
+        self.assertIn("published_at timestamptz not null", block)
+        self.assertIn(
+            "primary key (run_ts, manifest_digest, target_table)", block
+        )
+
+    def test_loader_granted_select_insert_only_on_publication_table(self):
+        import re
+
+        low = self._sql_text().lower()
+        self.assertRegex(
+            low,
+            r"grant\s+select\s*,\s*insert\s+on\s+vicmap_audit\.publication\s+to\s+vicmap_loader",
+        )
+        self.assertIsNone(
+            re.search(
+                r"grant\s+[^;]*\b(update|delete|truncate|all)\b[^;]*\bon\s+vicmap_audit\.publication\b",
+                low,
+            ),
+            "no statement may grant update/delete/truncate/all on"
+            " vicmap_audit.publication",
+        )
+        self.assertIsNone(
+            re.search(
+                r"grant\s+[^;]*\bon\s+(schema\s+vicmap_audit"
+                r"|(all\s+)?tables?\s+in\s+schema\s+vicmap_audit)\b"
+                r"[^;]*\bto\s+vicmap_reader",
+                low,
+            ),
+            "vicmap_reader must not be granted anything on schema or"
+            " tables in vicmap_audit",
+        )
+
+    def test_publication_verification_queries_present(self):
+        low = self._sql_text().lower()
+        privileges = ("insert", "select", "update", "delete")
+        for priv in privileges:
+            self.assertIn(
+                f"has_table_privilege('vicmap_loader', 'vicmap_audit.publication', '{priv}')",
+                low,
+            )
+        self.assertEqual(
+            low.count(
+                "has_table_privilege('vicmap_loader', 'vicmap_audit.publication',"
+            ),
+            4,
+            "expected exactly four vicmap_audit.publication"
+            " has_table_privilege verification lines",
+        )
+
 
 def _staging_policy(**overrides) -> staging.StagingPolicy:
     kwargs = dict(
