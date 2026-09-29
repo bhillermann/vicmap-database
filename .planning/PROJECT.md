@@ -28,6 +28,7 @@ Vicmap updates must reach the correct PostGIS layers automatically without expos
 - ✓ Load delivered layers into staging and migrate them into production tables in a dedicated `vicmap` schema — Phase 4
 - ✓ Make the resulting production tables queryable by database users — Phase 4
 - ✓ Inventory abandoned WFS-attempt tables and remove only tables explicitly approved for deletion — Phase 5 (satisfied by manual cleanup; no WFS tables remained)
+- ✓ Re-running publication after a post-commit failure resumes the committed promotion instead of re-promoting, and any unprovable live state fails closed with no DDL — Phase 05.1 (publish slice of OPS-03)
 
 ### Active
 
@@ -74,6 +75,7 @@ No message interpretation, delivery ledger, download client, geodatabase inspect
 | Trust configured sender addresses or domains | Establishes a practical boundary before accepting emailed download links | — Pending |
 | Report through journald and failure-only email | Keeps routine operation observable without creating success-notification noise | — Pending |
 | Close legacy cleanup (Phase 5) as satisfied by manual action | Operator removed abandoned WFS tables manually; live 2026-09-28 catalog check found none, so building approval-gated deletion tooling had no targets | ✓ Phase 5 — CLN-01–CLN-05 satisfied; deletion tool deferred |
+| Prove publication provenance with a durable per-layer marker row (`vicmap_audit.publication`) plus a matching live pg_class OID, never by table name or staging absence | A crash after COMMIT left published tables that a re-run could neither safely re-promote nor distinguish from foreign ones (WINDOWS #16) | ✓ Phase 05.1 — resume proven live (LivePublishOrderResumeTest); concurrent-run locking deferred to OPS-05 |
 
 ## Evolution
 
@@ -93,4 +95,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-28 after Phase 5*
+*Last updated: 2026-09-29 after Phase 05.1*

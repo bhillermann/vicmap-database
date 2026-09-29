@@ -3,17 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.1
 current_phase: "05.1"
 current_phase_name: "Address tech debt: publish resume path (#16) (INSERTED)"
-status: verifying
-stopped_at: Completed 05.1-05-PLAN.md
-last_updated: "2026-09-29T06:18:40.184Z"
+status: completed
+stopped_at: Phase 05.1 complete — all phases complete
+last_updated: "2026-09-29T09:02:08.191Z"
 last_activity: 2026-09-29
-last_activity_desc: Phase 05.1 execution started
-state_head: 7e2368bb8ac2ac896be9e5daac542756b6245d8d
+last_activity_desc: Phase 05.1 complete
+state_head: 9dd9aa890a0ddc5633290c959bceed255764c458
 progress:
   total_phases: 6
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 40
   completed_plans: 40
+  percent: 100
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -30,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
 **Current phase:** 05.1
-**Status:** Phase complete — ready for verification
+**Status:** All phases complete
 
 ## Session Log
 
@@ -38,22 +39,22 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 - 2026-09-23: Phases 1-3 re-verified (passed; phase 3 human-signed-off PROHIB-08/-10). Phase 4 researched, planned (6 plans, plan-checker PASS), and executed CODE-ONLY (619 tests OK, 43 skipped). Live promotion/verification deferred.
 - 2026-09-25: Phase 4 completed. CR-01 fixed (bf6c624); two security/data-preservation negative paths (PUB-03 rollback, T-04-02 broken-grant reader trip) fleshed out from stubs and induced live-green; 04-VERIFICATION.md re-verified at HEAD → passed; transitioned to Phase 5.
 - 2026-09-28: Phase 5 closed by manual cleanup. validate-phase run for phases 02-04 (all nyquist_compliant); 703f85c replaced the Phase 4 Live* skip stubs with real live tests (621 OK, 0 skipped). Milestone audit v0.1 → tech_debt (27/27 requirements). WINDOWS.md tidied: #1, #8-#15 marked fixed; open = #2, #4, #7, #16.
+- 2026-09-29: Phase 05.1 (WINDOWS #16 publish resume path) executed, verified and closed: UAT 4/4 (PROHIB-11/12/13 + concurrent-run backstop accepted until OPS-05), 704 tests live OK / 0 skipped, Nyquist-compliant, SECURITY threats_open 0. Milestone v0.1 phases all complete.
 
 ## Current Position
 
-Phase: 05.1 (Address tech debt: publish resume path (#16) (INSERTED)) — EXECUTING
-Plan: 5 of 5
-Status: Phase complete — ready for verification
-Last activity: 2026-09-29 — Phase 05.1 execution started
+Phase: 05.1 (Address tech debt: publish resume path (#16) (INSERTED)) — COMPLETE
+Plan: 5 of 5 complete
+Status: All phases complete — milestone v0.1 ready to close
+Last activity: 2026-09-29 — Phase 05.1 complete
 
 ## Session
 
-**Last session:** 2026-09-29T06:18:40.110Z
-**Stopped at:** Completed 05.1-05-PLAN.md
+**Last session:** 2026-09-29
+**Stopped at:** Phase 05.1 complete — all phases complete
 **Resume file:** None
 
-Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd-complete-milestone v0.1.
-**Resume file:** .planning/v0.1-MILESTONE-AUDIT.md
+Next: /gsd-complete-milestone v0.1 (WINDOWS #16 fixed in Phase 05.1; open tech debt = #2, #4, #7).
 
 ## Performance Metrics
 

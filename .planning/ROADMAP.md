@@ -11,6 +11,7 @@ Milestone v0.1 proves one real Vicmap delivery end to end. Work proceeds from tr
 - [x] **Phase 3: Validated PostGIS Staging** — Preflight the live database and load every selected layer into validated isolated staging tables. (completed 2026-09-22)
 - [x] **Phase 4: Transactional Publication and Access** — Atomically publish the order into `vicmap` and prove non-owner access with redacted evidence. (completed 2026-09-25)
 - [x] **Phase 5: Approved Legacy Cleanup** — Inventory suspected abandoned WFS tables and delete only exact, revalidated, explicitly approved targets. (completed 2026-09-28)
+- [x] **Phase 05.1: Address tech debt: publish resume path (#16)** (INSERTED) — Resume a committed promotion via a durable per-layer marker and fail closed with no DDL on every ambiguous state. (completed 2026-09-29)
 
 ### Phase 1: Trusted Graph Acquisition
 
@@ -222,6 +223,7 @@ Plans:
 | 3. Validated PostGIS Staging | 6/6 | Complete    | 2026-09-22 |
 | 4. Transactional Publication and Access | 6/6 | Complete    | 2026-09-25 |
 | 5. Approved Legacy Cleanup | 0/0 | Complete    | 2026-09-28 |
+| 05.1. Address tech debt: publish resume path (#16) | 5/5 | Complete    | 2026-09-29 |
 
 ---
 *Roadmap created: 2026-09-01*
@@ -242,7 +244,7 @@ Plans:
 4. An ambiguous state (published tables from a different run or digest, or a partial promotion) fails closed with a named reason and issues no `DROP`.
 5. Tests cover the retry-after-post-commit-failure path, and WINDOWS.md #16 is marked fixed with evidence.
 
-**Plans:** 5/5 plans executed
+**Plans:** 5/5 plans complete
 
 Plans:
 
