@@ -39,7 +39,7 @@ major version (research Open Question 1). Every failure maps to one closed,
 code-only exception whose ``.code`` equals the matching ``evidence.ReasonCode``;
 no exception message ever carries driver, subprocess, or SQL text.
 
-D-78..D-86 (05.1): a durable per-layer ``vicmap_audit.publication`` marker is
+D-78..D-92 (05.1): a durable per-layer ``vicmap_audit.publication`` marker is
 written inside the same promotion transaction (D-79), carrying the published
 table's ``pg_class`` OID plus ``server_version``/``published_at`` (D-81/D-82).
 Every ``publish_order.py`` invocation classifies each manifest layer before
@@ -48,10 +48,23 @@ staging absent with a marker whose OID matches the live table resumes by
 reconstructing ``PromotionResult`` from the durable rows, never re-entering
 the promotion transaction. ``promote_or_resume`` is the one seam
 ``publish_order.py`` calls (D-83) -- auto-detected on a plain re-run, no
-flag. Classification and other read-only audit reads run on a distinct
-connect helper (``_connect_for_audit_read``) whose failures map to the
-closed ``AuditReadFailed``, never ``PromotionFailed`` (D-90) -- a read-only
-failure before any DDL must never be misreported as a promotion failure.
+flag. The D-68 gate, classification, and ``read_layer_validations`` all run
+on a distinct connect helper (``_connect_for_audit_read``) whose failures
+map to the closed ``AuditReadFailed``, never ``PromotionFailed`` (D-90) -- a
+vicmap_audit read, before or after the promotion transaction commits, must
+never be misreported as a promotion failure. On a ``PROMOTE`` verdict,
+classification also fails closed with ``AuditPrivilegeDenied`` before any
+DDL if the loader lacks INSERT on the marker table (Open Question 2/D-78).
+
+Failure-boundary map (D-90/D-91/D-92): the promotion transaction itself --
+its DDL, the reader grant, the marker insert, or the promotion connection --
+is the only source of ``pub_promotion_failed``; a vicmap_audit read (the
+gate, classification, or ``read_layer_validations``) gives
+``db_audit_read_failed`` or ``db_audit_privilege_denied``; a fail-closed
+classification outcome gives ``pub_generation_superseded`` or
+``pub_generation_ambiguous`` (D-87); ``assemble_summary``/``write_summary``
+give ``pub_summary_failed`` (D-91); ``verify_reader_access`` keeps its own
+``db_reader_verify`` codes, unaffected.
 """
 
 from __future__ import annotations
@@ -592,12 +605,26 @@ def classify_publication_state(
 
     Every ``staging.staging_table_name`` is computed before connecting, so a
     naming failure keeps its own ``StagingFailure`` code rather than being
-    swallowed by this function's own exception mapping. On a ``SUPERSEDED``
-    verdict this raises ``PublicationSuperseded`` directly, and on an
-    ``AMBIGUOUS`` verdict it raises ``PublicationAmbiguous`` directly -- both
-    after this function's own connection has already closed and before any
-    promotion connection could open -- so callers never have to re-derive
-    the fail-closed outcome themselves."""
+    swallowed by this function's own exception mapping.
+
+    Open Question 2 (D-78, resolved): on a ``PROMOTE`` verdict, and only
+    then, this also checks whether the loader holds ``INSERT`` on the
+    marker table (``vicmap_audit.publication``) via ``has_table_privilege``,
+    on this same still-open connection, before it closes and before any
+    promotion connection could open. A loader that cannot write the marker
+    fails closed here with ``AuditPrivilegeDenied`` -- the pre-DDL check
+    Research Open Question 2 resolves in place of extending
+    ``staging.preflight_staging_privileges`` -- rather than only discovering
+    the missing grant as a rolled-back ``pub_promotion_failed`` deep inside
+    the promotion transaction. ``RESUME`` and every fail-closed verdict never
+    run this check.
+
+    On a ``SUPERSEDED`` verdict this raises ``PublicationSuperseded``
+    directly, and on an ``AMBIGUOUS`` verdict it raises
+    ``PublicationAmbiguous`` directly -- both after this function's own
+    connection has already closed and before any promotion connection could
+    open -- so callers never have to re-derive the fail-closed outcome
+    themselves."""
 
     staging_names = {
         target: staging.staging_table_name(target, run_timestamp)
@@ -644,8 +671,25 @@ def classify_publication_state(
                 cases.append(case)
                 if record is not None:
                     records.append(record)
+
+            # D-86/Open Question 2: the verdict must be known before this
+            # connection closes, so a PROMOTE verdict's marker-privilege
+            # precheck can run on it -- never a separate, later connection.
+            verdict = order_verdict(tuple(cases))
+
+            if verdict == PublicationVerdict.PROMOTE:
+                marker_relation = f"{AUDIT_SCHEMA}.{PUBLICATION_TABLE}"
+                cursor.execute(
+                    "SELECT has_table_privilege(current_user, %s, 'INSERT')",
+                    (marker_relation,),
+                )
+                (can_insert,) = cursor.fetchone()
+                if can_insert is not True:
+                    raise AuditPrivilegeDenied()
     except pg_errors.InsufficientPrivilege:
         raise AuditPrivilegeDenied() from None
+    except AuditPrivilegeDenied:
+        raise
     except PublishFailure:
         raise
     except Exception:
@@ -653,7 +697,6 @@ def classify_publication_state(
     finally:
         connection.close()
 
-    verdict = order_verdict(tuple(cases))
     if verdict == PublicationVerdict.SUPERSEDED:
         raise PublicationSuperseded()
     if verdict == PublicationVerdict.AMBIGUOUS:
