@@ -201,11 +201,16 @@ class LayerCase(str, Enum):
     normally). ``RESUMABLE``: staging absent, this run's marker exists, and
     the live OID matches it (case B -- resume). ``SUPERSEDED``: staging
     absent, a marker exists, but the live table is missing or its OID
-    differs (case C -- refined by Plan 05.1-02). ``UNPROVEN``: staging
-    absent and no marker for this run (case D -- includes every table
-    published before this fix, per D-88's explicit no-backfill rule).
-    ``CONFLICTED``: staging present *and* a marker already exists for this
-    run (an inconsistent state no ordinary retry produces)."""
+    differs (case C -- this run did publish, but the generation has since
+    been replaced or removed out of band). ``UNPROVEN``: staging absent and
+    no marker for this run (case D -- includes every table published before
+    this fix, per D-88's explicit no-backfill rule). ``CONFLICTED``: staging
+    present *and* a marker already exists for this run -- an inconsistent
+    state no ordinary retry produces, and not one of D-86's lettered cases
+    (D-86 enumerates A-E over staging/marker/live-OID combinations; a run
+    that is both freshly staged and already marked was never anticipated,
+    so it is resolved fail-closed as ambiguous rather than assigned a
+    letter of its own)."""
 
     STAGED = "staged"
     RESUMABLE = "resumable"
@@ -215,12 +220,15 @@ class LayerCase(str, Enum):
 
 
 class PublicationVerdict(str, Enum):
-    """The order-level D-86 verdict: ``PROMOTE`` only when every layer is
-    ``STAGED``; ``RESUME`` only when every layer is ``RESUMABLE``; every
-    other combination -- any ``SUPERSEDED``, any ``UNPROVEN``, or a mixed
-    order -- is ``AMBIGUOUS`` in this plan (Plan 05.1-02 splits out a
-    dedicated ``SUPERSEDED`` outcome). Every ambiguous outcome issues no
-    ``DROP`` and no DDL."""
+    """The order-level D-86 verdict, exact precedence (Plan 05.1-02
+    objective): ``PROMOTE`` only when every layer is ``STAGED``; ``RESUME``
+    only when every layer is ``RESUMABLE``; ``SUPERSEDED`` only when every
+    layer is ``RESUMABLE`` or ``SUPERSEDED`` and at least one is
+    ``SUPERSEDED`` (this run really did publish the whole order and part of
+    it was replaced since); everything else -- any ``UNPROVEN``, any
+    ``CONFLICTED``, ``STAGED`` mixed with anything, ``SUPERSEDED`` mixed with
+    ``STAGED`` or ``UNPROVEN``, or an empty tuple -- is ``AMBIGUOUS``. Every
+    non-``PROMOTE``/``RESUME`` outcome issues no ``DROP`` and no DDL."""
 
     PROMOTE = "promote"
     RESUME = "resume"
@@ -500,15 +508,16 @@ def classify_layer(
     live_oid: int | None,
 ) -> LayerCase:
     """D-86's pure per-layer classification from three independently-read
-    facts. Staging present with no marker is a fresh, never-promoted layer
-    (STAGED); staging present with a marker already recorded for this run is
-    an inconsistency no ordinary retry produces (CONFLICTED). Staging absent
-    with no marker has no provenance at all (UNPROVEN, D-88's exact case --
-    never inferred as resumable just because staging is gone). Staging
-    absent with a marker is RESUMABLE only when the live OID equals the
-    marker's own recorded OID (``live_oid is None`` is never equal to
-    anything); any other live state -- missing table, out-of-band replace --
-    is SUPERSEDED."""
+    facts, mapped to D-86's lettered cases. Staging present with no marker
+    is case A, a fresh, never-promoted layer (STAGED). Staging present with
+    a marker already recorded for this run is the conflicted edge D-86 does
+    not letter -- an inconsistency no ordinary retry produces (CONFLICTED).
+    Staging absent with no marker is case D: no provenance at all (UNPROVEN,
+    D-88's exact case -- never inferred as resumable just because staging is
+    gone). Staging absent with a marker is case B, RESUMABLE, only when the
+    live OID equals the marker's own recorded OID exactly, as Python ints
+    (``live_oid is None`` is never equal to anything); any other live state
+    -- missing table, out-of-band replace -- is case C, SUPERSEDED."""
 
     if staging_oid is not None:
         return LayerCase.CONFLICTED if record is not None else LayerCase.STAGED
@@ -520,17 +529,29 @@ def classify_layer(
 
 
 def order_verdict(cases: tuple[LayerCase, ...]) -> PublicationVerdict:
-    """D-86's pure order-level verdict. A non-empty tuple that is entirely
-    ``STAGED`` promotes; a non-empty tuple that is entirely ``RESUMABLE``
-    resumes. Every other combination -- any ``SUPERSEDED``, any
-    ``UNPROVEN``, ``CONFLICTED``, a mixed order, or an empty tuple -- is
-    ``AMBIGUOUS`` in this plan. Plan 05.1-02 refines a dedicated
-    ``SUPERSEDED`` outcome."""
+    """D-86's pure order-level verdict. The fixed precedence (Plan 05.1-02
+    objective):
+
+    - non-empty and every case ``STAGED`` -> ``PROMOTE``.
+    - non-empty and every case ``RESUMABLE`` -> ``RESUME``.
+    - non-empty, every case ``RESUMABLE`` or ``SUPERSEDED``, and at least one
+      ``SUPERSEDED`` -> ``SUPERSEDED`` (this run did publish the whole
+      order, and part of it was replaced or removed since).
+    - everything else -- any ``UNPROVEN``, any ``CONFLICTED``, ``STAGED``
+      mixed with anything, ``SUPERSEDED`` mixed with ``STAGED`` or
+      ``UNPROVEN``, or an empty tuple -- -> ``AMBIGUOUS``.
+
+    Both ``SUPERSEDED`` and ``AMBIGUOUS`` fail closed with no ``DROP`` and no
+    DDL; only the remediation hint differs (D-86/D-87)."""
 
     if cases and all(case == LayerCase.STAGED for case in cases):
         return PublicationVerdict.PROMOTE
     if cases and all(case == LayerCase.RESUMABLE for case in cases):
         return PublicationVerdict.RESUME
+    if cases and all(
+        case in (LayerCase.RESUMABLE, LayerCase.SUPERSEDED) for case in cases
+    ) and any(case == LayerCase.SUPERSEDED for case in cases):
+        return PublicationVerdict.SUPERSEDED
     return PublicationVerdict.AMBIGUOUS
 
 
@@ -550,9 +571,12 @@ def classify_publication_state(
 
     Every ``staging.staging_table_name`` is computed before connecting, so a
     naming failure keeps its own ``StagingFailure`` code rather than being
-    swallowed by this function's own exception mapping. On an
-    ``AMBIGUOUS`` verdict this raises ``PublicationAmbiguous`` directly, so
-    callers never have to re-derive the fail-closed outcome themselves."""
+    swallowed by this function's own exception mapping. On a ``SUPERSEDED``
+    verdict this raises ``PublicationSuperseded`` directly, and on an
+    ``AMBIGUOUS`` verdict it raises ``PublicationAmbiguous`` directly -- both
+    after this function's own connection has already closed and before any
+    promotion connection could open -- so callers never have to re-derive
+    the fail-closed outcome themselves."""
 
     staging_names = {
         target: staging.staging_table_name(target, run_timestamp)
@@ -609,6 +633,8 @@ def classify_publication_state(
         connection.close()
 
     verdict = order_verdict(tuple(cases))
+    if verdict == PublicationVerdict.SUPERSEDED:
+        raise PublicationSuperseded()
     if verdict == PublicationVerdict.AMBIGUOUS:
         raise PublicationAmbiguous()
 
