@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 4
+open_count: 3
 waived_count: 0
-fixed_count: 12
+fixed_count: 13
 total_count: 16
-last_updated: 2026-09-28T06:30:00.000Z
+last_updated: 2026-09-29T06:14:07.824Z
 ---
 
 # Broken Windows Ledger
@@ -30,7 +30,7 @@ last_updated: 2026-09-28T06:30:00.000Z
 | 13 | 04 | unrun-verify | tests/test_publish.py |  | Live write-denial (InsufficientPrivilege) proof (PUB-04) is a skip-guarded placeholder; run against live DB | fixed | LiveReaderWriteDenialTest implemented (703f85c) and run green live 2026-09-28 | 2026-09-23T05:04:47.511Z | 2026-09-28T06:30:00.000Z |
 | 14 | 04 | unrun-verify | tests/test_publish.py |  | Live negative write-not-denied proof (T-04-02, security-critical) is a skip-guarded placeholder; run against live DB with a deliberately writable reader-equivalent role | fixed | LiveReaderWriteNotDeniedTest induced live-green 2026-09-25 (5d38f2b); re-run green 2026-09-28 | 2026-09-23T05:04:48.206Z | 2026-09-28T06:30:00.000Z |
 | 15 | 04 | unrun-verify | tests/test_publish.py |  | Live publish_order.py full-run test (load-config -> gate/promote -> reader-verify -> summary, exit 0 + summary.json) is a skip-guarded placeholder; run against a fully provisioned live DB | fixed | LivePublishOrderFullRunTest implemented (703f85c): drives publish_order.main end to end, exit 0 + summary.json; run green live 2026-09-28 | 2026-09-23T05:24:20.388Z | 2026-09-28T06:30:00.000Z |
-| 16 | 04 | deviation | vicmap_acquire/publish.py |  | publish_order.py has no resume path after a committed promotion: _promote_layer consumes the staging table via ALTER TABLE ... SET SCHEMA, so any re-run re-enters promote_order and hard-fails with UndefinedTable, reported as the closed pub_promotion_failed. A failure in a POST-commit step (verify_reader_access, read_layer_validations, assemble_summary, write_summary) therefore strands the run permanently and is misreported as a promotion failure. Observed live 2026-09-24: vicmap.vmadd_address promoted and committed (4222035 rows, canonical names, reader SELECT granted), vicmap_staging left empty, summary.json never written, and the retry printed pub_promotion_failed. Fix: detect an already-published generation for this (run_ts, manifest_digest) and skip promotion so the reader proof and EVID-01 summary can complete. | open |  | 2026-09-24T07:09:27.495Z |  |
+| 16 | 04 | deviation | vicmap_acquire/publish.py |  | publish_order.py has no resume path after a committed promotion: _promote_layer consumes the staging table via ALTER TABLE ... SET SCHEMA, so any re-run re-enters promote_order and hard-fails with UndefinedTable, reported as the closed pub_promotion_failed. A failure in a POST-commit step (verify_reader_access, read_layer_validations, assemble_summary, write_summary) therefore strands the run permanently and is misreported as a promotion failure. Observed live 2026-09-24: vicmap.vmadd_address promoted and committed (4222035 rows, canonical names, reader SELECT granted), vicmap_staging left empty, summary.json never written, and the retry printed pub_promotion_failed. Fix: detect an already-published generation for this (run_ts, manifest_digest) and skip promotion so the reader proof and EVID-01 summary can complete. | fixed | Fixed across phase 05.1 (27a2b1e..fa0787d, 15661bf): publish_order.py's promote_or_resume now classifies every layer against vicmap_audit.publication markers and live pg_class OIDs before any DDL runs, and resumes a committed promotion instead of re-entering it. Proven live by LivePublishOrderResumeTest: it reproduces the 2026-09-24 incident (run 1 publishes with VICMAP_READER_PASSWORD unset, commits, then fails closed as reader_role_unavailable post-commit), then a plain re-run exits 0 with the marker's server_version and the published table's oid/xmin unchanged, promotion reported as resumed, and no promotion DDL executed. Full suite 704 OK / 0 skipped, live grants t\|t\|f\|f on vicmap_audit.publication, live DSNs (2026-09-29). | 2026-09-24T07:09:27.495Z | 2026-09-29T06:14:07.824Z |
 
 ````json
 [
@@ -221,10 +221,10 @@ last_updated: 2026-09-28T06:30:00.000Z
     "file": "vicmap_acquire/publish.py",
     "line": null,
     "description": "publish_order.py has no resume path after a committed promotion: _promote_layer consumes the staging table via ALTER TABLE ... SET SCHEMA, so any re-run re-enters promote_order and hard-fails with UndefinedTable, reported as the closed pub_promotion_failed. A failure in a POST-commit step (verify_reader_access, read_layer_validations, assemble_summary, write_summary) therefore strands the run permanently and is misreported as a promotion failure. Observed live 2026-09-24: vicmap.vmadd_address promoted and committed (4222035 rows, canonical names, reader SELECT granted), vicmap_staging left empty, summary.json never written, and the retry printed pub_promotion_failed. Fix: detect an already-published generation for this (run_ts, manifest_digest) and skip promotion so the reader proof and EVID-01 summary can complete.",
-    "status": "open",
-    "reason": "",
+    "status": "fixed",
+    "reason": "Fixed across phase 05.1 (27a2b1e..fa0787d, 15661bf): publish_order.py's promote_or_resume now classifies every layer against vicmap_audit.publication markers and live pg_class OIDs before any DDL runs, and resumes a committed promotion instead of re-entering it. Proven live by LivePublishOrderResumeTest: it reproduces the 2026-09-24 incident (run 1 publishes with VICMAP_READER_PASSWORD unset, commits, then fails closed as reader_role_unavailable post-commit), then a plain re-run exits 0 with the marker's server_version and the published table's oid/xmin unchanged, promotion reported as resumed, and no promotion DDL executed. Full suite 704 OK / 0 skipped, live grants t|t|f|f on vicmap_audit.publication, live DSNs (2026-09-29).",
     "recorded_at": "2026-09-24T07:09:27.495Z",
-    "resolved_at": null
+    "resolved_at": "2026-09-29T06:14:07.824Z"
   }
 ]
 ````
