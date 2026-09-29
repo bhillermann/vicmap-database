@@ -291,6 +291,25 @@ class PublicationAmbiguous(PublishFailure):
     code = "pub_generation_ambiguous"
 
 
+class PublicationSuperseded(PublishFailure):
+    """D-86/D-87: this run DID publish, but the live table has since been
+    replaced or removed out of band -- staging is absent, this run's marker
+    exists, but the live OID no longer matches it (case C). Nothing to
+    resume; the fail-closed outcome issues no ``DROP`` and no DDL. Raised by
+    Plan 05.1-02's refined classification."""
+
+    code = "pub_generation_superseded"
+
+
+class PublicationSummaryFailed(PublishFailure):
+    """D-91: ``assemble_summary`` or ``write_summary`` failed -- a malformed
+    input, or an ``OSError`` writing ``summary.json``. Replaces the former
+    fall-through to ``internal_failure`` with a boundary named for exactly
+    where it happened. Raised by Plan 05.1-03."""
+
+    code = "pub_summary_failed"
+
+
 class ReaderRoleUnavailable(PublishFailure):
     """D-72/D-74: the reader role, its ``USAGE`` grant, or
     ``VICMAP_READER_PASSWORD`` is missing or wrong -- an unset password is

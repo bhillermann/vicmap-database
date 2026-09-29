@@ -85,6 +85,11 @@ class Stage(str, Enum):
     DB_AUDIT = "db_audit"
     DB_PUBLISH = "db_publish"
     DB_READER_VERIFY = "db_reader_verify"
+    # D-91: summary assembly and write boundary (05.1). The success event
+    # SuccessEvent.publication_summary shares this string as its "event"
+    # value, never its "stage" -- no literal key collision in either
+    # rendered JSON object.
+    PUBLICATION_SUMMARY = "publication_summary"
 
 
 class ReasonCode(str, Enum):
@@ -142,6 +147,11 @@ class ReasonCode(str, Enum):
     READER_ROLE_UNAVAILABLE = "reader_role_unavailable"
     READER_VERIFICATION_FAILED = "reader_verification_failed"
     READER_WRITE_NOT_DENIED = "reader_write_not_denied"
+    # 05.1 (D-87/D-90/D-91): the resume-path vocabulary extension.
+    PUB_GENERATION_SUPERSEDED = "pub_generation_superseded"
+    PUB_GENERATION_AMBIGUOUS = "pub_generation_ambiguous"
+    DB_AUDIT_READ_FAILED = "db_audit_read_failed"
+    PUB_SUMMARY_FAILED = "pub_summary_failed"
 
 
 _FAILURE_POLICY = MappingProxyType(
@@ -371,6 +381,30 @@ _FAILURE_POLICY = MappingProxyType(
             Stage.DB_READER_VERIFY,
             "revoke_reader_write_immediately_grant_model_is_broken",
         ),
+        # D-87: order-level classification (D-86) fail-closed outcomes.
+        # Superseded means this run DID publish, but the live table has
+        # since been replaced; ambiguous means the live state's provenance
+        # cannot be proven at all. Both stage a fresh run, never a retry.
+        ReasonCode.PUB_GENERATION_SUPERSEDED: (
+            Stage.DB_PUBLISH,
+            "nothing_to_resume_stage_a_fresh_run",
+        ),
+        ReasonCode.PUB_GENERATION_AMBIGUOUS: (
+            Stage.DB_PUBLISH,
+            "inspect_vicmap_and_vicmap_audit_then_stage_a_fresh_run",
+        ),
+        # D-90: any non-privilege vicmap_audit/catalog read failure during
+        # classification or a post-commit re-read -- never pub_promotion_failed.
+        ReasonCode.DB_AUDIT_READ_FAILED: (
+            Stage.DB_AUDIT,
+            "retry_audit_read_or_review_audit_schema",
+        ),
+        # D-91: the summary assembly and write boundary, replacing the
+        # former fall-through to internal_failure.
+        ReasonCode.PUB_SUMMARY_FAILED: (
+            Stage.PUBLICATION_SUMMARY,
+            "review_the_run_directory_then_rerun_publish_to_resume",
+        ),
     }
 )
 
@@ -520,6 +554,18 @@ def _require_extent_or_not_applicable(
     if xmin > xmax or ymin > ymax:
         raise ValueError("extent must be ordered (xmin<=xmax, ymin<=ymax)")
     return (float(xmin), float(ymin), float(xmax), float(ymax))
+
+
+def _require_utc_timestamp(value: datetime) -> str:
+    """D-84: the same timezone-aware check ``SuccessEvent.candidate_selected``
+    already applies, plus a fixed-width microsecond render -- the lossless
+    precision contract against PostgreSQL ``timestamptz`` -- so a whole-second
+    input still renders ``.000000+00:00`` rather than losing its trailing
+    zeros to ``datetime.isoformat``'s default variable-width behaviour."""
+
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("timestamp must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 class _SafeEvent(Mapping[str, object]):
@@ -914,6 +960,29 @@ class ProgressEvent(_SafeEvent):
                 "layer_position": position,
                 "layer_total": total,
                 "percent": percent,
+            }
+        )
+
+    @classmethod
+    def publication_resumed(
+        cls, *, published_tables: tuple[str, ...], published_at: datetime
+    ) -> "ProgressEvent":
+        """D-84: a resumed run is visible on the JSON Lines stream. Carries
+        no order id, run-directory path, or secret -- only the closed target
+        table names this run resumed and the original commit's own
+        ``published_at`` (D-82), rendered through ``_require_utc_timestamp``
+        so a naive datetime can never reach the operator-visible stream."""
+
+        if not isinstance(published_tables, tuple) or not published_tables:
+            raise ValueError("published_tables must be a non-empty tuple of strings")
+        validated_tables = [
+            _require_target_table(table) for table in published_tables
+        ]
+        return cls(
+            {
+                "event": "publication_resumed",
+                "published_tables": validated_tables,
+                "published_at": _require_utc_timestamp(published_at),
             }
         )
 
