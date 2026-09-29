@@ -242,7 +242,7 @@ Plans:
 4. An ambiguous state (published tables from a different run or digest, or a partial promotion) fails closed with a named reason and issues no `DROP`.
 5. Tests cover the retry-after-post-commit-failure path, and WINDOWS.md #16 is marked fixed with evidence.
 
-**Plans:** 3/5 plans executed
+**Plans:** 4/5 plans executed
 
 Plans:
 
@@ -260,7 +260,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 05.1-04-PLAN.md — Report every `vicmap_audit` read failure as `db_audit_read_failed`, pre-check the marker grant, and pin `pub_promotion_failed` to the promotion transaction.
+- [x] 05.1-04-PLAN.md — Report every `vicmap_audit` read failure as `db_audit_read_failed`, pre-check the marker grant, and pin `pub_promotion_failed` to the promotion transaction.
 
 **Wave 5** *(blocked on Wave 4 completion)*
 

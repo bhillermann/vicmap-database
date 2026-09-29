@@ -4,16 +4,16 @@ milestone: v0.1
 current_phase: "05.1"
 current_phase_name: "Address tech debt: publish resume path (#16) (INSERTED)"
 status: executing
-stopped_at: Completed 05.1-03-PLAN.md
-last_updated: "2026-09-29T05:02:51.147Z"
+stopped_at: Completed 05.1-04-PLAN.md
+last_updated: "2026-09-29T05:28:22.723Z"
 last_activity: 2026-09-29
 last_activity_desc: Phase 05.1 execution started
-state_head: f65c815a27f6576697780ca59505b66d5a3b473b
+state_head: 60bade4feea0d5c0bc608c8b85fd4f6abd72ff85
 progress:
   total_phases: 6
   completed_phases: 5
   total_plans: 40
-  completed_plans: 38
+  completed_plans: 39
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -42,14 +42,14 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 ## Current Position
 
 Phase: 05.1 (Address tech debt: publish resume path (#16) (INSERTED)) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-09-29 — Phase 05.1 execution started
 
 ## Session
 
-**Last session:** 2026-09-29T05:02:50.929Z
-**Stopped at:** Completed 05.1-03-PLAN.md
+**Last session:** 2026-09-29T05:28:22.602Z
+**Stopped at:** Completed 05.1-04-PLAN.md
 **Resume file:** None
 
 Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd-complete-milestone v0.1.
@@ -91,6 +91,7 @@ Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd
 | Phase 05.1 P01 | 90min | 2 tasks | 7 files |
 | Phase 05.1 P02 | 25min | 2 tasks | 2 files |
 | Phase 05.1 P03 | 25min | 2 tasks | 4 files |
+| Phase 05.1 P04 | 26min | 2 tasks | 3 files |
 
 ## Decisions
 
@@ -180,6 +181,9 @@ Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd
 - [Phase 05.1]: PromotionResult now rejects a naive published_at at construction, mirroring evidence._require_utc_timestamp
 - [Phase 05.1]: internal_failure catch-all regression retargeted from assemble_summary (now dedicated-boundary) onto read_manifest
 - [Phase 05.1]: write_summary's atomic replace follows manifest.py's own same-directory fsync idiom via a private per-module _fsync_directory copy
+- [Phase 05.1]: assert_all_layers_validated/read_layer_validations moved from _connect to _connect_for_audit_read (D-90); a non-privilege failure is db_audit_read_failed, never pub_promotion_failed
+- [Phase 05.1]: classify_publication_state computes its verdict while its own connection is still open, so a PROMOTE-only has_table_privilege INSERT precheck on vicmap_audit.publication can share it (Open Question 2/D-78), failing closed with AuditPrivilegeDenied before any DDL
+- [Phase 05.1]: Narrowed PublicationMarkerProvenanceTest's INSERT-constant AST match to INSERT INTO so the new read-only has_table_privilege(...,'INSERT') literal cannot false-positive as a second publication-table writer
 
 ### Blockers
 
