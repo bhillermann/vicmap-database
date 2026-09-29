@@ -242,7 +242,7 @@ Plans:
 4. An ambiguous state (published tables from a different run or digest, or a partial promotion) fails closed with a named reason and issues no `DROP`.
 5. Tests cover the retry-after-post-commit-failure path, and WINDOWS.md #16 is marked fixed with evidence.
 
-**Plans:** 1/5 plans executed
+**Plans:** 2/5 plans executed
 
 Plans:
 
@@ -252,7 +252,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 05.1-02-PLAN.md — Fail closed with no DDL on every non-resumable state: superseded, unproven (including the pre-fix `vicmap.vmadd_address`), conflicted, mixed, and empty orders.
+- [x] 05.1-02-PLAN.md — Fail closed with no DDL on every non-resumable state: superseded, unproven (including the pre-fix `vicmap.vmadd_address`), conflicted, mixed, and empty orders.
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
