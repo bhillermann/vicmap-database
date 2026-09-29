@@ -516,6 +516,61 @@ class InternalFailureTest(unittest.TestCase):
         self.assertNotIn("disk full", stderr)
 
 
+class ResumeVocabularyBoundaryTest(unittest.TestCase):
+    """No database. The three ``promote_or_resume`` raisers this plan closes
+    the vocabulary for (D-87), plus an ``assemble_summary`` raiser of the new
+    D-91 ``PublicationSummaryFailed`` -- each surfaces at its own named
+    boundary, never ``pub_promotion_failed`` or ``internal_failure``."""
+
+    def test_publication_ambiguous_maps_to_db_publish_stage(self):
+        def _raise(*a, **k):
+            raise publish.PublicationAmbiguous()
+
+        with _patched_pipeline(promote_or_resume=_raise):
+            exit_code, stdout, stderr = _run_main_capturing_output()
+        self.assertEqual(1, exit_code)
+        failure = json.loads(stderr.strip())
+        self.assertEqual("db_publish", failure["stage"])
+        self.assertEqual("pub_generation_ambiguous", failure["reason"])
+        _forbidden_text_absent(self, stdout, stderr)
+
+    def test_publication_superseded_maps_to_db_publish_stage(self):
+        def _raise(*a, **k):
+            raise publish.PublicationSuperseded()
+
+        with _patched_pipeline(promote_or_resume=_raise):
+            exit_code, stdout, stderr = _run_main_capturing_output()
+        self.assertEqual(1, exit_code)
+        failure = json.loads(stderr.strip())
+        self.assertEqual("db_publish", failure["stage"])
+        self.assertEqual("pub_generation_superseded", failure["reason"])
+        _forbidden_text_absent(self, stdout, stderr)
+
+    def test_audit_read_failed_maps_to_db_audit_stage(self):
+        def _raise(*a, **k):
+            raise publish.AuditReadFailed()
+
+        with _patched_pipeline(promote_or_resume=_raise):
+            exit_code, stdout, stderr = _run_main_capturing_output()
+        self.assertEqual(1, exit_code)
+        failure = json.loads(stderr.strip())
+        self.assertEqual("db_audit", failure["stage"])
+        self.assertEqual("db_audit_read_failed", failure["reason"])
+        _forbidden_text_absent(self, stdout, stderr)
+
+    def test_publication_summary_failed_maps_to_publication_summary_stage(self):
+        def _raise(**k):
+            raise publish.PublicationSummaryFailed()
+
+        with _patched_pipeline(assemble_summary=_raise):
+            exit_code, stdout, stderr = _run_main_capturing_output()
+        self.assertEqual(1, exit_code)
+        failure = json.loads(stderr.strip())
+        self.assertEqual("publication_summary", failure["stage"])
+        self.assertEqual("pub_summary_failed", failure["reason"])
+        _forbidden_text_absent(self, stdout, stderr)
+
+
 class ExitContractShapeTest(unittest.TestCase):
     """No database. Structural pin of ``main``'s own exception ladder, so a
     future refactor cannot silently drop a mapped boundary or the catch-all

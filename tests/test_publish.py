@@ -496,6 +496,36 @@ class ClosedFailureVocabularyTest(unittest.TestCase):
         ):
             self.assertTrue(issubclass(failure, publish.PublishFailure))
 
+    def test_audit_read_failed_code(self):
+        self.assertEqual("db_audit_read_failed", publish.AuditReadFailed.code)
+
+    def test_publication_ambiguous_code(self):
+        self.assertEqual(
+            "pub_generation_ambiguous", publish.PublicationAmbiguous.code
+        )
+
+    def test_publication_superseded_code(self):
+        self.assertEqual(
+            "pub_generation_superseded", publish.PublicationSuperseded.code
+        )
+
+    def test_publication_summary_failed_code(self):
+        self.assertEqual("pub_summary_failed", publish.PublicationSummaryFailed.code)
+
+    def _all_publish_failure_subclasses(self, base=None):
+        base = base if base is not None else publish.PublishFailure
+        for subclass in base.__subclasses__():
+            yield subclass
+            yield from self._all_publish_failure_subclasses(subclass)
+
+    def test_every_publish_failure_code_is_a_registered_reason_code(self):
+        reason_values = {reason.value for reason in publish.evidence.ReasonCode}
+        subclasses = list(self._all_publish_failure_subclasses())
+        self.assertGreater(len(subclasses), 0)
+        for failure in subclasses:
+            with self.subTest(failure=failure.__name__):
+                self.assertIn(failure.code, reason_values)
+
 
 def _two_layer_target_tables():
     return ("vmadd_address", "vmadd_road")

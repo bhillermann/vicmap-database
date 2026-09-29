@@ -8,7 +8,7 @@ import json
 import tempfile
 import unicodedata
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -297,6 +297,10 @@ class EvidenceContractTest(unittest.TestCase):
             "reader_role_unavailable": "db_reader_verify",
             "reader_verification_failed": "db_reader_verify",
             "reader_write_not_denied": "db_reader_verify",
+            "pub_generation_superseded": "db_publish",
+            "pub_generation_ambiguous": "db_publish",
+            "db_audit_read_failed": "db_audit",
+            "pub_summary_failed": "publication_summary",
         }
         self.assertEqual(expected, evidence.reason_stage_vocabulary())
         self.assertEqual(set(expected.values()), {stage.value for stage in evidence.Stage})
@@ -1785,6 +1789,118 @@ class Phase4VocabularyTest(unittest.TestCase):
         for other_hint in other_reader_verify_hints:
             with self.subTest(hint=other_hint):
                 self.assertNotEqual(hint, other_hint)
+
+
+class Phase051VocabularyTest(unittest.TestCase):
+    """05.1-01: the resume-path evidence vocabulary extension (D-87/D-90/
+    D-91). Mirrors Phase4VocabularyTest's shape -- a subset check against
+    the closed reason/stage mapping, plus the new Stage member and event
+    classmethod this plan adds."""
+
+    def test_05_1_reason_codes_extend_the_closed_vocabulary(self):
+        expected_additions = {
+            "pub_generation_superseded": "db_publish",
+            "pub_generation_ambiguous": "db_publish",
+            "db_audit_read_failed": "db_audit",
+            "pub_summary_failed": "publication_summary",
+        }
+        vocabulary = evidence.reason_stage_vocabulary()
+        for reason, stage in expected_additions.items():
+            with self.subTest(reason=reason):
+                self.assertEqual(stage, vocabulary.get(reason))
+        self.assertEqual(4, len(expected_additions))
+        self.assertLessEqual(set(expected_additions), set(vocabulary))
+
+    def test_every_stage_is_reachable_from_at_least_one_reason(self):
+        used_stages = {stage.value for stage, _ in evidence._FAILURE_POLICY.values()}
+        self.assertEqual({stage.value for stage in evidence.Stage}, used_stages)
+
+    def test_publication_summary_stage_value(self):
+        self.assertEqual(
+            "publication_summary", evidence.Stage.PUBLICATION_SUMMARY.value
+        )
+
+    def test_totals_are_21_stages_and_58_reasons(self):
+        self.assertEqual(21, len(list(evidence.Stage)))
+        self.assertEqual(58, len(list(evidence.ReasonCode)))
+
+    def test_each_new_reason_renders_exactly_event_stage_reason_hint(self):
+        for reason in (
+            evidence.ReasonCode.PUB_GENERATION_SUPERSEDED,
+            evidence.ReasonCode.PUB_GENERATION_AMBIGUOUS,
+            evidence.ReasonCode.DB_AUDIT_READ_FAILED,
+            evidence.ReasonCode.PUB_SUMMARY_FAILED,
+        ):
+            with self.subTest(reason=reason.value):
+                stream = io.StringIO()
+                evidence.render_failure(evidence.SafeFailure(reason), stream=stream)
+                payload = json.loads(stream.getvalue())
+                self.assertEqual({"event", "stage", "reason", "hint"}, set(payload))
+
+    def test_superseded_and_ambiguous_hints_differ_but_both_stage_a_fresh_run(self):
+        superseded_hint = evidence.remediation_hint(
+            evidence.ReasonCode.PUB_GENERATION_SUPERSEDED
+        )
+        ambiguous_hint = evidence.remediation_hint(
+            evidence.ReasonCode.PUB_GENERATION_AMBIGUOUS
+        )
+        self.assertNotEqual(superseded_hint, ambiguous_hint)
+        self.assertTrue(superseded_hint.endswith("stage_a_fresh_run"))
+        self.assertTrue(ambiguous_hint.endswith("stage_a_fresh_run"))
+
+
+class PublicationResumedEventTest(unittest.TestCase):
+    """D-84: ``ProgressEvent.publication_resumed`` -- a resumed run's own
+    JSON Lines event, carrying no order id, path, or secret."""
+
+    def test_happy_path_renders_utc_normalized_timestamp(self):
+        published_at = datetime(
+            2026, 9, 24, 17, 9, 27, 495000, tzinfo=timezone(timedelta(hours=10))
+        )
+        event = evidence.ProgressEvent.publication_resumed(
+            published_tables=("vmadd_address",), published_at=published_at
+        )
+        self.assertEqual(
+            {"event", "published_tables", "published_at"}, set(event)
+        )
+        self.assertEqual("publication_resumed", event["event"])
+        self.assertEqual(["vmadd_address"], event["published_tables"])
+        self.assertEqual("2026-09-24T07:09:27.495000+00:00", event["published_at"])
+
+    def test_whole_second_input_renders_six_zero_microseconds(self):
+        event = evidence.ProgressEvent.publication_resumed(
+            published_tables=("vmadd_address",),
+            published_at=datetime(2026, 9, 24, 7, 9, 27, tzinfo=timezone.utc),
+        )
+        self.assertEqual("2026-09-24T07:09:27.000000+00:00", event["published_at"])
+
+    def test_naive_datetime_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.ProgressEvent.publication_resumed(
+                published_tables=("vmadd_address",),
+                published_at=datetime(2026, 9, 24, 7, 9, 27),
+            )
+
+    def test_empty_published_tables_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.ProgressEvent.publication_resumed(
+                published_tables=(),
+                published_at=datetime(2026, 9, 24, 7, 9, 27, tzinfo=timezone.utc),
+            )
+
+    def test_list_published_tables_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.ProgressEvent.publication_resumed(
+                published_tables=["vmadd_address"],
+                published_at=datetime(2026, 9, 24, 7, 9, 27, tzinfo=timezone.utc),
+            )
+
+    def test_unsafe_table_name_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evidence.ProgressEvent.publication_resumed(
+                published_tables=("Robert'); DROP",),
+                published_at=datetime(2026, 9, 24, 7, 9, 27, tzinfo=timezone.utc),
+            )
 
 
 class DatabaseIdentityEventTest(unittest.TestCase):
