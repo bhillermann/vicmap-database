@@ -225,3 +225,43 @@ Plans:
 
 ---
 *Roadmap created: 2026-09-01*
+
+### Phase 05.1: Address tech debt: publish resume path (#16) (INSERTED)
+
+**Goal:** A publish run that failed after its promotion committed can be re-run to completion, and each failure is reported at its true boundary instead of being stranded and misreported as `pub_promotion_failed` (WINDOWS.md #16).
+
+**Depends on:** Phase 5
+
+**Requirements:** None mapped. This is v0.1 tech debt. It advances OPS-03 for the publish stage only and closes the retry case left open under EVID-02.
+
+**Success Criteria:**
+
+1. Re-running publish for a `(run_ts, manifest_digest)` whose promotion already committed detects the published generation and skips promotion, rather than re-entering `_promote_layer` and failing with `UndefinedTable` on the consumed staging table.
+2. The resumed run completes the post-commit steps (`verify_reader_access`, `read_layer_validations`, `assemble_summary`, `write_summary`), writes the EVID-01 `summary.json`, and exits 0.
+3. A failure in a post-commit step reports that step's own boundary (e.g. `db_reader_verify`), and `pub_promotion_failed` is reserved for real promotion failures.
+4. An ambiguous state (published tables from a different run or digest, or a partial promotion) fails closed with a named reason and issues no `DROP`.
+5. Tests cover the retry-after-post-commit-failure path, and WINDOWS.md #16 is marked fixed with evidence.
+
+**Plans:** 5 plans
+
+Plans:
+
+**Wave 1**
+
+- [ ] 05.1-01-PLAN.md — Tracer: write a per-layer `vicmap_audit.publication` marker inside the promotion transaction, classify before any DDL, and resume a committed promotion via `promote_or_resume`, proven live by reproducing the 2026-09-24 incident; register the closed resume vocabulary.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 05.1-02-PLAN.md — Fail closed with no DDL on every non-resumable state: superseded, unproven (including the pre-fix `vicmap.vmadd_address`), conflicted, mixed, and empty orders.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 05.1-03-PLAN.md — Make a resumed run visible (`publication_resumed` event, `promotion`/`published_at` summary fields), make a re-run after success an idempotent resume, and write `summary.json` atomically behind a `pub_summary_failed` boundary.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 05.1-04-PLAN.md — Report every `vicmap_audit` read failure as `db_audit_read_failed`, pre-check the marker grant, and pin `pub_promotion_failed` to the promotion transaction.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 05.1-05-PLAN.md — Operator re-provisions the marker table, verify live grants and the full live suite, probe the legacy table read-only, and mark WINDOWS.md #16 fixed.
