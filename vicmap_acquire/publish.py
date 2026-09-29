@@ -360,13 +360,19 @@ class ReaderWriteNotDenied(PublishFailure):
 
 
 def _connect(policy: PublishPolicy, password: str) -> "psycopg.Connection":
-    """Open one connection and bound every query this module runs, following
-    ``staging._connect`` exactly: no ``autocommit`` (so the promotion runs in
-    one implicit transaction that commits once or rolls back completely), and
+    """Open the promotion transaction's own connection -- and nothing else's
+    (D-92): this is the promotion helper, with exactly one caller,
+    ``_promote_in_transaction``. Follows ``staging._connect`` exactly: no
+    ``autocommit`` (so the promotion runs in one implicit transaction that
+    commits once or rolls back completely), and
     ``statement_timeout``/``lock_timeout`` set immediately from the policy's
     millisecond-converted values so no query can hang the operator's database.
     Any driver exception from connecting or the timeout setup maps to the one
-    closed ``PromotionFailed``; the driver's own error text is discarded."""
+    closed ``PromotionFailed``; the driver's own error text is discarded. No
+    other function may call this -- a vicmap_audit read (the D-68 gate,
+    classification, or ``read_layer_validations``) must use
+    ``_connect_for_audit_read`` instead, so a read-only failure can never be
+    misreported as a promotion failure (D-90)."""
 
     try:
         connection = psycopg.connect(
@@ -419,14 +425,16 @@ def assert_all_layers_validated(
     The required set must be a subset of the PASS set (research gate example);
     a missing row and a non-PASS verdict both fail closed identically with
     ``PublicationValidationMissing``, so table presence is never trusted as a
-    proxy for validation (D-68). A loader that cannot read the audit table
-    (schema/table missing, or the D-70 grant never applied) raises the closed
-    ``AuditPrivilegeDenied``; any other read failure is ``PromotionFailed``.
-    This is a read-only preflight on its own short-lived connection -- it
-    executes no DDL and mutates nothing (T-04-06)."""
+    proxy for validation (D-68). A loader denied privilege on the audit table
+    (the D-70 grant never applied) raises the closed ``AuditPrivilegeDenied``;
+    every other read failure -- including a connection failure -- is the
+    closed ``AuditReadFailed``, never ``PromotionFailed``: this is a
+    vicmap_audit read, not a promotion action (D-90). This is a read-only
+    preflight on its own short-lived ``_connect_for_audit_read`` connection --
+    it executes no DDL and mutates nothing (T-04-06)."""
 
     required = set(target_tables)
-    connection = _connect(policy, password)
+    connection = _connect_for_audit_read(policy, password)
     try:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -442,7 +450,7 @@ def assert_all_layers_validated(
     except PublishFailure:
         raise
     except Exception:
-        raise PromotionFailed() from None
+        raise AuditReadFailed() from None
     finally:
         connection.close()
 
@@ -1232,16 +1240,19 @@ def read_layer_validations(
     in-memory pass/fail result forward. Read-only: executes no DDL and
     mutates nothing.
 
-    Failure modes mirror the gate's own: the loader being unable to read the
-    audit table raises the closed ``AuditPrivilegeDenied``; any other read
-    failure raises ``PromotionFailed``. Rows are returned in
-    ``target_tables``' own order; a target table absent from the result set
-    is simply omitted -- this function stays a pure read, never itself a
-    validation gate, so ``assemble_summary``'s own hard-require is what
-    notices a shortfall.
+    Failure modes mirror the gate's own: the loader being denied privilege on
+    the audit table raises the closed ``AuditPrivilegeDenied``; every other
+    read failure -- including a connection failure -- is the closed
+    ``AuditReadFailed``, never ``PromotionFailed`` (D-90): this call runs
+    after the promotion transaction has already committed, and a read-only
+    failure here must never be misreported as that transaction failing.
+    Rows are returned in ``target_tables``' own order; a target table absent
+    from the result set is simply omitted -- this function stays a pure
+    read, never itself a validation gate, so ``assemble_summary``'s own
+    hard-require is what notices a shortfall.
     """
 
-    connection = _connect(policy, password)
+    connection = _connect_for_audit_read(policy, password)
     try:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -1258,7 +1269,7 @@ def read_layer_validations(
     except PublishFailure:
         raise
     except Exception:
-        raise PromotionFailed() from None
+        raise AuditReadFailed() from None
     finally:
         connection.close()
 
