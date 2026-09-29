@@ -3,17 +3,17 @@ gsd_state_version: "1.0"
 milestone: v0.1
 current_phase: "05.1"
 current_phase_name: "Address tech debt: publish resume path (#16) (INSERTED)"
-status: executing
-stopped_at: Completed 05.1-04-PLAN.md
-last_updated: "2026-09-29T05:28:22.723Z"
+status: verifying
+stopped_at: Completed 05.1-05-PLAN.md
+last_updated: "2026-09-29T06:18:40.184Z"
 last_activity: 2026-09-29
 last_activity_desc: Phase 05.1 execution started
-state_head: 60bade4feea0d5c0bc608c8b85fd4f6abd72ff85
+state_head: 7e2368bb8ac2ac896be9e5daac542756b6245d8d
 progress:
   total_phases: 6
   completed_phases: 5
   total_plans: 40
-  completed_plans: 39
+  completed_plans: 40
 milestone_name: End-to-End Vicmap Import Proof
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
 **Current phase:** 05.1
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 
 ## Session Log
 
@@ -43,13 +43,13 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 
 Phase: 05.1 (Address tech debt: publish resume path (#16) (INSERTED)) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-29 — Phase 05.1 execution started
 
 ## Session
 
-**Last session:** 2026-09-29T05:28:22.602Z
-**Stopped at:** Completed 05.1-04-PLAN.md
+**Last session:** 2026-09-29T06:18:40.110Z
+**Stopped at:** Completed 05.1-05-PLAN.md
 **Resume file:** None
 
 Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd-complete-milestone v0.1.
@@ -92,6 +92,7 @@ Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd
 | Phase 05.1 P02 | 25min | 2 tasks | 2 files |
 | Phase 05.1 P03 | 25min | 2 tasks | 4 files |
 | Phase 05.1 P04 | 26min | 2 tasks | 3 files |
+| Phase 05.1 P05 | 43min | 3 tasks | 2 files |
 
 ## Decisions
 
@@ -184,6 +185,7 @@ Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd
 - [Phase 05.1]: assert_all_layers_validated/read_layer_validations moved from _connect to _connect_for_audit_read (D-90); a non-privilege failure is db_audit_read_failed, never pub_promotion_failed
 - [Phase 05.1]: classify_publication_state computes its verdict while its own connection is still open, so a PROMOTE-only has_table_privilege INSERT precheck on vicmap_audit.publication can share it (Open Question 2/D-78), failing closed with AuditPrivilegeDenied before any DDL
 - [Phase 05.1]: Narrowed PublicationMarkerProvenanceTest's INSERT-constant AST match to INSERT INTO so the new read-only has_table_privilege(...,'INSERT') literal cannot false-positive as a second publication-table writer
+- [Phase 05.1]: Left OPS-03 unmarked in REQUIREMENTS.md: this plan closes only the publish resume path, not the full download/load retry-and-resume scope OPS-03 describes, per the plan's own must_haves.truths.
 
 ### Blockers
 

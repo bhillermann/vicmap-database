@@ -242,7 +242,7 @@ Plans:
 4. An ambiguous state (published tables from a different run or digest, or a partial promotion) fails closed with a named reason and issues no `DROP`.
 5. Tests cover the retry-after-post-commit-failure path, and WINDOWS.md #16 is marked fixed with evidence.
 
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans executed
 
 Plans:
 
@@ -264,4 +264,4 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 05.1-05-PLAN.md — Operator re-provisions the marker table, verify live grants and the full live suite, probe the legacy table read-only, and mark WINDOWS.md #16 fixed.
+- [x] 05.1-05-PLAN.md — Operator re-provisions the marker table, verify live grants and the full live suite, probe the legacy table read-only, and mark WINDOWS.md #16 fixed.
