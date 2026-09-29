@@ -1,16 +1,16 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.1
-current_phase: 5
+current_phase: "05.1"
 current_phase_name: Approved Legacy Cleanup
 status: completed
-stopped_at: Phase 5 closed as satisfied by manual cleanup; milestone v0.1 all phases complete
-last_updated: "2026-09-28T00:35:06.997Z"
+stopped_at: Phase 05.1 context gathered
+last_updated: "2026-09-29T01:50:13.685Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 5 complete
-state_head: f83ab5880dea04280ad735ec553a13eb43f301e2
+state_head: f0f1c3d15631b4fbd985eee35866826dd3f0a63e
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 5
   total_plans: 35
   completed_plans: 35
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 ## Position
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
-**Current phase:** 5
+**Current phase:** 05.1
 **Status:** All phases complete
 
 ## Session Log
@@ -48,9 +48,9 @@ Last activity: 2026-09-28 — v0.1 milestone audit
 
 ## Session
 
-**Last session:** 2026-09-28T00:35:06.941Z
-**Stopped at:** Phase 5 closed as satisfied by manual cleanup; milestone v0.1 all phases complete
-**Resume file:** .planning/phases/05-approved-legacy-cleanup/05-CLOSEOUT.md
+**Last session:** 2026-09-29T01:50:13.513Z
+**Stopped at:** Phase 05.1 context gathered
+**Resume file:** .planning/phases/05.1-address-tech-debt-publish-resume-path-16/05.1-CONTEXT.md
 
 Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd-complete-milestone v0.1.
 **Resume file:** .planning/v0.1-MILESTONE-AUDIT.md
@@ -175,3 +175,10 @@ Next: address v0.1 tech debt (top item WINDOWS #16, publish resume path) or /gsd
 - vicmap.toml's [extraction].max_compression_ratio=20 will hard-stop a real discover_order.py run against Order_OK0VUZ.zip (small OpenFileGDB index files compress up to ~139x); raise to 200+ before running discovery for real.
 - 03-05/03-06 must verify ogr2ogr -t_srs EPSG:7899 under the fail-closed transform guard (correct GDAL syntax, per 03-04: `-ct_opt ONLY_BEST=YES -ct_opt ALLOW_BALLPARK=NO` -- 03-01/03-03's original `--config OGR_CT_ONLY_BEST`/`OGR_CT_ALLOW_BALLPARK` phrasing named non-existent GDAL options and has been corrected in code) actually uses the vendored ICSM grid, not a grid-free Helmert transform (03-01 finding: pyproj TransformerGroup/only_best ranks the Helmert op as 'best' by declared accuracy, reproducing the same +0.5m/+1.5m shift research flagged).
 - The GDA94-Vicgrid-to-GDA2020-Vicgrid grid-vs-Helmert question is still open. 03-04 additionally found that pyproj's TransformerGroup (03-01's own verification method) cannot see PROJ_DATA in this pyproj build (internal hardcoded path checked before the env var) -- any future settlement must use a different verification method and a layer with a genuinely different source SRID.
+
+## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 05.1 inserted after Phase 5: Address tech debt: publish resume path (#16) (URGENT)
+- Phase 05.1 edited: edited fields: goal, requirements, success_criteria
