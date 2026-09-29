@@ -20,11 +20,13 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import shutil
 import tempfile
 import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,6 +40,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _RUN_TS = "20260918t041500z"
 _STAGING_TABLE = "vmadd_address_20260918t041500z"
+
+# D-82: a fixed UTC published_at for offline marker/resume fixtures -- never
+# wall-clock time, so a resumed PromotionResult's timestamp is deterministic.
+_FIXED_PUBLISHED_AT = datetime(2026, 9, 24, 7, 9, 27, 495000, tzinfo=timezone.utc)
 
 
 def _publish_policy(**overrides) -> publish.PublishPolicy:
@@ -71,9 +77,16 @@ def _one_layer_manifest(target_table: str = "vmadd_address"):
 
 class _FakeCursor:
     """Records every executed statement as rendered SQL text and answers the
-    catalog-discovery/``version()`` reads from a fixed fixture, so a full
-    ``promote_order`` runs with no server. Raises when a configured substring
-    appears in a statement, to exercise the rollback path."""
+    catalog-discovery/``version()``/marker reads from a fixed fixture, so a
+    full ``promote_order``/``promote_or_resume`` runs with no server. Raises
+    when a configured substring appears in a statement, to exercise the
+    rollback path.
+
+    Dispatch order matters (D-79/D-86): the marker INSERT check must come
+    before the generic ``"publication"`` classification-SELECT check, since
+    the marker INSERT's own text also selects from ``pg_class``/mentions
+    ``publication``.
+    """
 
     def __init__(self, connection):
         self._connection = connection
@@ -88,18 +101,27 @@ class _FakeCursor:
     def execute(self, query, params=None):
         text = query if isinstance(query, str) else query.as_string(None)
         self._connection.executed.append(text)
+        self._connection.executed_params.append(params)
         if self._connection.fail_on and self._connection.fail_on in text:
             raise RuntimeError("induced driver failure")
         if "staging_validation" in text and self._connection.audit_error is not None:
             raise self._connection.audit_error
         if "version()" in text:
             self._rows = [("PostgreSQL 18.6 (fake build)",)]
+        elif "INSERT INTO" in text and "publication" in text:
+            self._rows = list(self._connection.marker_rows)
         elif "staging_validation" in text:
             self._rows = list(self._connection.audit_rows)
+        elif "publication" in text:
+            self._rows = list(self._connection.publication_rows)
         elif "pg_constraint" in text:
             self._rows = list(self._connection.constraint_rows)
         elif "pg_indexes" in text:
             self._rows = list(self._connection.index_rows)
+        elif "SELECT t.oid FROM pg_class" in text:
+            key = tuple(params) if params else None
+            row = self._connection.relation_oids.get(key)
+            self._rows = [row] if row is not None else []
         else:
             self._rows = []
 
@@ -117,16 +139,25 @@ class _FakeConnection:
         constraint_rows=(),
         index_rows=(),
         audit_rows=(),
+        publication_rows=(),
+        relation_oids=None,
+        marker_rows=None,
         fail_on=None,
         audit_error=None,
     ):
         self.executed: list[str] = []
+        self.executed_params: list = []
         self.commit_count = 0
         self.rollback_count = 0
         self.closed = False
         self.constraint_rows = constraint_rows
         self.index_rows = index_rows
         self.audit_rows = audit_rows
+        self.publication_rows = publication_rows
+        self.relation_oids = relation_oids if relation_oids is not None else {}
+        self.marker_rows = (
+            marker_rows if marker_rows is not None else [(_FIXED_PUBLISHED_AT,)]
+        )
         self.fail_on = fail_on
         self.audit_error = audit_error
 
@@ -309,6 +340,51 @@ class PromotionCompositionTest(unittest.TestCase):
         self.assertEqual(0, connection.rollback_count)
         self.assertEqual(("vmadd_address",), result.published_tables)
         self.assertIn("PostgreSQL", result.server_version)
+        self.assertEqual(publish.PROMOTION_PERFORMED, result.promotion)
+        self.assertEqual(_FIXED_PUBLISHED_AT, result.published_at)
+
+    def test_publication_marker_insert_follows_the_grant_with_no_conflict_clause(self):
+        # D-79/D-81/D-82: the marker commits atomically with the rename/grant,
+        # names pg_class as its OID source, and never soft-swallows a
+        # duplicate key (RESEARCH.md anti-pattern -- unlike staging's
+        # ON CONFLICT DO NOTHING insert, a repeat here is a classifier bug).
+        connection = self._connection()
+        self._promote(connection)
+        marker_statements = [
+            s
+            for s in connection.executed
+            if "INSERT INTO" in s and '"publication"' in s
+        ]
+        self.assertEqual(1, len(marker_statements))
+        statement = marker_statements[0]
+        self.assertIn("FROM pg_class", statement)
+        self.assertIn("RETURNING published_at", statement)
+        self.assertNotIn("ON CONFLICT", statement)
+        grant_index = next(
+            i for i, s in enumerate(connection.executed) if s.startswith("GRANT")
+        )
+        marker_index = connection.executed.index(statement)
+        self.assertLess(grant_index, marker_index)
+
+    def test_publication_marker_insert_binds_the_expected_parameters(self):
+        connection = self._connection()
+        self._promote(connection)
+        for statement, params in zip(connection.executed, connection.executed_params):
+            if "INSERT INTO" in statement and '"publication"' in statement:
+                self.assertEqual(
+                    (
+                        _RUN_TS,
+                        "a" * 64,
+                        "vmadd_address",
+                        "PostgreSQL 18.6 (fake build)",
+                        "vicmap",
+                        "vmadd_address",
+                    ),
+                    tuple(params),
+                )
+                break
+        else:
+            self.fail("no publication marker insert was executed")
 
 
 class PromotionRollbackCompositionTest(unittest.TestCase):
@@ -341,6 +417,50 @@ class PromotionRollbackCompositionTest(unittest.TestCase):
     def test_promotion_failed_carries_only_its_code(self):
         self.assertEqual("pub_promotion_failed", publish.PromotionFailed.code)
         self.assertEqual("pub_promotion_failed", str(publish.PromotionFailed()))
+
+    def test_publication_marker_insert_failure_rolls_back(self):
+        gate_conn = _FakeConnection(audit_rows=(("vmadd_address", "pass"),))
+        connection = _FakeConnection(
+            constraint_rows=(_PK_ROW, _NOT_NULL_ROW),
+            index_rows=(_GEOM_INDEX_ROW,),
+            fail_on="INSERT INTO",
+        )
+        with patch.object(
+            publish.psycopg, "connect", side_effect=[gate_conn, connection]
+        ):
+            with self.assertRaises(publish.PromotionFailed):
+                publish.promote_order(
+                    _one_layer_manifest(),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    "a" * 64,
+                )
+        self.assertEqual(1, connection.rollback_count)
+        self.assertEqual(1, connection.commit_count)
+
+    def test_publication_marker_insert_returning_no_row_rolls_back(self):
+        # D-82: a marker INSERT ... RETURNING published_at that returns no
+        # row is a promotion failure, never a silently-accepted marker.
+        gate_conn = _FakeConnection(audit_rows=(("vmadd_address", "pass"),))
+        connection = _FakeConnection(
+            constraint_rows=(_PK_ROW, _NOT_NULL_ROW),
+            index_rows=(_GEOM_INDEX_ROW,),
+            marker_rows=[],
+        )
+        with patch.object(
+            publish.psycopg, "connect", side_effect=[gate_conn, connection]
+        ):
+            with self.assertRaises(publish.PromotionFailed):
+                publish.promote_order(
+                    _one_layer_manifest(),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    "a" * 64,
+                )
+        self.assertEqual(1, connection.rollback_count)
+        self.assertEqual(1, connection.commit_count)
 
 
 class ClosedFailureVocabularyTest(unittest.TestCase):
@@ -464,6 +584,178 @@ class PublicationGateTest(unittest.TestCase):
                 )
         self.assertEqual(1, len(created))
         self.assertFalse(any("DROP TABLE" in s for s in gate_conn.executed))
+
+
+class PromoteOrResumeTest(unittest.TestCase):
+    """No database. Covers the D-86 classify-then-branch composition:
+    PROMOTE (fresh staging, no marker), RESUME (staging absent, marker
+    present, live OID matches -- no promotion connection ever opens),
+    PublicationValidationMissing (D-89's gate-first ordering), and
+    PublicationAmbiguous/AuditReadFailed for the two read-only failure
+    boundaries -- neither of which is ever misreported as
+    ``PromotionFailed``."""
+
+    _TARGET = "vmadd_address"
+    _DIGEST = "a" * 64
+
+    def _staging_table(self, target=_TARGET):
+        return staging.staging_table_name(target, _RUN_TS)
+
+    def _gate_connection(self, target=_TARGET):
+        return _FakeConnection(audit_rows=((target, "pass"),))
+
+    def test_freshly_staged_order_promotes(self):
+        gate_conn = self._gate_connection()
+        classify_conn = _FakeConnection(
+            relation_oids={("vicmap_staging", self._staging_table()): (111,)}
+        )
+        promote_conn = _FakeConnection(
+            constraint_rows=(_PK_ROW, _NOT_NULL_ROW), index_rows=(_GEOM_INDEX_ROW,)
+        )
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, promote_conn],
+        ):
+            result = publish.promote_or_resume(
+                _one_layer_manifest(self._TARGET),
+                _publish_policy(),
+                "sentinel-secret",
+                _RUN_TS,
+                self._DIGEST,
+            )
+        self.assertEqual(publish.PROMOTION_PERFORMED, result.promotion)
+        self.assertEqual((self._TARGET,), result.published_tables)
+        for statement in classify_conn.executed:
+            self.assertNotIn("DROP TABLE", statement)
+            self.assertNotIn("ALTER TABLE", statement)
+            self.assertNotIn("GRANT", statement)
+            self.assertNotIn("INSERT INTO", statement)
+
+    def test_committed_order_resumes_without_a_promotion_connection(self):
+        marker_row = (
+            self._TARGET,
+            222,
+            "PostgreSQL 18.6 (fake build)",
+            _FIXED_PUBLISHED_AT,
+        )
+        gate_conn = self._gate_connection()
+        classify_conn = _FakeConnection(
+            publication_rows=(marker_row,),
+            relation_oids={("vicmap", self._TARGET): (222,)},
+        )
+
+        def _third_call_fails(*args, **kwargs):
+            self.fail("resume must not open a promotion connection")
+
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, _third_call_fails],
+        ):
+            result = publish.promote_or_resume(
+                _one_layer_manifest(self._TARGET),
+                _publish_policy(),
+                "sentinel-secret",
+                _RUN_TS,
+                self._DIGEST,
+            )
+        self.assertEqual(publish.PROMOTION_RESUMED, result.promotion)
+        self.assertEqual((self._TARGET,), result.published_tables)
+        self.assertEqual("PostgreSQL 18.6 (fake build)", result.server_version)
+        self.assertEqual(_FIXED_PUBLISHED_AT, result.published_at)
+        for statement in gate_conn.executed + classify_conn.executed:
+            self.assertNotIn("DROP TABLE", statement)
+            self.assertNotIn("ALTER TABLE", statement)
+            self.assertNotIn("GRANT", statement)
+            self.assertNotIn("INSERT INTO", statement)
+
+    def test_no_pass_row_raises_before_classification_connects(self):
+        gate_conn = _FakeConnection(audit_rows=())
+        created: list[int] = []
+
+        def _factory(*args, **kwargs):
+            created.append(1)
+            return gate_conn
+
+        with patch.object(publish.psycopg, "connect", side_effect=_factory):
+            with self.assertRaises(publish.PublicationValidationMissing):
+                publish.promote_or_resume(
+                    _one_layer_manifest(self._TARGET),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    self._DIGEST,
+                )
+        self.assertEqual(1, len(created))
+
+    def test_staging_absent_with_no_marker_raises_publication_ambiguous(self):
+        gate_conn = self._gate_connection()
+        classify_conn = _FakeConnection(publication_rows=())
+        with patch.object(
+            publish.psycopg, "connect", side_effect=[gate_conn, classify_conn]
+        ):
+            with self.assertRaises(publish.PublicationAmbiguous):
+                publish.promote_or_resume(
+                    _one_layer_manifest(self._TARGET),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    self._DIGEST,
+                )
+        for statement in classify_conn.executed:
+            self.assertNotIn("DROP TABLE", statement)
+            self.assertNotIn("ALTER TABLE", statement)
+
+    def test_classification_connect_failure_raises_audit_read_failed_never_promotion_failed(
+        self,
+    ):
+        gate_conn = self._gate_connection()
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, publish.psycopg.OperationalError("boom")],
+        ):
+            with self.assertRaises(publish.AuditReadFailed):
+                publish.promote_or_resume(
+                    _one_layer_manifest(self._TARGET),
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    self._DIGEST,
+                )
+
+    def test_classification_session_sets_read_only_before_its_reads(self):
+        gate_conn = self._gate_connection()
+        classify_conn = _FakeConnection(
+            relation_oids={("vicmap_staging", self._staging_table()): (111,)}
+        )
+        promote_conn = _FakeConnection(
+            constraint_rows=(_PK_ROW, _NOT_NULL_ROW), index_rows=(_GEOM_INDEX_ROW,)
+        )
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=[gate_conn, classify_conn, promote_conn],
+        ):
+            publish.promote_or_resume(
+                _one_layer_manifest(self._TARGET),
+                _publish_policy(),
+                "sentinel-secret",
+                _RUN_TS,
+                self._DIGEST,
+            )
+        read_only_index = next(
+            i
+            for i, s in enumerate(classify_conn.executed)
+            if "default_transaction_read_only" in s
+        )
+        first_read_index = next(
+            i
+            for i, s in enumerate(classify_conn.executed)
+            if "SELECT" in s.upper() and "default_transaction" not in s
+        )
+        self.assertLess(read_only_index, first_read_index)
 
 
 class _FakeReaderCursor:
@@ -782,6 +1074,28 @@ class ReadLayerValidationsTest(unittest.TestCase):
                 )
 
 
+_PUBLICATION_DDL_PATTERN = re.compile(
+    r"CREATE TABLE IF NOT EXISTS vicmap_audit\.publication \(.*?\);", re.DOTALL
+)
+
+
+def _provisioned_publication_ddl() -> str:
+    """Read the exact ``CREATE TABLE ... vicmap_audit.publication (...);``
+    statement out of the provisioning script, so the live fixture's own DDL
+    can never drift from what an operator actually runs by hand (D-78)."""
+
+    text = (REPO_ROOT / "db" / "provision_vicmap_loader.sql").read_text(
+        encoding="utf-8"
+    )
+    match = _PUBLICATION_DDL_PATTERN.search(text)
+    if match is None:
+        raise AssertionError(
+            "db/provision_vicmap_loader.sql has no vicmap_audit.publication "
+            "CREATE TABLE statement matching the expected shape"
+        )
+    return match.group(0)
+
+
 def _provenance_fixture(directory: Path, *, order_id: str, message_fingerprint: str, sha256: str):
     """Write a real D-32 provenance sidecar into ``directory`` -- the exact
     on-disk artifact ``assemble_summary`` re-reads -- so the offline
@@ -830,6 +1144,8 @@ class SummaryAssemblyTest(unittest.TestCase):
         kwargs = dict(
             server_version="PostgreSQL 18.6 (fake build)",
             published_tables=("vmadd_address",),
+            published_at=_FIXED_PUBLISHED_AT,
+            promotion=publish.PROMOTION_PERFORMED,
         )
         kwargs.update(overrides)
         return publish.PromotionResult(**kwargs)
@@ -950,6 +1266,35 @@ class SummaryAssemblyTest(unittest.TestCase):
         self.assertEqual(summary["message_fingerprint"], event["message_fingerprint"])
         self.assertEqual(summary["published_tables"], event["published_tables"])
 
+    def test_promotion_field_round_trips_performed_and_resumed(self):
+        # D-84: summary.json's new field records whether this run performed
+        # or resumed the promotion -- both closed values must round-trip.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            performed = self._assemble(
+                tmp_dir,
+                publication_result=self._publication_result(
+                    promotion=publish.PROMOTION_PERFORMED
+                ),
+            )
+        self.assertEqual("performed", performed["promotion"])
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            resumed = self._assemble(
+                tmp_dir,
+                publication_result=self._publication_result(
+                    promotion=publish.PROMOTION_RESUMED
+                ),
+            )
+        self.assertEqual("resumed", resumed["promotion"])
+
+    def test_invalid_promotion_value_is_rejected_at_construction(self):
+        with self.assertRaises(ValueError):
+            publish.PromotionResult(
+                server_version="PostgreSQL 18.6 (fake build)",
+                published_tables=("vmadd_address",),
+                published_at=_FIXED_PUBLISHED_AT,
+                promotion="bogus",
+            )
+
 
 class WriteSummaryTest(unittest.TestCase):
     """No database. ``write_summary`` writes canonical, sorted-key UTF-8 JSON
@@ -1047,9 +1392,13 @@ class _LivePublishMixin:
     _OUTSIDE_POINT = (115.86, -31.95)
 
     def _ensure_audit_table(self, cursor, created):
-        """Create ``vicmap_audit.staging_validation`` only if it is absent,
-        recording what was created so cleanup drops only that. Mirrors
-        ``AuditValidationRecordTest``'s provision-if-missing shape."""
+        """Create ``vicmap_audit.staging_validation`` and
+        ``vicmap_audit.publication`` only if absent, recording what was
+        created so cleanup drops only that. Mirrors
+        ``AuditValidationRecordTest``'s provision-if-missing shape. The
+        ``publication`` DDL is read from the provisioning script itself
+        (``_provisioned_publication_ddl``) so this fixture can never drift
+        from what an operator actually runs by hand (D-78)."""
 
         cursor.execute("SELECT to_regnamespace('vicmap_audit')")
         (schema_oid,) = cursor.fetchone()
@@ -1070,6 +1419,11 @@ class _LivePublishMixin:
                 "PRIMARY KEY (run_ts, manifest_digest, target_table))"
             )
             created["audit_table"] = True
+        cursor.execute("SELECT to_regclass('vicmap_audit.publication')")
+        (publication_oid,) = cursor.fetchone()
+        if publication_oid is None:
+            cursor.execute(_provisioned_publication_ddl())
+            created["publication_table"] = True
 
     def _register_fixture_cleanup(
         self, connection, *, schemas=(), roles=(), audit_keys=(), created=None
@@ -1096,6 +1450,15 @@ class _LivePublishMixin:
                             "WHERE run_ts = %s AND manifest_digest = %s",
                             (run_ts, digest),
                         )
+                cur.execute("SELECT to_regclass('vicmap_audit.publication')")
+                (publication_oid,) = cur.fetchone()
+                if publication_oid is not None:
+                    for run_ts, digest in audit_keys:
+                        cur.execute(
+                            "DELETE FROM vicmap_audit.publication "
+                            "WHERE run_ts = %s AND manifest_digest = %s",
+                            (run_ts, digest),
+                        )
                 for schema in schemas:
                     cur.execute(
                         sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
@@ -1113,6 +1476,8 @@ class _LivePublishMixin:
                         )
                 if created.get("audit_table"):
                     cur.execute("DROP TABLE IF EXISTS vicmap_audit.staging_validation")
+                if created.get("publication_table"):
+                    cur.execute("DROP TABLE IF EXISTS vicmap_audit.publication")
                 if created.get("audit_schema"):
                     cur.execute("DROP SCHEMA IF EXISTS vicmap_audit")
 
@@ -1466,7 +1831,7 @@ class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
         # staging_b is deliberately never created: its absence is the induced
         # mid-transaction failure on the second layer (PUB-03).
 
-        created = {"audit_schema": False, "audit_table": False}
+        created = {"audit_schema": False, "audit_table": False, "publication_table": False}
 
         def _cleanup():
             with connection.cursor() as cur:
@@ -1475,6 +1840,13 @@ class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
                 if audit_oid is not None:
                     cur.execute(
                         "DELETE FROM vicmap_audit.staging_validation WHERE run_ts = %s",
+                        (self._RUN_TS,),
+                    )
+                cur.execute("SELECT to_regclass('vicmap_audit.publication')")
+                (publication_oid,) = cur.fetchone()
+                if publication_oid is not None:
+                    cur.execute(
+                        "DELETE FROM vicmap_audit.publication WHERE run_ts = %s",
                         (self._RUN_TS,),
                     )
                 for schema in (pub_schema, stg_schema):
@@ -1490,6 +1862,8 @@ class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
                 )
                 if created["audit_table"]:
                     cur.execute("DROP TABLE IF EXISTS vicmap_audit.staging_validation")
+                if created["publication_table"]:
+                    cur.execute("DROP TABLE IF EXISTS vicmap_audit.publication")
                 if created["audit_schema"]:
                     cur.execute("DROP SCHEMA IF EXISTS vicmap_audit")
 
@@ -1603,6 +1977,11 @@ class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
             (promoted_b,) = cursor.fetchone()
             cursor.execute("SELECT to_regclass(%s)", (f"{stg_schema}.{staging_a}",))
             (staging_a_regclass,) = cursor.fetchone()
+            cursor.execute(
+                "SELECT count(*) FROM vicmap_audit.publication WHERE run_ts = %s",
+                (self._RUN_TS,),
+            )
+            (publication_row_count,) = cursor.fetchone()
 
         # Prior published table and its exact marker row are untouched...
         self.assertEqual(1, marker_count)
@@ -1610,6 +1989,8 @@ class LivePromotionRollbackTest(_LivePublishMixin, unittest.TestCase):
         self.assertIsNone(promoted_b)
         # ...and layer A's staging table rolled back to the staging schema.
         self.assertIsNotNone(staging_a_regclass)
+        # D-79: a rolled-back promotion leaves no publication marker row.
+        self.assertEqual(0, publication_row_count)
 
 
 class LiveReaderVerificationTest(_LivePublishMixin, unittest.TestCase):
@@ -1888,20 +2269,19 @@ class LiveReaderWriteNotDeniedTest(_LivePublishMixin, unittest.TestCase):
             )
 
 
-class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
-    """Skips without live DSNs. ``publish_order.py``'s full ordered
-    composition (load-config -> gate -> promote -> reader-verify -> summary,
-    D-77) exits 0 and writes ``summary.json`` into the run directory against
-    a real server. The fixture is a throwaway but complete order: the
-    repository's own ``vicmap.toml`` re-pointed at throwaway schemas/roles, a
-    real artifact + provenance sidecar, a real ``manifest.json``, a staged
-    table owned by a genuine non-superuser loader login, a PASS audit row
-    (D-70), and a reader login holding only baseline schema ``USAGE`` (D-72),
-    both passwords supplied through the environment exactly as in production
-    (D-58/D-74). Asserts the summary's every EVID-01 link fact, the single
-    rendered success event, and that no secret or local path leaks."""
+class _LivePublishOrderMixin(_LivePublishMixin):
+    """Shared fixture machinery for driving a full ``publish_order.main`` run
+    entirely through the real CLI entry point (never through ``publish``'s
+    functions directly): the repository's own ``vicmap.toml`` re-pointed at
+    throwaway schemas/roles, a real artifact + provenance sidecar, a real
+    ``manifest.json``, a staged table owned by a genuine non-superuser
+    loader login, a PASS audit row (D-70), a reader login holding only
+    baseline schema ``USAGE`` (D-72), and the D-78 ``vicmap_audit.publication``
+    grant. Parameterised by ``tag`` (a short per-test label, so sibling live
+    classes sharing a pid never collide on schema/role/order names) and
+    ``run_dir_name`` (so a full run and a resume re-run each get their own
+    run directory)."""
 
-    _RUN_DIR_NAME = "20260928T000004Z"
     _FINGERPRINT = "0123456789abcdef"
 
     def _write_config(self, config_root: Path, *, order_id, loader_role, reader_role,
@@ -1932,7 +2312,9 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
         config_path.write_text(text, encoding="utf-8")
         return config_path
 
-    def _write_run_artifacts(self, config_root: Path, *, order_id, target) -> tuple:
+    def _write_run_artifacts(
+        self, config_root: Path, *, order_id, target, run_dir_name
+    ) -> tuple:
         """A real Phase 1 artifact + provenance sidecar and a real Phase 2
         ``manifest.json`` (+ digest sidecar) under ``config_root``, laid out
         exactly where ``publish_order`` looks for them. Returns
@@ -1952,7 +2334,7 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
             byte_count=len(artifact_bytes),
         )
 
-        run_directory = config_root / "runs" / order_id / self._RUN_DIR_NAME
+        run_directory = config_root / "runs" / order_id / run_dir_name
         run_directory.mkdir(parents=True)
         profile = discovery.LayerProfile(
             dataset_relative_path="livetest/LIVETEST.gdb",
@@ -1976,7 +2358,7 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
         )
         manifest = manifest_module.build_manifest(
             order_id=order_id,
-            run_timestamp=self._RUN_DIR_NAME,
+            run_timestamp=run_dir_name,
             run_directory=run_directory,
             artifact_sha256=artifact_sha256,
             artifact_byte_count=len(artifact_bytes),
@@ -1987,25 +2369,32 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
         digest = manifest_module.write_manifest(manifest, run_directory)
         return run_directory, artifact_sha256, digest
 
-    def test_full_run_exits_zero_and_writes_summary_json(self):
-        self._require_live()
+    def _provision_order_fixture(self, *, tag: str, run_dir_name: str):
+        """Provision one throwaway but complete order -- schemas, a genuine
+        non-superuser loader + reader login, a staged fixture table, the
+        D-70/D-78 audit grants, and the PASS row -- and return everything a
+        caller needs to drive ``publish_order.main`` and inspect the result.
+        Registers its own cleanup; the superuser connection's close is
+        registered here too, so callers never need their own ``addCleanup``.
+        """
+
         connection = self._open_superuser()
         self.addCleanup(connection.close)
         sql = publish.sql
 
         pid = os.getpid()
-        order_id = f"LIVETEST{pid}"
-        pub_schema = f"livetest_frpub_{pid}"
-        stg_schema = f"livetest_frstg_{pid}"
+        order_id = f"LIVETEST{tag.upper()}{pid}"
+        pub_schema = f"livetest_{tag}pub_{pid}"
+        stg_schema = f"livetest_{tag}stg_{pid}"
         # A genuine non-superuser loader login, so the CLI's whole path runs
-        # with exactly the privileges D-70/D-72 provisioning grants.
-        loader_role = f"livetest_frld_{pid}"
-        reader_role = f"livetest_frrd_{pid}"
-        target = f"livetest_fr_{pid}"
+        # with exactly the privileges D-70/D-72/D-78 provisioning grants.
+        loader_role = f"livetest_{tag}ld_{pid}"
+        reader_role = f"livetest_{tag}rd_{pid}"
+        target = f"livetest_{tag}_{pid}"
         loader_password = secrets.token_hex(16)
         reader_password = secrets.token_hex(16)
 
-        config_root = Path(tempfile.mkdtemp(prefix="livetest-publish-order-"))
+        config_root = Path(tempfile.mkdtemp(prefix=f"livetest-publish-order-{tag}-"))
         self.addCleanup(shutil.rmtree, config_root, ignore_errors=True)
         config_path = self._write_config(
             config_root,
@@ -2016,19 +2405,23 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
             pub_schema=pub_schema,
         )
         run_directory, artifact_sha256, digest = self._write_run_artifacts(
-            config_root, order_id=order_id, target=target
+            config_root, order_id=order_id, target=target, run_dir_name=run_dir_name
         )
 
-        created = {"audit_schema": False, "audit_table": False}
+        created = {
+            "audit_schema": False,
+            "audit_table": False,
+            "publication_table": False,
+        }
         self._register_fixture_cleanup(
             connection,
             schemas=(pub_schema, stg_schema),
             roles=(loader_role, reader_role),
-            audit_keys=((self._RUN_DIR_NAME, digest),),
+            audit_keys=((run_dir_name, digest),),
             created=created,
         )
 
-        staging_table = staging.staging_table_name(target, self._RUN_DIR_NAME)
+        staging_table = staging.staging_table_name(target, run_dir_name)
         with connection.cursor() as cursor:
             for role, password in (
                 (loader_role, loader_password),
@@ -2061,7 +2454,7 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
                 cursor,
                 stg_schema,
                 staging_table,
-                gist_index=f"livetest_fr_gix_{pid}",
+                gist_index=f"livetest_{tag}_gix_{pid}",
                 points=self._VICTORIA_POINTS,
             )
             cursor.execute(
@@ -2070,8 +2463,9 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
                     sql.Identifier(loader_role),
                 )
             )
-            # D-70: the loader reads (and in production appends to) the audit
-            # table; this test only needs the gate's and summary's reads.
+            # D-70/D-78: the loader reads (and in production appends to) both
+            # audit tables; this test only needs the gate's, classifier's,
+            # and summary's reads plus the marker write a promotion makes.
             self._ensure_audit_table(cursor, created)
             cursor.execute(
                 sql.SQL("GRANT USAGE ON SCHEMA vicmap_audit TO {}").format(
@@ -2083,40 +2477,77 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
                     sql.Identifier(loader_role)
                 )
             )
+            cursor.execute(
+                sql.SQL(
+                    "GRANT SELECT, INSERT ON vicmap_audit.publication TO {}"
+                ).format(sql.Identifier(loader_role))
+            )
             self._insert_pass_row(
                 cursor,
-                run_ts=self._RUN_DIR_NAME,
+                run_ts=run_dir_name,
                 digest=digest,
                 target=target,
                 row_count=len(self._VICTORIA_POINTS),
             )
 
+        return types.SimpleNamespace(
+            connection=connection,
+            config_path=config_path,
+            run_directory=run_directory,
+            digest=digest,
+            artifact_sha256=artifact_sha256,
+            order_id=order_id,
+            loader_password=loader_password,
+            reader_password=reader_password,
+            pub_schema=pub_schema,
+            stg_schema=stg_schema,
+            target=target,
+            staging_table=staging_table,
+        )
+
+
+class LivePublishOrderFullRunTest(_LivePublishOrderMixin, unittest.TestCase):
+    """Skips without live DSNs. ``publish_order.py``'s full ordered
+    composition (load-config -> gate -> classify -> promote -> reader-verify
+    -> summary, D-77/D-83) exits 0 and writes ``summary.json`` into the run
+    directory against a real server. Asserts the summary's every EVID-01
+    link fact, the new ``promotion`` field is "performed", the single
+    rendered success event, and that no secret or local path leaks."""
+
+    _RUN_DIR_NAME = "20260928T000004Z"
+
+    def test_full_run_exits_zero_and_writes_summary_json(self):
+        self._require_live()
+        fixture = self._provision_order_fixture(tag="fr", run_dir_name=self._RUN_DIR_NAME)
+        sql = publish.sql
+
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch.dict(
             os.environ,
             {
-                staging.PASSWORD_ENV_VAR: loader_password,
-                publish.READER_PASSWORD_ENV_VAR: reader_password,
+                staging.PASSWORD_ENV_VAR: fixture.loader_password,
+                publish.READER_PASSWORD_ENV_VAR: fixture.reader_password,
             },
         ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            exit_code = publish_order.main(["--config", str(config_path)])
+            exit_code = publish_order.main(["--config", str(fixture.config_path)])
 
         output = stdout.getvalue() + stderr.getvalue()
         self.assertEqual(0, exit_code, output)
 
-        summary_path = run_directory / "summary.json"
+        summary_path = fixture.run_directory / "summary.json"
         summary_text = summary_path.read_text(encoding="utf-8")
         summary = json.loads(summary_text)
-        self.assertEqual(order_id, summary["order_id"])
+        self.assertEqual(fixture.order_id, summary["order_id"])
         self.assertEqual(self._FINGERPRINT, summary["message_fingerprint"])
-        self.assertEqual(artifact_sha256, summary["artifact_sha256"])
-        self.assertEqual(digest, summary["manifest_sha256"])
+        self.assertEqual(fixture.artifact_sha256, summary["artifact_sha256"])
+        self.assertEqual(fixture.digest, summary["manifest_sha256"])
         self.assertEqual(1, summary["layer_count"])
-        self.assertEqual([target], summary["published_tables"])
+        self.assertEqual([fixture.target], summary["published_tables"])
+        self.assertEqual("performed", summary["promotion"])
         self.assertEqual(
             [
                 {
-                    "target_table": target,
+                    "target_table": fixture.target,
                     "spatial": True,
                     "row_count": len(self._VICTORIA_POINTS),
                     "srid": 7899,
@@ -2128,7 +2559,7 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
         )
         self.assertEqual(
             {
-                "tables_discovered": [target],
+                "tables_discovered": [fixture.target],
                 "tables_discovered_count": 1,
                 "spatial_query_row_count": len(self._VICTORIA_POINTS),
                 "write_denied": True,
@@ -2142,20 +2573,161 @@ class LivePublishOrderFullRunTest(_LivePublishMixin, unittest.TestCase):
 
         # EVID-01 redaction: no secret or local path reaches either output.
         for text in (summary_text, output):
-            self.assertNotIn(loader_password, text)
-            self.assertNotIn(reader_password, text)
-            self.assertNotIn(str(config_root), text)
+            self.assertNotIn(fixture.loader_password, text)
+            self.assertNotIn(fixture.reader_password, text)
+            self.assertNotIn(str(fixture.config_path.parent), text)
 
         # The promotion really committed under the throwaway loader.
         self.assertEqual(
             len(self._VICTORIA_POINTS),
             self._scalar(
-                connection,
+                fixture.connection,
                 sql.SQL("SELECT count(*) FROM {}").format(
-                    sql.Identifier(pub_schema, target)
+                    sql.Identifier(fixture.pub_schema, fixture.target)
                 ),
             ),
         )
+
+
+class LivePublishOrderResumeTest(_LivePublishOrderMixin, unittest.TestCase):
+    """Skips without live DSNs. Reproduces the 2026-09-24 WINDOWS.md #16
+    incident end to end (D-93): run 1 publishes with
+    ``VICMAP_READER_PASSWORD`` unset -- the promotion commits durably, then
+    the post-commit reader proof fails closed, and the staging table is
+    already consumed. Run 2, with the password now set, must resume from the
+    durable ``vicmap_audit.publication`` marker instead of re-entering
+    promotion (which would hit ``UndefinedTable`` on the already-consumed
+    staging table): it patches ``publish._promote_in_transaction`` to explode
+    if reached, and asserts exit 0, ``summary.json`` recording promotion
+    "resumed", the marker's own ``server_version``, and the published
+    table's ``(oid, xmin)`` unchanged -- proving no promotion DDL ran."""
+
+    _RUN_DIR_NAME = "20260929T000005Z"
+
+    def test_rerun_after_post_commit_reader_failure_resumes(self):
+        self._require_live()
+        fixture = self._provision_order_fixture(tag="rs", run_dir_name=self._RUN_DIR_NAME)
+
+        # Run 1: reader password unset -- promotion commits, then the reader
+        # proof fails closed (the exact 2026-09-24 incident shape).
+        stdout1, stderr1 = io.StringIO(), io.StringIO()
+        with patch.dict(
+            os.environ, {staging.PASSWORD_ENV_VAR: fixture.loader_password}
+        ):
+            os.environ.pop(publish.READER_PASSWORD_ENV_VAR, None)
+            with contextlib.redirect_stdout(stdout1), contextlib.redirect_stderr(
+                stderr1
+            ):
+                exit_code_1 = publish_order.main(["--config", str(fixture.config_path)])
+
+        output_1 = stdout1.getvalue() + stderr1.getvalue()
+        self.assertEqual(1, exit_code_1, output_1)
+        failure_lines = [line for line in stderr1.getvalue().splitlines() if line]
+        self.assertEqual(1, len(failure_lines))
+        failure = json.loads(failure_lines[0])
+        self.assertEqual("db_reader_verify", failure["stage"])
+        self.assertEqual("reader_role_unavailable", failure["reason"])
+
+        summary_path = fixture.run_directory / "summary.json"
+        self.assertFalse(summary_path.exists())
+
+        # The staging table is gone -- consumed by the committed promotion.
+        self.assertIsNone(
+            self._scalar(
+                fixture.connection,
+                "SELECT to_regclass(%s)",
+                (f"{fixture.stg_schema}.{fixture.staging_table}",),
+            )
+        )
+
+        published_oid = self._scalar(
+            fixture.connection,
+            "SELECT to_regclass(%s)::oid",
+            (f"{fixture.pub_schema}.{fixture.target}",),
+        )
+        published_xmin = self._scalar(
+            fixture.connection,
+            "SELECT xmin::text FROM pg_class WHERE oid = to_regclass(%s)",
+            (f"{fixture.pub_schema}.{fixture.target}",),
+        )
+        self.assertEqual(
+            1,
+            self._scalar(
+                fixture.connection,
+                "SELECT count(*) FROM vicmap_audit.publication "
+                "WHERE run_ts = %s AND manifest_digest = %s",
+                (self._RUN_DIR_NAME, fixture.digest),
+            ),
+        )
+        marker_oid = self._scalar(
+            fixture.connection,
+            "SELECT table_oid FROM vicmap_audit.publication "
+            "WHERE run_ts = %s AND manifest_digest = %s",
+            (self._RUN_DIR_NAME, fixture.digest),
+        )
+        self.assertEqual(published_oid, marker_oid)
+        marker_server_version = self._scalar(
+            fixture.connection,
+            "SELECT server_version FROM vicmap_audit.publication "
+            "WHERE run_ts = %s AND manifest_digest = %s",
+            (self._RUN_DIR_NAME, fixture.digest),
+        )
+
+        # Run 2: both passwords set. _promote_in_transaction is patched to
+        # explode if reached -- proving resume never re-enters promotion.
+        stdout2, stderr2 = io.StringIO(), io.StringIO()
+        with patch.dict(
+            os.environ,
+            {
+                staging.PASSWORD_ENV_VAR: fixture.loader_password,
+                publish.READER_PASSWORD_ENV_VAR: fixture.reader_password,
+            },
+        ), patch.object(
+            publish,
+            "_promote_in_transaction",
+            side_effect=AssertionError("resume must not re-enter promotion"),
+        ), contextlib.redirect_stdout(stdout2), contextlib.redirect_stderr(stderr2):
+            exit_code_2 = publish_order.main(["--config", str(fixture.config_path)])
+
+        output_2 = stdout2.getvalue() + stderr2.getvalue()
+        self.assertEqual(0, exit_code_2, output_2)
+
+        summary_text = summary_path.read_text(encoding="utf-8")
+        summary = json.loads(summary_text)
+        self.assertEqual("resumed", summary["promotion"])
+        self.assertEqual(marker_server_version, summary["server_version"])
+        self.assertEqual([fixture.target], summary["published_tables"])
+
+        self.assertEqual(
+            published_oid,
+            self._scalar(
+                fixture.connection,
+                "SELECT to_regclass(%s)::oid",
+                (f"{fixture.pub_schema}.{fixture.target}",),
+            ),
+        )
+        self.assertEqual(
+            published_xmin,
+            self._scalar(
+                fixture.connection,
+                "SELECT xmin::text FROM pg_class WHERE oid = to_regclass(%s)",
+                (f"{fixture.pub_schema}.{fixture.target}",),
+            ),
+        )
+        self.assertEqual(
+            1,
+            self._scalar(
+                fixture.connection,
+                "SELECT count(*) FROM vicmap_audit.publication "
+                "WHERE run_ts = %s AND manifest_digest = %s",
+                (self._RUN_DIR_NAME, fixture.digest),
+            ),
+        )
+
+        for text in (summary_text, output_1, output_2):
+            self.assertNotIn(fixture.loader_password, text)
+            self.assertNotIn(fixture.reader_password, text)
+            self.assertNotIn(str(fixture.config_path.parent), text)
 
 
 if __name__ == "__main__":

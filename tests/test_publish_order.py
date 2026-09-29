@@ -18,6 +18,7 @@ import io
 import json
 import os
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -83,10 +84,15 @@ class _FakeManifest:
         self.layers = tuple(_FakeManifestLayer(table) for table in target_tables)
 
 
+_FIXED_PUBLISHED_AT = datetime(2026, 9, 24, 7, 9, 27, 495000, tzinfo=timezone.utc)
+
+
 def _promotion_result(**overrides) -> publish.PromotionResult:
     kwargs = dict(
         server_version="PostgreSQL 18.6 (fake build)",
         published_tables=("vmadd_address",),
+        published_at=_FIXED_PUBLISHED_AT,
+        promotion=publish.PROMOTION_PERFORMED,
     )
     kwargs.update(overrides)
     return publish.PromotionResult(**kwargs)
@@ -157,7 +163,7 @@ def _patched_pipeline(**overrides):
         most_recent_run_directory=lambda run_root, order_id: _RUN_DIRECTORY,
         read_manifest=lambda run_directory: _FakeManifest(),
         manifest_digest=lambda run_directory: "c" * 64,
-        promote_order=lambda *a, **k: _promotion_result(),
+        promote_or_resume=lambda *a, **k: _promotion_result(),
         verify_reader_access=lambda *a, **k: _reader_verification(),
         read_layer_validations=lambda *a, **k: _validation_records(),
         assemble_summary=lambda **k: _fixed_summary(),
@@ -197,7 +203,7 @@ def _patched_pipeline(**overrides):
             patch.object(publish_order, "manifest_digest", defaults["manifest_digest"])
         )
         stack.enter_context(
-            patch.object(publish, "promote_order", defaults["promote_order"])
+            patch.object(publish, "promote_or_resume", defaults["promote_or_resume"])
         )
         stack.enter_context(
             patch.object(publish, "verify_reader_access", defaults["verify_reader_access"])
@@ -265,6 +271,55 @@ class SuccessPathTest(unittest.TestCase):
         _forbidden_text_absent(self, stdout, stderr)
 
 
+class ResumeBranchTest(unittest.TestCase):
+    """No database. A resumed promotion result (D-83) is otherwise
+    indistinguishable from a fresh promotion to this CLI's own exception
+    ladder -- it completes the full pipeline and exits 0 with exactly one
+    ``publication_summary`` event."""
+
+    def test_resumed_promotion_exits_zero_with_one_summary_event(self):
+        with _patched_pipeline(
+            promote_or_resume=lambda *a, **k: _promotion_result(
+                promotion=publish.PROMOTION_RESUMED
+            )
+        ):
+            exit_code, stdout, stderr = _run_main_capturing_output()
+        self.assertEqual(0, exit_code)
+        self.assertEqual("", stderr)
+        events = [json.loads(line) for line in stdout.splitlines() if line]
+        self.assertEqual(["publication_summary"], [e.get("event") for e in events])
+        _forbidden_text_absent(self, stdout, stderr)
+
+
+class PromoteOrResumeSeamTest(unittest.TestCase):
+    """No database. ``main``'s one publication seam (D-83) passes the
+    manifest, policy, the loader password, the run directory name as
+    ``run_timestamp``, and the manifest digest to ``promote_or_resume``."""
+
+    def test_main_passes_loader_password_run_timestamp_and_digest(self):
+        captured: dict[str, object] = {}
+
+        def _capture(manifest, policy, password, run_timestamp, manifest_digest):
+            captured["manifest"] = manifest
+            captured["policy"] = policy
+            captured["password"] = password
+            captured["run_timestamp"] = run_timestamp
+            captured["manifest_digest"] = manifest_digest
+            return _promotion_result()
+
+        with _patched_pipeline(
+            promote_or_resume=_capture,
+            manifest_digest=lambda run_directory: "c" * 64,
+        ):
+            exit_code, _stdout, _stderr = _run_main_capturing_output()
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(_LOADER_PASSWORD, captured["password"])
+        self.assertEqual(_RUN_DIRECTORY.name, captured["run_timestamp"])
+        self.assertEqual("c" * 64, captured["manifest_digest"])
+        self.assertIsInstance(captured["policy"], publish.PublishPolicy)
+
+
 class ConfigInvalidTest(unittest.TestCase):
     """No database. A missing loader password fails closed as
     ``config_invalid`` before any connection is attempted."""
@@ -325,7 +380,7 @@ class PublicationGateFailureTest(unittest.TestCase):
         def _raise(*a, **k):
             raise publish.PublicationValidationMissing()
 
-        with _patched_pipeline(promote_order=_raise):
+        with _patched_pipeline(promote_or_resume=_raise):
             exit_code, stdout, stderr = _run_main_capturing_output()
         self.assertEqual(1, exit_code)
         failure = json.loads(stderr.strip())
@@ -337,7 +392,7 @@ class PublicationGateFailureTest(unittest.TestCase):
         def _raise(*a, **k):
             raise staging.AuditPrivilegeDenied()
 
-        with _patched_pipeline(promote_order=_raise):
+        with _patched_pipeline(promote_or_resume=_raise):
             exit_code, stdout, stderr = _run_main_capturing_output()
         self.assertEqual(1, exit_code)
         failure = json.loads(stderr.strip())
@@ -365,7 +420,7 @@ class PromotionFailureTest(unittest.TestCase):
         def _raise(*a, **k):
             raise publish.PromotionFailed()
 
-        with _patched_pipeline(promote_order=_raise):
+        with _patched_pipeline(promote_or_resume=_raise):
             exit_code, stdout, stderr = _run_main_capturing_output()
         self.assertEqual(1, exit_code)
         failure = json.loads(stderr.strip())
@@ -469,7 +524,7 @@ class ExitContractShapeTest(unittest.TestCase):
     def test_every_failure_case_returns_exactly_one(self):
         for override in (
             {"read_manifest": lambda run_directory: (_ for _ in ()).throw(ManifestUnreadable())},
-            {"promote_order": lambda *a, **k: (_ for _ in ()).throw(publish.PromotionFailed())},
+            {"promote_or_resume": lambda *a, **k: (_ for _ in ()).throw(publish.PromotionFailed())},
             {
                 "verify_reader_access": lambda *a, **k: (_ for _ in ()).throw(
                     publish.ReaderRoleUnavailable()
