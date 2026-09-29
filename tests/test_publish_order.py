@@ -17,6 +17,7 @@ import contextlib
 import io
 import json
 import os
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -507,13 +508,16 @@ class ReaderVerificationFailureTest(unittest.TestCase):
 class InternalFailureTest(unittest.TestCase):
     """No database. Any unanticipated exception -- never a typed closed
     failure -- maps to the one fixed ``INTERNAL_FAILURE``, with no
-    interpolated exception text ever reaching the operator."""
+    interpolated exception text ever reaching the operator. Proven on
+    ``read_manifest``, a seam with no dedicated closed-failure boundary of
+    its own (D-91 gave ``assemble_summary``/``write_summary`` their own
+    ``publication_summary`` boundary, so the catch-all is proven elsewhere)."""
 
     def test_unexpected_exception_maps_to_internal_failure(self):
-        def _raise(*a, **k):
+        def _raise(run_directory):
             raise RuntimeError("a raw driver/subprocess detail that must never leak")
 
-        with _patched_pipeline(assemble_summary=_raise):
+        with _patched_pipeline(read_manifest=_raise):
             exit_code, stdout, stderr = _run_main_capturing_output()
         self.assertEqual(1, exit_code)
         failure = json.loads(stderr.strip())
@@ -522,16 +526,28 @@ class InternalFailureTest(unittest.TestCase):
         self.assertNotIn("raw driver", stderr)
         _forbidden_text_absent(self, stdout, stderr)
 
-    def test_summary_write_failure_maps_to_internal_failure(self):
-        def _raise(run_directory, summary):
-            raise OSError("disk full")
-
-        with _patched_pipeline(write_summary=_raise):
+    def test_summary_write_failure_maps_to_pub_summary_failed(self):
+        # The real write_summary against the fake, nonexistent run directory
+        # every other seam in _patched_pipeline uses (D-91).
+        with _patched_pipeline(write_summary=publish.write_summary):
             exit_code, stdout, stderr = _run_main_capturing_output()
         self.assertEqual(1, exit_code)
         failure = json.loads(stderr.strip())
-        self.assertEqual("internal_failure", failure["reason"])
-        self.assertNotIn("disk full", stderr)
+        self.assertEqual("publication_summary", failure["stage"])
+        self.assertEqual("pub_summary_failed", failure["reason"])
+        _forbidden_text_absent(self, stdout, stderr)
+
+        # A follow-up run whose run directory really exists completes the
+        # summary with a plain re-run (D-91/ROADMAP SC3).
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            real_run_directory = Path(tmp_dir)
+            with _patched_pipeline(
+                write_summary=publish.write_summary,
+                most_recent_run_directory=lambda run_root, order_id: real_run_directory,
+            ):
+                exit_code, stdout, stderr = _run_main_capturing_output()
+            self.assertEqual(0, exit_code, stdout + stderr)
+            self.assertTrue((real_run_directory / "summary.json").exists())
 
 
 class ResumeVocabularyBoundaryTest(unittest.TestCase):

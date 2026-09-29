@@ -1674,13 +1674,15 @@ class SummaryAssemblyTest(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_missing_validation_row_for_a_manifest_layer_is_rejected(self):
+        # D-91: assemble_summary's own malformed-input failures are the
+        # closed PublicationSummaryFailed, never a raw ValueError.
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with self.assertRaises(ValueError):
+            with self.assertRaises(publish.PublicationSummaryFailed):
                 self._assemble(tmp_dir, validation_rows=())
 
     def test_non_pass_verdict_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with self.assertRaises(ValueError):
+            with self.assertRaises(publish.PublicationSummaryFailed):
                 self._assemble(
                     tmp_dir,
                     validation_rows=(self._validation_record(verdict="fail"),),
@@ -1688,7 +1690,7 @@ class SummaryAssemblyTest(unittest.TestCase):
 
     def test_unsafe_target_table_in_published_tables_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with self.assertRaises(ValueError):
+            with self.assertRaises(publish.PublicationSummaryFailed):
                 self._assemble(
                     tmp_dir,
                     publication_result=self._publication_result(
@@ -1766,6 +1768,7 @@ class SummaryAssemblyTest(unittest.TestCase):
         # A real PromotionResult already rejects a naive published_at at
         # construction (see above), so assemble_summary's own guard is
         # exercised through a duck-typed stand-in carrying the same fields.
+        # D-91: wrapped as PublicationSummaryFailed, never a raw ValueError.
         stand_in = types.SimpleNamespace(
             server_version="PostgreSQL 18.6 (fake build)",
             published_tables=("vmadd_address",),
@@ -1773,7 +1776,7 @@ class SummaryAssemblyTest(unittest.TestCase):
             promotion=publish.PROMOTION_PERFORMED,
         )
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with self.assertRaises(ValueError):
+            with self.assertRaises(publish.PublicationSummaryFailed):
                 self._assemble(tmp_dir, publication_result=stand_in)
 
     def test_resumed_server_version_round_trips_through_promotion_result_from_records(self):
@@ -1793,10 +1796,28 @@ class SummaryAssemblyTest(unittest.TestCase):
         self.assertEqual("PostgreSQL 17.5 (orig)", summary["server_version"])
         self.assertEqual("resumed", summary["promotion"])
 
+    def test_missing_provenance_sidecar_is_rejected_as_summary_failed(self):
+        # D-91: ProvenanceUnavailable from the sidecar re-read is wrapped,
+        # never left to propagate raw.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_path = Path(tmp_dir) / f"Order_{self._ORDER_ID}.zip"
+            artifact_path.write_bytes(b"no sidecar written for this artifact")
+            with self.assertRaises(publish.PublicationSummaryFailed):
+                publish.assemble_summary(
+                    order_id=self._ORDER_ID,
+                    artifact_path=artifact_path,
+                    manifest=_one_layer_manifest(),
+                    manifest_digest=self._MANIFEST_DIGEST,
+                    validation_rows=(self._validation_record(),),
+                    publication_result=self._publication_result(),
+                    reader_verification=self._reader_verification(),
+                )
+
 
 class WriteSummaryTest(unittest.TestCase):
     """No database. ``write_summary`` writes canonical, sorted-key UTF-8 JSON
-    into the run directory."""
+    into the run directory, atomically (D-85): a same-directory temp file,
+    fsynced, then ``os.replace``-d over ``summary.json``."""
 
     def test_writes_canonical_json_into_the_run_directory(self):
         summary = {"b": 1, "a": 2}
@@ -1805,6 +1826,44 @@ class WriteSummaryTest(unittest.TestCase):
             self.assertEqual(Path(tmp_dir) / "summary.json", path)
             text = path.read_text(encoding="utf-8")
         self.assertEqual('{"a":2,"b":1}\n', text)
+
+    def test_overwrite_replaces_content_with_no_leftover_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_directory = Path(tmp_dir)
+            publish.write_summary(run_directory, {"a": 1})
+            path = publish.write_summary(run_directory, {"a": 2})
+            text = path.read_text(encoding="utf-8")
+            entries = sorted(p.name for p in run_directory.iterdir())
+        self.assertEqual('{"a":2}\n', text)
+        self.assertEqual(["summary.json"], entries)
+
+    def test_fresh_directory_has_exactly_one_entry(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_directory = Path(tmp_dir)
+            publish.write_summary(run_directory, {"a": 1})
+            entries = list(run_directory.iterdir())
+        self.assertEqual(["summary.json"], [p.name for p in entries])
+
+    def test_nonexistent_directory_raises_publication_summary_failed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            missing = Path(tmp_dir) / "does-not-exist"
+            with self.assertRaises(publish.PublicationSummaryFailed) as ctx:
+                publish.write_summary(missing, {"a": 1})
+        self.assertEqual("pub_summary_failed", str(ctx.exception))
+
+    def test_replace_failure_leaves_prior_summary_unchanged_and_no_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_directory = Path(tmp_dir)
+            publish.write_summary(run_directory, {"a": 1})
+            prior_bytes = (run_directory / "summary.json").read_bytes()
+
+            with patch("os.replace", side_effect=OSError("disk full")):
+                with self.assertRaises(publish.PublicationSummaryFailed):
+                    publish.write_summary(run_directory, {"a": 2})
+
+            entries = sorted(p.name for p in run_directory.iterdir())
+        self.assertEqual(["summary.json"], entries)
+        self.assertEqual(prior_bytes, (run_directory / "summary.json").read_bytes())
 
 
 class _LivePublishMixin:
