@@ -429,6 +429,57 @@ class PublicationGateFailureTest(unittest.TestCase):
         self.assertEqual("db_audit_privilege_denied", failure["reason"])
 
 
+class AuditReadBoundaryTest(unittest.TestCase):
+    """No database. A failed ``vicmap_audit`` read, before or after
+    promotion has committed, reports ``db_audit_read_failed`` end to end
+    through the real ``publish`` functions and this CLI -- never
+    ``pub_promotion_failed`` (D-90/D-92)."""
+
+    def test_pre_commit_connect_failure_reports_db_audit_read_failed(self):
+        # promote_or_resume is the real function: its own first action is
+        # the D-68 gate, which now runs on _connect_for_audit_read. A
+        # connect failure here happens before any DDL and before commit.
+        with _patched_pipeline(promote_or_resume=publish.promote_or_resume):
+            with patch.object(
+                publish.psycopg,
+                "connect",
+                side_effect=publish.psycopg.OperationalError(
+                    f"boom {_LOADER_PASSWORD}"
+                ),
+            ):
+                exit_code, stdout, stderr = _run_main_capturing_output()
+        self.assertEqual(1, exit_code)
+        failure = json.loads(stderr.strip())
+        self.assertEqual("db_audit", failure["stage"])
+        self.assertEqual("db_audit_read_failed", failure["reason"])
+        self.assertNotIn("boom", stderr)
+        _forbidden_text_absent(self, stdout, stderr)
+
+    def test_post_commit_connect_failure_reports_db_audit_read_failed(self):
+        # promote_or_resume stays the default stand-in (promotion has
+        # already "committed"); only read_layer_validations is real, so its
+        # own connect failure is the one under test here -- it must never
+        # surface as pub_promotion_failed even though it runs after the
+        # promotion this CLI believes already succeeded.
+        with _patched_pipeline(
+            read_layer_validations=publish.read_layer_validations,
+        ):
+            with patch.object(
+                publish.psycopg,
+                "connect",
+                side_effect=publish.psycopg.OperationalError(
+                    f"boom {_LOADER_PASSWORD}"
+                ),
+            ):
+                exit_code, stdout, stderr = _run_main_capturing_output()
+        self.assertEqual(1, exit_code)
+        failure = json.loads(stderr.strip())
+        self.assertEqual("db_audit_read_failed", failure["reason"])
+        self.assertNotEqual("pub_promotion_failed", failure["reason"])
+        self.assertNotIn("boom", stderr)
+        _forbidden_text_absent(self, stdout, stderr)
+
+
 class PromotionFailureTest(unittest.TestCase):
     """No database. A mid-promotion failure surfaces via DB_PUBLISH; the
     prior published tables are untouched by construction (PUB-03), which is

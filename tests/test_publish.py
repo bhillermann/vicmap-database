@@ -616,6 +616,48 @@ class PublicationGateTest(unittest.TestCase):
         self.assertEqual(1, len(created))
         self.assertFalse(any("DROP TABLE" in s for s in gate_conn.executed))
 
+    def test_connect_failure_raises_audit_read_failed_never_promotion_failed(self):
+        # D-90/Pitfall 1: the gate is a vicmap_audit read; a connection
+        # failure here must never be misreported as PromotionFailed.
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=publish.psycopg.OperationalError("boom"),
+        ):
+            with self.assertRaises(publish.AuditReadFailed):
+                publish.assert_all_layers_validated(
+                    _publish_policy(),
+                    "sentinel-secret",
+                    run_timestamp=_RUN_TS,
+                    manifest_digest="a" * 64,
+                    target_tables=("vmadd_address",),
+                )
+
+    def test_query_failure_raises_audit_read_failed_never_promotion_failed(self):
+        connection = _FakeConnection(audit_error=RuntimeError("boom"))
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            with self.assertRaises(publish.AuditReadFailed):
+                publish.assert_all_layers_validated(
+                    _publish_policy(),
+                    "sentinel-secret",
+                    run_timestamp=_RUN_TS,
+                    manifest_digest="a" * 64,
+                    target_tables=("vmadd_address",),
+                )
+
+    def test_gate_session_sets_read_only_before_its_reads(self):
+        # D-90: the gate now runs on _connect_for_audit_read, not _connect.
+        connection = _FakeConnection(
+            audit_rows=(("vmadd_address", "pass"),)
+        )
+        self._run_gate(connection, ("vmadd_address",))
+        self.assertTrue(
+            any(
+                "default_transaction_read_only" in statement
+                for statement in connection.executed
+            )
+        )
+
 
 class PromoteOrResumeTest(unittest.TestCase):
     """No database. Covers the D-86 classify-then-branch composition:
@@ -1511,6 +1553,55 @@ class ReadLayerValidationsTest(unittest.TestCase):
                     manifest_digest="a" * 64,
                     target_tables=("vmadd_address",),
                 )
+
+    def test_connect_failure_raises_audit_read_failed_never_promotion_failed(self):
+        # D-90/Pitfall 2: this is a post-commit, read-only re-read; a
+        # connection failure here must never be misreported as
+        # PromotionFailed.
+        with patch.object(
+            publish.psycopg,
+            "connect",
+            side_effect=publish.psycopg.OperationalError("boom"),
+        ):
+            with self.assertRaises(publish.AuditReadFailed):
+                publish.read_layer_validations(
+                    _publish_policy(),
+                    "sentinel-secret",
+                    run_timestamp=_RUN_TS,
+                    manifest_digest="a" * 64,
+                    target_tables=("vmadd_address",),
+                )
+
+    def test_query_failure_raises_audit_read_failed_never_promotion_failed(self):
+        connection = _FakeConnection(audit_error=RuntimeError("boom"))
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            with self.assertRaises(publish.AuditReadFailed):
+                publish.read_layer_validations(
+                    _publish_policy(),
+                    "sentinel-secret",
+                    run_timestamp=_RUN_TS,
+                    manifest_digest="a" * 64,
+                    target_tables=("vmadd_address",),
+                )
+
+    def test_session_sets_read_only_before_its_reads(self):
+        # D-90: read_layer_validations now runs on _connect_for_audit_read,
+        # not _connect.
+        connection = _FakeConnection(audit_rows=(self._AUDIT_ROW,))
+        with patch.object(publish.psycopg, "connect", return_value=connection):
+            publish.read_layer_validations(
+                _publish_policy(),
+                "sentinel-secret",
+                run_timestamp=_RUN_TS,
+                manifest_digest="a" * 64,
+                target_tables=("vmadd_address",),
+            )
+        self.assertTrue(
+            any(
+                "default_transaction_read_only" in statement
+                for statement in connection.executed
+            )
+        )
 
 
 _PUBLICATION_DDL_PATTERN = re.compile(
