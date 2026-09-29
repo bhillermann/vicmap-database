@@ -15,6 +15,7 @@ driver-isolation posture is respected in the tests too.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import io
@@ -877,6 +878,323 @@ class SupersededClassificationTest(unittest.TestCase):
                     self._DIGEST,
                 )
         self._assert_no_ddl(classify_conn)
+
+
+class LayerClassificationTableTest(unittest.TestCase):
+    """No database. Exhaustive ``classify_layer`` table (D-86), including the
+    exact-int OID boundary at ``uint32`` max (D-81/D-82; must-have precision
+    edge): a recorded OID of 4294967295 matches a live 4294967295 and not
+    4294967294."""
+
+    _MAX_UINT32 = 4294967295
+
+    def _record(
+        self,
+        table_oid,
+        *,
+        server_version="PostgreSQL 18.6",
+        published_at=_FIXED_PUBLISHED_AT,
+    ):
+        return publish.PublicationRecord(
+            target_table="vmadd_address",
+            table_oid=table_oid,
+            server_version=server_version,
+            published_at=published_at,
+        )
+
+    def test_classification_table(self):
+        C = publish.LayerCase
+        cases = (
+            ("staging present, no record", 111, None, None, C.STAGED),
+            ("staging present, record", 111, self._record(222), None, C.CONFLICTED),
+            ("absent, no record", None, None, None, C.UNPROVEN),
+            (
+                "absent, matching max-uint32 oid",
+                None,
+                self._record(self._MAX_UINT32),
+                self._MAX_UINT32,
+                C.RESUMABLE,
+            ),
+            (
+                "absent, off-by-one max-uint32 oid",
+                None,
+                self._record(self._MAX_UINT32),
+                self._MAX_UINT32 - 1,
+                C.SUPERSEDED,
+            ),
+            (
+                "absent, record, live missing",
+                None,
+                self._record(222),
+                None,
+                C.SUPERSEDED,
+            ),
+        )
+        for label, staging_oid, record, live_oid, expected in cases:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    expected,
+                    publish.classify_layer(
+                        staging_oid=staging_oid, record=record, live_oid=live_oid
+                    ),
+                )
+
+
+class OrderVerdictTableTest(unittest.TestCase):
+    """No database. Exhaustive ``order_verdict`` table (D-86/D-87) -- the
+    fixed precedence: ``PROMOTE`` only all-``STAGED``, ``RESUME`` only
+    all-``RESUMABLE``, ``SUPERSEDED`` only non-empty
+    resumable-or-superseded-with-at-least-one-superseded, ``AMBIGUOUS``
+    otherwise."""
+
+    def test_verdict_table(self):
+        C = publish.LayerCase
+        V = publish.PublicationVerdict
+        cases = (
+            ((), V.AMBIGUOUS),
+            ((C.STAGED,), V.PROMOTE),
+            ((C.STAGED,) * 3, V.PROMOTE),
+            ((C.RESUMABLE,), V.RESUME),
+            ((C.RESUMABLE,) * 3, V.RESUME),
+            ((C.RESUMABLE, C.RESUMABLE, C.STAGED), V.AMBIGUOUS),
+            ((C.STAGED, C.UNPROVEN), V.AMBIGUOUS),
+            ((C.SUPERSEDED, C.UNPROVEN), V.AMBIGUOUS),
+            ((C.SUPERSEDED, C.STAGED), V.AMBIGUOUS),
+            ((C.UNPROVEN,), V.AMBIGUOUS),
+            ((C.CONFLICTED,), V.AMBIGUOUS),
+            ((C.RESUMABLE, C.CONFLICTED), V.AMBIGUOUS),
+            ((C.RESUMABLE, C.RESUMABLE, C.SUPERSEDED), V.SUPERSEDED),
+        )
+        for cases_tuple, expected in cases:
+            with self.subTest(cases=cases_tuple):
+                self.assertEqual(expected, publish.order_verdict(cases_tuple))
+
+
+class ResumeReconstructionTest(unittest.TestCase):
+    """No database. ``promotion_result_from_records``' single-promotion
+    consistency check (D-81/D-82) and the D-80 subset rule -- rows for a
+    target outside ``target_tables`` are ignored, every named target must
+    have exactly one row, and every row must agree on ``server_version`` and
+    ``published_at`` to the microsecond."""
+
+    _TARGET_A = "vmadd_address"
+    _TARGET_B = "vmroad_road"
+
+    def _record(
+        self,
+        target,
+        oid,
+        *,
+        server_version="PostgreSQL 18.6",
+        published_at=_FIXED_PUBLISHED_AT,
+    ):
+        return publish.PublicationRecord(
+            target_table=target,
+            table_oid=oid,
+            server_version=server_version,
+            published_at=published_at,
+        )
+
+    def test_consistent_rows_reconstruct_in_target_table_order(self):
+        records = (
+            self._record(self._TARGET_B, 222),
+            self._record(self._TARGET_A, 111),
+        )
+        result = publish.promotion_result_from_records(
+            records, (self._TARGET_A, self._TARGET_B)
+        )
+        self.assertEqual((self._TARGET_A, self._TARGET_B), result.published_tables)
+        self.assertEqual("PostgreSQL 18.6", result.server_version)
+        self.assertEqual(_FIXED_PUBLISHED_AT, result.published_at)
+        self.assertEqual(publish.PROMOTION_RESUMED, result.promotion)
+
+    def test_differing_server_version_raises_ambiguous(self):
+        records = (
+            self._record(self._TARGET_A, 111, server_version="PostgreSQL 18.6"),
+            self._record(self._TARGET_B, 222, server_version="PostgreSQL 18.5"),
+        )
+        with self.assertRaises(publish.PublicationAmbiguous):
+            publish.promotion_result_from_records(
+                records, (self._TARGET_A, self._TARGET_B)
+            )
+
+    def test_published_at_disagreeing_by_one_microsecond_raises_ambiguous(self):
+        from datetime import timedelta
+
+        other = _FIXED_PUBLISHED_AT + timedelta(microseconds=1)
+        records = (
+            self._record(self._TARGET_A, 111, published_at=_FIXED_PUBLISHED_AT),
+            self._record(self._TARGET_B, 222, published_at=other),
+        )
+        with self.assertRaises(publish.PublicationAmbiguous):
+            publish.promotion_result_from_records(
+                records, (self._TARGET_A, self._TARGET_B)
+            )
+
+    def test_row_for_target_outside_target_tables_is_ignored(self):
+        extraneous = self._record("vmroad_extra", 999, server_version="wrong-version")
+        records = (self._record(self._TARGET_A, 111), extraneous)
+        result = publish.promotion_result_from_records(records, (self._TARGET_A,))
+        self.assertEqual((self._TARGET_A,), result.published_tables)
+        self.assertEqual("PostgreSQL 18.6", result.server_version)
+
+    def test_missing_row_for_a_target_raises_ambiguous(self):
+        records = (self._record(self._TARGET_A, 111),)
+        with self.assertRaises(publish.PublicationAmbiguous):
+            publish.promotion_result_from_records(
+                records, (self._TARGET_A, self._TARGET_B)
+            )
+
+
+class FailClosedNoDdlTest(unittest.TestCase):
+    """No database. Every AMBIGUOUS classification path through
+    ``promote_or_resume`` -- unproven, conflicted, mixed staged-and-resumable,
+    and an empty target set -- opens exactly the gate and classification
+    connections, the classification session sets read-only before its reads,
+    and neither connection ever issues DROP/ALTER/GRANT/CREATE/INSERT/
+    UPDATE/DELETE."""
+
+    _TARGET = "vmadd_address"
+    _TARGET_2 = "vmroad_road"
+    _DIGEST = "c" * 64
+
+    _FORBIDDEN = ("DROP", "ALTER", "GRANT", "CREATE", "INSERT", "UPDATE", "DELETE")
+
+    def _run(self, manifest, gate_conn, classify_conn):
+        connect_calls: list = []
+        connections = [gate_conn, classify_conn]
+
+        def _factory(*args, **kwargs):
+            connect_calls.append(1)
+            if len(connect_calls) <= len(connections):
+                return connections[len(connect_calls) - 1]
+            self.fail("must not open a third connection")
+
+        with patch.object(publish.psycopg, "connect", side_effect=_factory):
+            with self.assertRaises(publish.PublicationAmbiguous):
+                publish.promote_or_resume(
+                    manifest,
+                    _publish_policy(),
+                    "sentinel-secret",
+                    _RUN_TS,
+                    self._DIGEST,
+                )
+        self.assertEqual(2, len(connect_calls))
+
+        for connection in connections:
+            for statement in connection.executed:
+                upper = statement.upper()
+                for keyword in self._FORBIDDEN:
+                    self.assertNotIn(keyword, upper)
+        self.assertTrue(
+            any(
+                "default_transaction_read_only" in statement
+                for statement in classify_conn.executed
+            )
+        )
+
+    def test_unproven_fails_closed(self):
+        gate_conn = _FakeConnection(audit_rows=((self._TARGET, "pass"),))
+        classify_conn = _FakeConnection(publication_rows=(), relation_oids={})
+        self._run(_one_layer_manifest(self._TARGET), gate_conn, classify_conn)
+
+    def test_conflicted_fails_closed(self):
+        staging_table = staging.staging_table_name(self._TARGET, _RUN_TS)
+        marker_row = (
+            self._TARGET,
+            111,
+            "PostgreSQL 18.6 (fake build)",
+            _FIXED_PUBLISHED_AT,
+        )
+        gate_conn = _FakeConnection(audit_rows=((self._TARGET, "pass"),))
+        classify_conn = _FakeConnection(
+            publication_rows=(marker_row,),
+            relation_oids={("vicmap_staging", staging_table): (999,)},
+        )
+        self._run(_one_layer_manifest(self._TARGET), gate_conn, classify_conn)
+
+    def test_mixed_staged_and_resumable_fails_closed(self):
+        target_a, target_b = self._TARGET, self._TARGET_2
+        staging_table_a = staging.staging_table_name(target_a, _RUN_TS)
+        marker_row_b = (
+            target_b,
+            222,
+            "PostgreSQL 18.6 (fake build)",
+            _FIXED_PUBLISHED_AT,
+        )
+        gate_conn = _FakeConnection(
+            audit_rows=((target_a, "pass"), (target_b, "pass"))
+        )
+        classify_conn = _FakeConnection(
+            publication_rows=(marker_row_b,),
+            relation_oids={
+                ("vicmap_staging", staging_table_a): (111,),
+                ("vicmap", target_b): (222,),
+            },
+        )
+        manifest = types.SimpleNamespace(
+            layers=(
+                types.SimpleNamespace(target_table=target_a),
+                types.SimpleNamespace(target_table=target_b),
+            )
+        )
+        self._run(manifest, gate_conn, classify_conn)
+
+    def test_empty_target_set_fails_closed(self):
+        gate_conn = _FakeConnection()
+        classify_conn = _FakeConnection()
+        manifest = types.SimpleNamespace(layers=())
+        self._run(manifest, gate_conn, classify_conn)
+
+
+class PublicationMarkerProvenanceTest(unittest.TestCase):
+    """No database. Mechanical proof of D-88's "no backfill" rule: parses
+    ``publish.py`` with ``ast`` and shows ``_record_publication`` is called
+    only from ``_promote_in_transaction``, and that among functions
+    referencing ``PUBLICATION_TABLE``, only ``_record_publication`` contains
+    an ``INSERT`` string constant -- the pipeline can write a publication
+    marker only inside the promotion transaction."""
+
+    def _module_tree(self) -> ast.AST:
+        source = Path(publish.__file__).read_text(encoding="utf-8")
+        return ast.parse(source, filename=publish.__file__)
+
+    def _function_defs(self, tree: ast.AST) -> list[ast.FunctionDef]:
+        return [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+
+    def test_record_publication_is_called_only_inside_promote_in_transaction(self):
+        tree = self._module_tree()
+        callers = []
+        for func in self._function_defs(tree):
+            for node in ast.walk(func):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "_record_publication"
+                ):
+                    callers.append(func.name)
+        self.assertEqual(["_promote_in_transaction"], callers)
+
+    def test_only_record_publication_contains_insert_among_publication_table_referrers(
+        self,
+    ):
+        tree = self._module_tree()
+        referrers_with_insert = []
+        for func in self._function_defs(tree):
+            references_table = False
+            has_insert_constant = False
+            for node in ast.walk(func):
+                if isinstance(node, ast.Name) and node.id == "PUBLICATION_TABLE":
+                    references_table = True
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and "INSERT" in node.value.upper()
+                ):
+                    has_insert_constant = True
+            if references_table and has_insert_constant:
+                referrers_with_insert.append(func.name)
+        self.assertEqual(["_record_publication"], referrers_with_insert)
 
 
 class _FakeReaderCursor:
@@ -2490,13 +2808,20 @@ class _LivePublishOrderMixin(_LivePublishMixin):
         digest = manifest_module.write_manifest(manifest, run_directory)
         return run_directory, artifact_sha256, digest
 
-    def _provision_order_fixture(self, *, tag: str, run_dir_name: str):
+    def _provision_order_fixture(
+        self, *, tag: str, run_dir_name: str, staged: bool = True
+    ):
         """Provision one throwaway but complete order -- schemas, a genuine
         non-superuser loader + reader login, a staged fixture table, the
         D-70/D-78 audit grants, and the PASS row -- and return everything a
         caller needs to drive ``publish_order.main`` and inspect the result.
         Registers its own cleanup; the superuser connection's close is
         registered here too, so callers never need their own ``addCleanup``.
+
+        ``staged=False`` skips creating the staging table (and its owner
+        transfer) while keeping everything else, including the PASS row --
+        the fixture-scale shape of D-88's unmarked ``vicmap.vmadd_address``:
+        a live published table this run never staged and has no marker for.
         """
 
         connection = self._open_superuser()
@@ -2571,19 +2896,20 @@ class _LivePublishOrderMixin(_LivePublishMixin):
                     sql.Identifier(pub_schema), sql.Identifier(reader_role)
                 )
             )
-            self._create_point_table(
-                cursor,
-                stg_schema,
-                staging_table,
-                gist_index=f"livetest_{tag}_gix_{pid}",
-                points=self._VICTORIA_POINTS,
-            )
-            cursor.execute(
-                sql.SQL("ALTER TABLE {} OWNER TO {}").format(
-                    sql.Identifier(stg_schema, staging_table),
-                    sql.Identifier(loader_role),
+            if staged:
+                self._create_point_table(
+                    cursor,
+                    stg_schema,
+                    staging_table,
+                    gist_index=f"livetest_{tag}_gix_{pid}",
+                    points=self._VICTORIA_POINTS,
                 )
-            )
+                cursor.execute(
+                    sql.SQL("ALTER TABLE {} OWNER TO {}").format(
+                        sql.Identifier(stg_schema, staging_table),
+                        sql.Identifier(loader_role),
+                    )
+                )
             # D-70/D-78: the loader reads (and in production appends to) both
             # audit tables; this test only needs the gate's, classifier's,
             # and summary's reads plus the marker write a promotion makes.
@@ -2968,6 +3294,89 @@ class LivePublishOrderResumeTest(_LivePublishOrderMixin, unittest.TestCase):
             self.assertNotIn(fixture.loader_password, text)
             self.assertNotIn(fixture.reader_password, text)
             self.assertNotIn(str(fixture.config_path.parent), text)
+
+    _UNMARKED_RUN_DIR_NAME = "20260929T000007Z"
+
+    def test_unmarked_live_table_fails_closed_as_ambiguous(self):
+        """The fixture-scale shape of D-88: a live published table this run
+        never staged (``staged=False``) and holds no publication marker for
+        makes ``publish_order.main`` exit 1 with ``pub_generation_ambiguous``,
+        leaving the table's ``(oid, xmin)`` unchanged and writing neither a
+        publication row nor ``summary.json``. The real ``vicmap.vmadd_address``
+        is probed read-only in Plan 05.1-05."""
+
+        self._require_live()
+        fixture = self._provision_order_fixture(
+            tag="um", run_dir_name=self._UNMARKED_RUN_DIR_NAME, staged=False
+        )
+
+        with fixture.connection.cursor() as cursor:
+            self._create_point_table(
+                cursor,
+                fixture.pub_schema,
+                fixture.target,
+                gist_index=f"livetest_um_gix_{os.getpid()}",
+                points=self._VICTORIA_POINTS,
+            )
+        live_oid = self._scalar(
+            fixture.connection,
+            "SELECT to_regclass(%s)::oid",
+            (f"{fixture.pub_schema}.{fixture.target}",),
+        )
+        live_xmin = self._scalar(
+            fixture.connection,
+            "SELECT xmin::text FROM pg_class WHERE oid = to_regclass(%s)",
+            (f"{fixture.pub_schema}.{fixture.target}",),
+        )
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.dict(
+            os.environ,
+            {
+                staging.PASSWORD_ENV_VAR: fixture.loader_password,
+                publish.READER_PASSWORD_ENV_VAR: fixture.reader_password,
+            },
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exit_code = publish_order.main(["--config", str(fixture.config_path)])
+        output = stdout.getvalue() + stderr.getvalue()
+        self.assertEqual(1, exit_code, output)
+
+        failure_lines = [line for line in stderr.getvalue().splitlines() if line]
+        self.assertEqual(1, len(failure_lines))
+        failure = json.loads(failure_lines[0])
+        self.assertEqual("db_publish", failure["stage"])
+        self.assertEqual("pub_generation_ambiguous", failure["reason"])
+
+        self.assertEqual(
+            live_oid,
+            self._scalar(
+                fixture.connection,
+                "SELECT to_regclass(%s)::oid",
+                (f"{fixture.pub_schema}.{fixture.target}",),
+            ),
+        )
+        self.assertEqual(
+            live_xmin,
+            self._scalar(
+                fixture.connection,
+                "SELECT xmin::text FROM pg_class WHERE oid = to_regclass(%s)",
+                (f"{fixture.pub_schema}.{fixture.target}",),
+            ),
+        )
+        self.assertEqual(
+            0,
+            self._scalar(
+                fixture.connection,
+                "SELECT count(*) FROM vicmap_audit.publication "
+                "WHERE run_ts = %s AND manifest_digest = %s",
+                (self._UNMARKED_RUN_DIR_NAME, fixture.digest),
+            ),
+        )
+        self.assertFalse((fixture.run_directory / "summary.json").exists())
+
+        self.assertNotIn(fixture.loader_password, output)
+        self.assertNotIn(fixture.reader_password, output)
+        self.assertNotIn(str(fixture.config_path.parent), output)
 
 
 if __name__ == "__main__":
