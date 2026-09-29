@@ -27,7 +27,7 @@ import shutil
 import tempfile
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1734,6 +1734,65 @@ class SummaryAssemblyTest(unittest.TestCase):
                 promotion="bogus",
             )
 
+    def test_naive_published_at_is_rejected_at_construction(self):
+        # D-84: published_at must be timezone-aware, exactly like
+        # evidence._require_utc_timestamp's own check -- validated here too
+        # so a real PromotionResult can never be built with a naive
+        # timestamp (the assemble_summary naive-rejection test below uses a
+        # duck-typed stand-in for exactly this reason).
+        with self.assertRaises(ValueError):
+            publish.PromotionResult(
+                server_version="PostgreSQL 18.6 (fake build)",
+                published_tables=("vmadd_address",),
+                published_at=datetime(2026, 9, 24, 7, 9, 27, 495000),
+                promotion=publish.PROMOTION_PERFORMED,
+            )
+
+    def test_published_at_renders_as_utc_iso8601_with_fixed_microseconds(self):
+        # D-84: a +10:00 local timestamp converts to its UTC rendering with a
+        # fixed six-digit microsecond field.
+        tz_plus10 = timezone(timedelta(hours=10))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            summary = self._assemble(
+                tmp_dir,
+                publication_result=self._publication_result(
+                    published_at=datetime(2026, 9, 24, 17, 9, 27, 495000, tzinfo=tz_plus10)
+                ),
+            )
+        self.assertEqual("2026-09-24T07:09:27.495000+00:00", summary["published_at"])
+        self.assertEqual("performed", summary["promotion"])
+
+    def test_naive_published_at_stand_in_is_rejected(self):
+        # A real PromotionResult already rejects a naive published_at at
+        # construction (see above), so assemble_summary's own guard is
+        # exercised through a duck-typed stand-in carrying the same fields.
+        stand_in = types.SimpleNamespace(
+            server_version="PostgreSQL 18.6 (fake build)",
+            published_tables=("vmadd_address",),
+            published_at=datetime(2026, 9, 24, 7, 9, 27, 495000),
+            promotion=publish.PROMOTION_PERFORMED,
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(ValueError):
+                self._assemble(tmp_dir, publication_result=stand_in)
+
+    def test_resumed_server_version_round_trips_through_promotion_result_from_records(self):
+        # D-82: a resumed PromotionResult's server_version, rebuilt purely
+        # from the durable marker row, flows unchanged into the summary.
+        record = publish.PublicationRecord(
+            target_table="vmadd_address",
+            table_oid=999,
+            server_version="PostgreSQL 17.5 (orig)",
+            published_at=_FIXED_PUBLISHED_AT,
+        )
+        result = publish.promotion_result_from_records(
+            (record,), ("vmadd_address",)
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            summary = self._assemble(tmp_dir, publication_result=result)
+        self.assertEqual("PostgreSQL 17.5 (orig)", summary["server_version"])
+        self.assertEqual("resumed", summary["promotion"])
+
 
 class WriteSummaryTest(unittest.TestCase):
     """No database. ``write_summary`` writes canonical, sorted-key UTF-8 JSON
@@ -2991,6 +3050,7 @@ class LivePublishOrderFullRunTest(_LivePublishOrderMixin, unittest.TestCase):
         self.assertEqual(1, summary["layer_count"])
         self.assertEqual([fixture.target], summary["published_tables"])
         self.assertEqual("performed", summary["promotion"])
+        self.assertTrue(summary["published_at"].endswith("+00:00"), summary["published_at"])
         self.assertEqual(
             [
                 {
@@ -3119,6 +3179,12 @@ class LivePublishOrderResumeTest(_LivePublishOrderMixin, unittest.TestCase):
             "WHERE run_ts = %s AND manifest_digest = %s",
             (self._RUN_DIR_NAME, fixture.digest),
         )
+        marker_published_at = self._scalar(
+            fixture.connection,
+            "SELECT published_at FROM vicmap_audit.publication "
+            "WHERE run_ts = %s AND manifest_digest = %s",
+            (self._RUN_DIR_NAME, fixture.digest),
+        )
 
         # Run 2: both passwords set. _promote_in_transaction is patched to
         # explode if reached -- proving resume never re-enters promotion.
@@ -3139,11 +3205,21 @@ class LivePublishOrderResumeTest(_LivePublishOrderMixin, unittest.TestCase):
         output_2 = stdout2.getvalue() + stderr2.getvalue()
         self.assertEqual(0, exit_code_2, output_2)
 
+        events_2 = [json.loads(line) for line in stdout2.getvalue().splitlines() if line]
+        self.assertEqual(
+            ["publication_resumed", "publication_summary"],
+            [e.get("event") for e in events_2],
+        )
+
         summary_text = summary_path.read_text(encoding="utf-8")
         summary = json.loads(summary_text)
         self.assertEqual("resumed", summary["promotion"])
         self.assertEqual(marker_server_version, summary["server_version"])
         self.assertEqual([fixture.target], summary["published_tables"])
+        self.assertEqual(
+            publish.evidence._require_utc_timestamp(marker_published_at),
+            summary["published_at"],
+        )
 
         self.assertEqual(
             published_oid,
@@ -3171,7 +3247,65 @@ class LivePublishOrderResumeTest(_LivePublishOrderMixin, unittest.TestCase):
             ),
         )
 
-        for text in (summary_text, output_1, output_2):
+        # Run 3: after run 2's successful resume, a third plain re-run is
+        # again an ordinary resume (D-85) -- the same two events in order,
+        # the same patched raiser proving no promotion connection ever
+        # opens, one publication row, and the published table's (oid, xmin)
+        # still unchanged.
+        stdout3, stderr3 = io.StringIO(), io.StringIO()
+        with patch.dict(
+            os.environ,
+            {
+                staging.PASSWORD_ENV_VAR: fixture.loader_password,
+                publish.READER_PASSWORD_ENV_VAR: fixture.reader_password,
+            },
+        ), patch.object(
+            publish,
+            "_promote_in_transaction",
+            side_effect=AssertionError("resume must not re-enter promotion"),
+        ), contextlib.redirect_stdout(stdout3), contextlib.redirect_stderr(stderr3):
+            exit_code_3 = publish_order.main(["--config", str(fixture.config_path)])
+
+        output_3 = stdout3.getvalue() + stderr3.getvalue()
+        self.assertEqual(0, exit_code_3, output_3)
+
+        events_3 = [json.loads(line) for line in stdout3.getvalue().splitlines() if line]
+        self.assertEqual(
+            ["publication_resumed", "publication_summary"],
+            [e.get("event") for e in events_3],
+        )
+
+        summary_text_3 = summary_path.read_text(encoding="utf-8")
+        summary_3 = json.loads(summary_text_3)
+        self.assertEqual("resumed", summary_3["promotion"])
+
+        self.assertEqual(
+            published_oid,
+            self._scalar(
+                fixture.connection,
+                "SELECT to_regclass(%s)::oid",
+                (f"{fixture.pub_schema}.{fixture.target}",),
+            ),
+        )
+        self.assertEqual(
+            published_xmin,
+            self._scalar(
+                fixture.connection,
+                "SELECT xmin::text FROM pg_class WHERE oid = to_regclass(%s)",
+                (f"{fixture.pub_schema}.{fixture.target}",),
+            ),
+        )
+        self.assertEqual(
+            1,
+            self._scalar(
+                fixture.connection,
+                "SELECT count(*) FROM vicmap_audit.publication "
+                "WHERE run_ts = %s AND manifest_digest = %s",
+                (self._RUN_DIR_NAME, fixture.digest),
+            ),
+        )
+
+        for text in (summary_text, summary_text_3, output_1, output_2, output_3):
             self.assertNotIn(fixture.loader_password, text)
             self.assertNotIn(fixture.reader_password, text)
             self.assertNotIn(str(fixture.config_path.parent), text)

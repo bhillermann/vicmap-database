@@ -272,15 +272,33 @@ class SuccessPathTest(unittest.TestCase):
 
 
 class ResumeBranchTest(unittest.TestCase):
-    """No database. A resumed promotion result (D-83) is otherwise
-    indistinguishable from a fresh promotion to this CLI's own exception
-    ladder -- it completes the full pipeline and exits 0 with exactly one
-    ``publication_summary`` event."""
+    """No database. A resumed promotion result (D-83) renders the new D-84
+    ``publication_resumed`` event on the JSON Lines stream before the
+    ``publication_summary`` mirror, and otherwise completes the same full
+    pipeline as a fresh promotion; a performed result renders only the
+    summary event, exactly as before."""
 
-    def test_resumed_promotion_exits_zero_with_one_summary_event(self):
+    def test_resumed_promotion_exits_zero_with_two_events_in_order(self):
         with _patched_pipeline(
             promote_or_resume=lambda *a, **k: _promotion_result(
                 promotion=publish.PROMOTION_RESUMED
+            )
+        ):
+            exit_code, stdout, stderr = _run_main_capturing_output()
+        self.assertEqual(0, exit_code)
+        self.assertEqual("", stderr)
+        events = [json.loads(line) for line in stdout.splitlines() if line]
+        self.assertEqual(
+            ["publication_resumed", "publication_summary"],
+            [e.get("event") for e in events],
+        )
+        self.assertEqual(["vmadd_address"], events[0]["published_tables"])
+        _forbidden_text_absent(self, stdout, stderr)
+
+    def test_performed_promotion_exits_zero_with_only_the_summary_event(self):
+        with _patched_pipeline(
+            promote_or_resume=lambda *a, **k: _promotion_result(
+                promotion=publish.PROMOTION_PERFORMED
             )
         ):
             exit_code, stdout, stderr = _run_main_capturing_output()
