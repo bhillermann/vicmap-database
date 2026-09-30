@@ -2,36 +2,35 @@
 gsd_state_version: "1.0"
 milestone: v0.1
 current_phase: "05.1"
-current_phase_name: "Address tech debt: publish resume path (#16) (INSERTED)"
 status: completed
 stopped_at: Phase 05.1 complete — all phases complete
-last_updated: "2026-09-29T09:02:08.191Z"
-last_activity: 2026-09-29
-last_activity_desc: Phase 05.1 complete
-state_head: 9dd9aa890a0ddc5633290c959bceed255764c458
+last_updated: "2026-09-30T00:07:11.388Z"
+last_activity: 2026-09-30
+last_activity_desc: Milestone v0.1 completed and archived
+state_head: 84cb8586ccc78b7c868ed438744b3bf52dd1afc1
 progress:
   total_phases: 6
   completed_phases: 6
   total_plans: 40
   completed_plans: 40
-  percent: 100
 milestone_name: End-to-End Vicmap Import Proof
+current_phase_name: "Address tech debt: publish resume path (#16) (INSERTED)"
 ---
 
 # Session State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-25)
+See: .planning/PROJECT.md (updated 2026-09-30)
 
-**Core value:** End-to-end Vicmap import proof
-**Current focus:** Phase 05.1 — Address tech debt: publish resume path (#16) (INSERTED)
+**Core value:** Vicmap updates must reach the correct PostGIS layers automatically without exposing users to partial, invalid, or duplicate data loads.
+**Current focus:** Planning next milestone (`/gsd-new-milestone`)
 
 ## Position
 
 **Milestone:** v0.1 End-to-End Vicmap Import Proof
 **Current phase:** 05.1
-**Status:** All phases complete
+**Status:** v0.1 milestone complete
 
 ## Session Log
 
@@ -41,12 +40,14 @@ See: .planning/PROJECT.md (updated 2026-09-25)
 - 2026-09-28: Phase 5 closed by manual cleanup. validate-phase run for phases 02-04 (all nyquist_compliant); 703f85c replaced the Phase 4 Live* skip stubs with real live tests (621 OK, 0 skipped). Milestone audit v0.1 → tech_debt (27/27 requirements). WINDOWS.md tidied: #1, #8-#15 marked fixed; open = #2, #4, #7, #16.
 - 2026-09-29: Phase 05.1 (WINDOWS #16 publish resume path) executed, verified and closed: UAT 4/4 (PROHIB-11/12/13 + concurrent-run backstop accepted until OPS-05), 704 tests live OK / 0 skipped, Nyquist-compliant, SECURITY threats_open 0. Milestone v0.1 phases all complete.
 
+- 2026-09-30: Phases 01-04 re-verified (stale digests after 04/05.1 edits; all passed, no regressions). v0.1 archived to .planning/milestones/ (override_closeout: 1 acknowledged audit item).
+
 ## Current Position
 
-Phase: 05.1 (Address tech debt: publish resume path (#16) (INSERTED)) — COMPLETE
-Plan: 5 of 5 complete
-Status: All phases complete — milestone v0.1 ready to close
-Last activity: 2026-09-29 — Phase 05.1 complete
+Phase: Milestone v0.1 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-09-30 — Milestone v0.1 completed and archived
 
 ## Session
 
@@ -200,3 +201,15 @@ Next: /gsd-complete-milestone v0.1 (WINDOWS #16 fixed in Phase 05.1; open tech d
 
 - Phase 05.1 inserted after Phase 5: Address tech debt: publish resume path (#16) (URGENT)
 - Phase 05.1 edited: edited fields: goal, requirements, success_criteria
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
+
+## Deferred Items
+
+Items acknowledged and deferred at milestone close, most recent first:
+
+| Category | Item | Status | Deferred At | Milestone |
+|----------|------|--------|-------------|-----------|
+| uat_gaps | 03/03-UAT.md | passed (scanner false positive, 0 pending) | 2026-09-30 | v0.1 |
