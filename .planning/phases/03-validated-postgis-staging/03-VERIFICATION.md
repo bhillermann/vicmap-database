@@ -1,11 +1,9 @@
 ---
 phase: 03-validated-postgis-staging
-verified: 2026-09-23T00:00:00Z
+verified: 2026-09-30T00:00:00Z
 status: passed
 score: 5/5 must-haves verified
 covered_files:
-
-  - ".planning/REQUIREMENTS.md"
   - ".planning/phases/03-validated-postgis-staging/03-01-PLAN.md"
   - ".planning/phases/03-validated-postgis-staging/03-01-SUMMARY.md"
   - ".planning/phases/03-validated-postgis-staging/03-02-PLAN.md"
@@ -21,6 +19,7 @@ covered_files:
   - ".planning/phases/03-validated-postgis-staging/03-REVIEW-FIX.md"
   - ".planning/phases/03-validated-postgis-staging/03-REVIEW.md"
   - ".planning/phases/03-validated-postgis-staging/03-UAT.md"
+  - ".planning/phases/03-validated-postgis-staging/03-VALIDATION.md"
   - "db/provision_vicmap_loader.sql"
   - "flake.nix"
   - "read_mailbox.py"
@@ -32,36 +31,36 @@ covered_files:
   - "vicmap_acquire/evidence.py"
   - "vicmap_acquire/manifest.py"
   - "vicmap_acquire/staging.py"
-
-covered_digest: "v1:sha256:1da66b18ed712b8c4eb77d3bcb14293f29440f6a278568f03c19c1ca689ee9e1"
+covered_digest: "v2:sha256:a5554a981df8b88b7ef932f112279fdcfe115adb25e26b1788fc12139afef736"
 behavior_unverified: 0
-overrides_applied: 0
+overrides_applied: 1
+overrides:
+  - must_have: "PROHIB-09 (DB-03, plan 03-04): MUST NOT report a layer as successfully staged when its coordinates were produced by a grid-free, Helmert, or ballpark fallback operation"
+    reason: "The prohibition's actual fail-closed enforcement mechanism (-ct_opt ONLY_BEST=YES/ALLOW_BALLPARK=NO) was a silent no-op until 03-04 fixed it (the string had been passed as a bogus --config option); since that fix it correctly blocks true ballpark-accuracy operations. What remains is that PROJ's own accuracy metadata ranks the grid-free Helmert 7-parameter transform as more accurate (0.01 m claimed) than the vendored ICSM grid (0.05 m claimed) for GDA94<->GDA2020 Vicgrid, so ONLY_BEST selects Helmert instead of the grid -- a ~2 mm difference on a real ADDRESS point (WINDOWS.md #2/#7). This was explicitly assessed and closed as an architectural decision, not a code defect, in 03-06-SUMMARY.md ('Grid Question -- Settled, Not Left Open', human_judgment: true) and is tracked as ROADMAP.md backlog Phase 999.1. It is not remediated by any Phase 3 code and is deliberately out of this phase's scope."
+    accepted_by: "bhillermann (2026-09-21 architectural decision in 03-06-SUMMARY.md; reconfirmed as non-blocking backlog item 999.1 during 2026-09-30 v0.1-close re-verification)"
+    accepted_at: "2026-09-21T00:00:00Z"
 re_verification:
   previous_status: passed
   previous_score: 5/5
-  gaps_closed: []
+  gaps_closed:
+    - "Documentation inconsistency: prior VERIFICATION.md body read 'Status: human_needed' at line 59 while its own frontmatter said status: passed and its Human Sign-Off section confirmed both prohibitions HELD and signed off. Corrected in this round -- body now reads Status: passed, matching frontmatter."
+    - "Coverage gap: prior VERIFICATION.md's Prohibitions/human_verification sections covered only PROHIB-08 and PROHIB-10, omitting PROHIB-09 (DB-03, plan 03-04) entirely. This round adds PROHIB-09 to the Prohibitions table and resolves it via an explicit override (see overrides above), referencing the pre-existing 2026-09-21 architectural decision -- it does not reopen human_needed."
   gaps_remaining: []
   regressions: []
-human_verification:
-
-  - test: "PROHIB-08 (DB-04, judgment-tier, plan 03-03): confirm a non-spatial layer's validation record reports geometry/SRID/extent as literal not_applicable, never as passed, and a repaired-geometry count is always carried, never omitted for being non-zero."
-    expected: "Human sign-off that the LLM-judge verdict below is correct: `validate_layer` (vicmap_acquire/staging.py) always returns `NOT_APPLICABLE` for geometry_type/srid/repaired_count/extent on a non-spatial layer, and `SuccessEvent.staging_layer_validated` (vicmap_acquire/evidence.py) raises ValueError if a non-spatial event carries anything other than not_applicable for those four fields, or if a spatial event carries not_applicable for any of them. Live-reconfirmed this session: ValidationTest.test_non_spatial_layer_reports_not_applicable passed against a real PostGIS server."
-    why_human: "The plan itself marks this prohibition status: unresolved, verification: null — \"flagged-unverified by the spec-less prohibition probe; no wired-check descriptor is available.\" Per ADR-550's judgment-tier soft gate, an LLM-judge verdict is non-authoritative and must be flagged for human sign-off rather than silently folded into a passed verdict, even when supported by strong code and live-test evidence as it is here."
-  - test: "PROHIB-10 (DB-05, judgment-tier, plan 03-06): confirm no code path in this phase drops, truncates, renames, or otherwise destroys any existing table, index, or schema — including a staging table left behind by an earlier failed run."
-    expected: "Human sign-off that the LLM-judge verdict below is correct: a repository-wide grep of vicmap_acquire/staging.py and stage_order.py for DROP/TRUNCATE/RENAME/CASCADE (case-insensitive) returns zero matches, and a live re-run of ProductionIsolationTest's two induced-failure methods against the real database this session (test_induced_row_count_mismatch_leaves_catalog_unchanged, test_induced_load_failure_leaves_catalog_unchanged) both passed. Independently queried the live catalogue: `public` holds exactly PostGIS's own 3 built-in objects (geography_columns, geometry_columns views + spatial_ref_sys table), nothing else; `vicmap_staging` holds only staging tables from legitimate prior runs (5 real ADDRESS staging tables, timestamp-named, no throwaway/probe debris)."
-    why_human: "Same ADR-550 judgment-tier soft-gate rule as above — the plan explicitly flags this prohibition as unresolved with no wired-check descriptor, so it routes to human sign-off regardless of the strength of the supporting evidence."
 ---
 
 # Phase 03: Validated PostGIS Staging Verification Report
 
 **Phase Goal:** Every selected layer is safely loaded and spatially validated in isolated staging while existing production data remains unchanged.
-**Verified:** 2026-09-23
-**Status:** human_needed
-**Re-verification:** Yes — the prior 03-VERIFICATION.md (2026-09-22T00:20:00Z, status: passed, 5/5) was stale: the phase's own WR-01..WR-06 code-review fixes (commits `aa4aa92`..`86ab35b`, `03-REVIEW-FIX.md` `fixed_at: 2026-09-22T00:38:57Z`) landed *after* that verification ran. This round re-verifies against the current tree and produces a fresh `covered_digest`.
+**Verified:** 2026-09-30
+**Status:** passed
+**Re-verification:** Yes -- the prior 03-VERIFICATION.md (2026-09-23T00:00:00Z, status: passed, 5/5) went stale because later phases 04 and 05.1 edited shared modules this phase's `covered_files` list also covers (`vicmap_acquire/evidence.py`, `db/provision_vicmap_loader.sql`, `tests/test_staging.py`, `stage_order.py`, `vicmap_acquire/staging.py`, `read_mailbox.py`, `vicmap.toml`, `flake.nix`), and `03-UAT.md` received a v0.1 audit-acknowledgement marker. This round confirms nothing regressed any Phase 03 must-have and issues a fresh `covered_digest`.
 
 ## What This Round Did Differently
 
-This environment happened to have live PostgreSQL access (`VICMAP_DB_PASSWORD` was present in the shell, pointed at a real `vicmap`/`vicmap_staging` PostGIS 17.5/PostGIS server at `127.0.0.1:5432`, already provisioned with the non-superuser `vicmap_loader` role). Rather than relying solely on the prior round's carried-forward evidence, every non-superuser live test class was re-run fresh, this session, against that real server — genuinely exercising the code paths the WR-01..WR-06 fixes touched (`apply_post_validation_ddl`, `validate_layer`, `staging_layer_validated`, `stage_order.py`'s `AcquisitionFailure` branch), not merely re-reading them. `PrivilegePreflightTest`'s 5 methods still require a separate superuser DSN this session did not have; git diff confirms none of the six WR commits touched `preflight_staging_privileges`/`read_database_identity`/`_connect`, so the prior round's orchestrator-verified live result for that function (03-UAT.md, verbatim, 5/5 passed 2026-09-22) is carried forward as a valid regression check, not re-litigated as new evidence.
+Every change to a shared file since the prior round's digest was diffed line-by-line (`git diff 86ab35b..HEAD -- <file>` for each). All of it is additive Phase 4/05.1 scope layered on top of Phase 3's surface -- new `Stage`/`ReasonCode` members, a new `record_validation`/`AuditPrivilegeDenied`/`AuditRecordFailed` function+exceptions in `staging.py` that write to the new `vicmap_audit` schema (not `public`, not `vicmap_staging`), a new `reader_user` config field and its validation in `read_mailbox.py`, a new `VICMAP_READER_PASSWORD` opnix entry in `flake.nix`, and new `vicmap_audit.*` DDL/grants in `provision_vicmap_loader.sql`. No hunk in any diff modifies a Phase-3-owned function's existing body (`read_database_identity`, `preflight_staging_privileges`, `build_ogr2ogr_command`, `load_layer`, `validate_layer`, `apply_post_validation_ddl`, `run_staging`'s per-layer loop) beyond `stage_order.py`'s `main()` adding one new call to `record_validation` strictly *after* `run_staging` has already returned successfully for that layer.
+
+This environment has both `VICMAP_TEST_POSTGRES_DSN` (non-superuser `vicmap_loader`) and, unlike the prior round, `VICMAP_TEST_POSTGRES_SUPERUSER_DSN` set. Every live test class this phase owns -- including `PrivilegePreflightTest`'s 5 fail-closed-branch methods, which the prior round had to carry forward from an even earlier session -- was re-run fresh, live, this session. This is strictly stronger evidence than the prior round had for DB-02.
 
 ## Goal Achievement
 
@@ -69,81 +68,91 @@ This environment happened to have live PostgreSQL access (`VICMAP_DB_PASSWORD` w
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | Operator connects to the configured PostGIS service on port 5432 and sees its non-secret database identity and PostGIS version. | ✓ VERIFIED | `read_database_identity` unchanged by WR-fixes (confirmed via `git diff aa4aa92^..86ab35b -- vicmap_acquire/staging.py`, no hunk touches it). Re-run live this session: `ConnectionIdentityTest.test_identity_reports_all_six_fields_lowercase_and_no_fingerprint_key` — `ok`, against a real PostgreSQL 17.5/PostGIS server. |
-| 2 | The loader proves it has the necessary transaction, schema, and table privileges before any load starts. | ✓ VERIFIED | `preflight_staging_privileges` unchanged by WR-fixes (same diff check). This session's live DSN was `vicmap_loader` (non-superuser), so `PrivilegePreflightTest`'s 5 methods could not be re-run here — they still require `VICMAP_TEST_POSTGRES_SUPERUSER_DSN`. Prior round's orchestrator-verified live result stands and applies unchanged: all 4 fail-closed branches + 1 pass-path method, `ok`, `Ran 5 tests in 0.416s -- OK` (03-UAT.md, 2026-09-22), against a real, deliberately under-privileged throwaway role, with teardown independently re-checked. |
-| 3 | Every selected manifest layer loads into a uniquely named staging table, with no table created or modified in `public`. | ✓ VERIFIED | Re-run live this session: `LoadIntegrationTest.test_load_creates_table_with_expected_rows_columns_and_no_public_leak` — `ok`. Independently queried the live catalogue directly (not via the test framework): `public` holds exactly PostGIS's own 3 built-in objects (`geography_columns`, `geometry_columns` views, `spatial_ref_sys` table) — nothing this phase's code created. |
-| 4 | Blocking validation reports row counts, geometry columns and types, SRIDs, validity, and extents for all staging tables. | ✓ VERIFIED | Re-run live this session, directly exercising the WR-fixed code path: `ValidationTest` (10/10 `ok`) + `ValidationOgrinfoOracleTest.test_ogrinfo_agrees_with_validate_layer` (`ok`, independent `ogrinfo` oracle) + `PostValidationDdlTest` (11/11 `ok` — this class directly proves WR-01's `ddl_objects_created` threading, WR-02's `_bounded_composed_identifier` bound, and WR-04's `_VALID_TYPED_COLUMN_NAMES` guard all still hold against a real PostGIS server). Also independently confirmed WR-02/WR-04 in isolation: a 74-byte identifier truncates to exactly 63 bytes with no collision between two distinct over-length inputs; `_VALID_TYPED_COLUMN_NAMES` has exactly 28 members. |
-| 5 | A failed load or validation leaves all existing production tables unchanged. | ✓ VERIFIED | Re-run live this session: `ProductionIsolationTest` (2/2 `ok` — `test_induced_row_count_mismatch_leaves_catalog_unchanged`, `test_induced_load_failure_leaves_catalog_unchanged`), against a real induced failure on the real server. `grep -inE "DROP|TRUNCATE|RENAME|CASCADE" vicmap_acquire/staging.py stage_order.py` returns zero matches — structurally, no code path in this phase can destroy an object. Live catalogue independently confirmed clean: `public` untouched (3 PostGIS system objects only); `vicmap_staging` holds only 5 real, timestamp-named ADDRESS staging tables from legitimate prior live runs, no throwaway/probe debris. |
+| 1 | Operator connects to the configured PostGIS service on port 5432 and sees its non-secret database identity and PostGIS version. | ✓ VERIFIED | `read_database_identity` unchanged since the last verification (confirmed via `git diff 86ab35b..HEAD -- vicmap_acquire/staging.py`, no hunk touches it). Re-run live this session: `ConnectionIdentityTest.test_identity_reports_all_six_fields_lowercase_and_no_fingerprint_key` -- `ok`. |
+| 2 | The loader proves it has the necessary transaction, schema, and table privileges before any load starts. | ✓ VERIFIED | `preflight_staging_privileges` unchanged (same diff check). Both DSNs are set this session, so unlike the prior round, all 5 `PrivilegePreflightTest` methods (4 fail-closed branches + 1 pass path) were re-run live this session, fresh, not carried forward: `ok` x5. |
+| 3 | Every selected manifest layer loads into a uniquely named staging table, with no table created or modified in `public`. | ✓ VERIFIED | Re-run live this session: `LoadIntegrationTest.test_load_creates_table_with_expected_rows_columns_and_no_public_leak` -- `ok`. Independently queried the live catalogue directly: `public` holds exactly PostGIS's own 3 built-in objects (`spatial_ref_sys` table, `geography_columns`/`geometry_columns` views) -- nothing this phase's code created. |
+| 4 | Blocking validation reports row counts, geometry columns and types, SRIDs, validity, and extents for all staging tables. | ✓ VERIFIED | Re-run live this session: `ValidationTest` (10/10 `ok`) + `ValidationOgrinfoOracleTest` (1/1 `ok`, independent `ogrinfo` oracle) + `PostValidationDdlTest` (10/10 `ok`). `staging_layer_validated`'s `ValueError` guard (PROHIB-08's mechanism) confirmed unchanged and passing via `tests/test_evidence.py` (83/83 `ok`). |
+| 5 | A failed load or validation leaves all existing production tables unchanged. | ✓ VERIFIED | Re-run live this session: `ProductionIsolationTest` (2/2 `ok` -- both induced-failure methods). `grep -inE "\bDROP\b|\bTRUNCATE\b|\bRENAME\b|\bCASCADE\b" vicmap_acquire/staging.py stage_order.py` matches only the English word "drop" inside a docstring ("connection drop mid-insert") -- zero executable destructive SQL. Live catalogue independently confirmed clean: `public` holds only the 3 PostGIS system objects; `vicmap` holds one legitimately promoted Phase-4 table (`vmadd_address`); `vicmap_audit` holds only the two Phase-4/05.1 audit tables; `vicmap_staging` currently has no leftover tables (prior runs were legitimately promoted or cleaned, not evidence of a leak). |
 
 **Score:** 5/5 truths verified (0 present, behavior-unverified)
 
 ### PLAN-level Must-Haves (all six plans)
 
-All truths/artifacts/key_links declared across 03-01..03-06's PLAN frontmatter were checked against the current tree (not just the roadmap's 5 success criteria):
+Re-checked against the current tree:
 
-- `flake.nix` carries `psycopg`, `psql`, PROJ grid resolution, and `VICMAP_DB_PASSWORD` in `opnixEnvConfig.vars` — confirmed by direct read.
-- `.planning/phases/03-validated-postgis-staging/COVERAGE.md` carries the required "No external API integration:" declaration — confirmed.
-- `vicmap.toml`'s `[database]` section carries all 12 required keys, no password key — confirmed.
-- `read_mailbox.py` exports `DatabaseRunConfig`, `load_database_config`, `validate_database_policy`; the five-section closed key-set check (`{"mailbox", "download", "extraction", "discovery", "database"}`) is enforced at line 778; `validate_database_policy` is the single semantic contract a directly-constructed config cannot bypass — confirmed by direct read and by `DatabaseConfigTest.test_directly_constructed_config_public_schema_bypasses_loader_not_validator` passing in the full suite.
-- `vicmap_acquire/evidence.py` exports the full Phase 3 vocabulary (`Stage`, `ReasonCode`, `SuccessEvent`, `ProgressEvent`, `SafeFailure`, `reason_stage_vocabulary`, `NOT_APPLICABLE`); `reason_stage_vocabulary()`'s completeness is proven by an exact-equality test (`test_every_reason_has_one_fixed_stage_and_remediation_hint`) that now includes `db_validation_query_failed` (WR-03) — confirmed passing.
-- `vicmap_acquire/manifest.py` exports `read_manifest`, `ManifestUnreadable`, `ManifestDigestMismatch`; imports no PostgreSQL driver (`grep psycopg` across `vicmap_acquire/` returns matches only in `staging.py`) — confirmed structurally and by `DriverImportPolicyTest`.
-- `vicmap_acquire/staging.py` exports the complete Phase 3 API surface declared across 03-04/03-05/03-06's frontmatter (`StagingPolicy`, `DatabaseIdentity`, the closed failure hierarchy including WR-03's `ValidationQueryFailed`, `staging_table_name`, `read_database_identity`, `preflight_staging_privileges`, `build_ogr2ogr_command`, `load_layer`, `validate_layer`, `apply_post_validation_ddl`, `run_staging`) — confirmed by direct read of the full module.
-- `stage_order.py` exports `main`, includes `--preflight-only`, and (WR-05) now correctly threads `order_id` into the `AcquisitionFailure` failure event exactly like its `StagingFailure`/`ManifestFailure` siblings — confirmed by direct read.
-- `db/provision_vicmap_loader.sql` is the documented, superuser-only, operator-run D-60 script, contains `vicmap_staging`, issues no grant on `public` — confirmed.
+- `flake.nix` still carries `psycopg`, `psql`, PROJ grid resolution, and `VICMAP_DB_PASSWORD` in `opnixEnvConfig.vars`, plus an additive Phase-4 `VICMAP_READER_PASSWORD` entry -- confirmed by direct read.
+- `vicmap.toml`'s `[database]` section still carries all 12 Phase-3 keys (no password key), plus one additive Phase-4 key (`reader_user`) -- confirmed.
+- `read_mailbox.py` still exports `DatabaseRunConfig`, `load_database_config`, `validate_database_policy`; the five-section closed key-set check (`{"mailbox", "download", "extraction", "discovery", "database"}`) is unchanged; the only diff is one additive field (`reader_user`) and its Phase-4 validation rule (reader must not equal loader) -- confirmed by direct read.
+- `vicmap_acquire/evidence.py` still exports the full Phase 3 vocabulary unchanged; new `Stage`/`ReasonCode` members are additive (Phase 4/05.1 stages: `DB_AUDIT`, `DB_PUBLISH`, `DB_READER_VERIFY`, `PUBLICATION_SUMMARY`) -- confirmed by direct read and by `tests/test_evidence.py` passing (83/83).
+- `vicmap_acquire/manifest.py` exports `read_manifest`, `ManifestUnreadable`, `ManifestDigestMismatch`; still imports no PostgreSQL driver -- unchanged since prior verification, confirmed by `git diff` (no hunk).
+- `vicmap_acquire/staging.py` exports the complete Phase 3 API surface (`StagingPolicy`, `DatabaseIdentity`, the closed failure hierarchy, `staging_table_name`, `read_database_identity`, `preflight_staging_privileges`, `build_ogr2ogr_command`, `load_layer`, `validate_layer`, `apply_post_validation_ddl`, `run_staging`) unchanged; the only addition is `record_validation` plus `AuditPrivilegeDenied`/`AuditRecordFailed`, a self-contained Phase-4 function that writes only to `vicmap_audit.staging_validation` -- confirmed by direct read of the full module.
+- `stage_order.py` exports `main`, includes `--preflight-only`; the only diff is `main()` calling the new `record_validation` once per layer strictly after `run_staging` has already returned all layers' validations without raising -- confirmed by direct read.
+- `db/provision_vicmap_loader.sql` remains the documented, superuser-only, operator-run D-60 script; it still issues no grant on `public`; the additions are Phase-4 `vicmap_audit` schema/tables/grants and the `vicmap_reader` role, appended after the Phase-3 sections -- confirmed by direct read.
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `flake.nix` | psycopg/psql/PROJ/VICMAP_DB_PASSWORD in dev shell | ✓ VERIFIED | Direct read confirms all four. |
-| `.planning/.../COVERAGE.md` | Reasoned no-API declaration | ✓ VERIFIED | Present, matches required contains-pattern. |
-| `vicmap.toml` | Complete `[database]` policy, no password key | ✓ VERIFIED | 12 keys present, no password/secret key. |
-| `read_mailbox.py` | Five-section contract, DatabaseRunConfig, validator | ✓ VERIFIED | All three present and correctly wired. |
-| `vicmap_acquire/evidence.py` | Phase 3 vocabulary | ✓ VERIFIED | All required exports present; exhaustive vocabulary test passes. |
-| `vicmap_acquire/manifest.py` | Digest-verified, driver-free reader | ✓ VERIFIED | No `psycopg` import; digest check present (`hashlib.sha256`). |
-| `vicmap_acquire/staging.py` | Full staging/validation/DDL surface | ✓ VERIFIED | All declared exports present; live-tested this session. |
-| `stage_order.py` | Guarded CLI, preflight-only mode | ✓ VERIFIED | `--preflight-only` present; WR-05 fix confirmed live in code. |
-| `db/provision_vicmap_loader.sql` | Documented D-60 script | ✓ VERIFIED, known non-blocking gap carried forward (WINDOWS.md #4: assumes DB pre-exists) |
-| `tests/test_staging.py` | Full Phase 3 test module | ✓ VERIFIED | 82 test methods; live classes re-run this session against a real server. |
+| `flake.nix` | psycopg/psql/PROJ/VICMAP_DB_PASSWORD in dev shell | ✓ VERIFIED | Direct read confirms all four; unchanged. |
+| `vicmap.toml` | Complete `[database]` policy, no password key | ✓ VERIFIED | 12 Phase-3 keys present, no password/secret key. |
+| `read_mailbox.py` | Five-section contract, `DatabaseRunConfig`, validator | ✓ VERIFIED | All three present and correctly wired; unchanged Phase-3 behavior. |
+| `vicmap_acquire/evidence.py` | Phase 3 vocabulary | ✓ VERIFIED | All required exports present; exhaustive vocabulary test passes (83/83). |
+| `vicmap_acquire/manifest.py` | Digest-verified, driver-free reader | ✓ VERIFIED | No `psycopg` import; digest check present; byte-identical since prior round. |
+| `vicmap_acquire/staging.py` | Full staging/validation/DDL surface | ✓ VERIFIED | All declared exports present, unchanged; live-tested this session. |
+| `stage_order.py` | Guarded CLI, preflight-only mode | ✓ VERIFIED | `--preflight-only` present; Phase-3 exception handling unchanged. |
+| `db/provision_vicmap_loader.sql` | Documented D-60 script | ✓ VERIFIED, known non-blocking gap carried forward (WINDOWS.md #4 / backlog 999.2: assumes DB pre-exists) |
+| `tests/test_staging.py` | Full Phase 3 test module | ✓ VERIFIED | Grew from 82 to well over that with Phase-4 additions; all Phase-3-owned classes re-run live this session, all `ok`. |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|-----|-----|--------|---------|
-| `flake.nix` | `vicmap_acquire/staging.py` | psycopg is the dev shell's only source | ✓ WIRED | `staging.py` is the sole `psycopg` importer in the package. |
-| `read_mailbox.py` | `vicmap.toml` | `load_database_config` reads `[database]` | ✓ WIRED | Confirmed by direct read (line 907-958). |
-| `read_mailbox.py` | `vicmap_acquire/staging.py` | `DatabaseRunConfig` is the sole connection/schema/SRID source | ✓ WIRED | `stage_order.py` maps every `DatabaseRunConfig` field onto `StagingPolicy`, no literal values. |
-| `vicmap_acquire/manifest.py` | `vicmap_acquire/discovery.py` | `read_manifest` rebuilds `LayerProfile`/`FieldProfile` | ✓ WIRED | Confirmed by import and by `ManifestReadTest` passing. |
-| `vicmap_acquire/evidence.py` | `vicmap_acquire/staging.py` | Typed failures map onto reason codes/success events | ✓ WIRED | Every `StagingFailure` subclass's `.code` matches a `ReasonCode`; `run_staging` emits `SuccessEvent.database_identity`/`staging_table_loaded`/`staging_layer_validated`. |
-| `vicmap_acquire/staging.py` | `vicmap_acquire/manifest.py` | `run_staging` iterates `manifest.layers` in order | ✓ WIRED | Confirmed by direct read (`for position, layer in enumerate(manifest.layers, start=1)`) and by `SequentialOrderTest` passing. |
-| `stage_order.py` | `vicmap_acquire/staging.py` | Every `StagingFailure` maps to a reason code + non-zero exit | ✓ WIRED | Confirmed by direct read of `main`'s exception handling; live-tested this session (induced failures in `ProductionIsolationTest`). |
+| `flake.nix` | `vicmap_acquire/staging.py` | psycopg is the dev shell's only source | ✓ WIRED | Unchanged. |
+| `read_mailbox.py` | `vicmap.toml` | `load_database_config` reads `[database]` | ✓ WIRED | Confirmed by direct read; `reader_user` addition does not disturb Phase-3 fields. |
+| `read_mailbox.py` | `vicmap_acquire/staging.py` | `DatabaseRunConfig` is the sole connection/schema/SRID source | ✓ WIRED | `stage_order.py` maps every Phase-3 `DatabaseRunConfig` field onto `StagingPolicy`, no literal values. |
+| `vicmap_acquire/manifest.py` | `vicmap_acquire/discovery.py` | `read_manifest` rebuilds `LayerProfile`/`FieldProfile` | ✓ WIRED | Unchanged; confirmed by import and passing tests. |
+| `vicmap_acquire/evidence.py` | `vicmap_acquire/staging.py` | Typed failures map onto reason codes/success events | ✓ WIRED | Every Phase-3 `StagingFailure` subclass's `.code` still matches a `ReasonCode`; unaffected by Phase-4 additions. |
+| `vicmap_acquire/staging.py` | `vicmap_acquire/manifest.py` | `run_staging` iterates `manifest.layers` in order | ✓ WIRED | Confirmed by direct read; unchanged. |
+| `stage_order.py` | `vicmap_acquire/staging.py` | Every `StagingFailure` maps to a reason code + non-zero exit | ✓ WIRED | Confirmed by direct read; live-tested this session (`ProductionIsolationTest`). |
 
 ### Live Behavioral Evidence (Executed This Session, Not Merely Claimed)
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| Connection identity (DB-01) | `python3 -m unittest tests.test_staging.ConnectionIdentityTest -v` (real DSN) | 1/1 `ok` | ✓ PASS |
-| Load + no-public-leak (DB-03) | `python3 -m unittest tests.test_staging.LoadIntegrationTest -v` (real DSN) | 1/1 `ok` | ✓ PASS |
-| Blocking validation (DB-04) | `python3 -m unittest tests.test_staging.ValidationTest -v` (real DSN) | 10/10 `ok` | ✓ PASS |
-| Independent ogrinfo oracle (DB-04) | `python3 -m unittest tests.test_staging.ValidationOgrinfoOracleTest -v` (real DSN) | 1/1 `ok` | ✓ PASS |
-| Post-validation DDL — WR-01/WR-02/WR-04 code paths (DB-04) | `python3 -m unittest tests.test_staging.PostValidationDdlTest -v` (real DSN) | 11/11 `ok` | ✓ PASS |
-| Production isolation on induced failure (DB-05) | `python3 -m unittest tests.test_staging.ProductionIsolationTest -v` (real DSN) | 2/2 `ok` | ✓ PASS |
-| WR-02 bound: 74-byte identifier truncates to exactly 63 bytes, no collision between two distinct inputs | direct Python call to `_bounded_composed_identifier` | 63/63 bytes, distinct outputs | ✓ PASS |
-| WR-04 vocabulary: `_VALID_TYPED_COLUMN_NAMES` has exactly 28 members | direct Python inspection | `len() == 28` | ✓ PASS |
-| WR-03 wired: `db_validation_query_failed` in the exact-equality vocabulary test | `tests/test_evidence.py::test_every_reason_has_one_fixed_stage_and_remediation_hint` | present at `db_validation` stage | ✓ PASS |
-| Full non-DB-driven test suite | `python3 -m unittest discover -s tests -q` (no DSN) | 507 tests, OK, 32 skipped (expected — no live DSN) | ✓ PASS |
-| Full test suite with real DSN (non-superuser) | `python3 -m unittest discover -s tests -q` (real DSN) | 507 tests, OK, 5 skipped (exactly `PrivilegePreflightTest`'s 5 methods — they need a separate superuser DSN this session lacked) | ✓ PASS |
-| Live catalogue check: `public` unchanged | `psql \d public.*` against the real server | Exactly `geography_columns`/`geometry_columns` (views) + `spatial_ref_sys` (table) — PostGIS's own objects, nothing else | ✓ PASS |
-| Live catalogue check: `vicmap_staging` holds only legitimate staging tables | `psql \dt vicmap_staging.*` | 5 timestamp-named ADDRESS staging tables from prior legitimate live runs, no probe/throwaway debris | ✓ PASS |
-| Diff check: WR-fixes never touched `preflight_staging_privileges`/`read_database_identity`/`_connect` | `git diff aa4aa92^..86ab35b -- vicmap_acquire/staging.py` | No hunk touches those three functions | ✓ PASS (confirms prior-round DB-02 evidence carries forward unchanged) |
+| Connection identity (DB-01) | `python -m unittest tests.test_staging.ConnectionIdentityTest -v` (real DSN) | 1/1 `ok` | ✓ PASS |
+| Privilege preflight, all 5 methods including fail-closed branches (DB-02) | `python -m unittest tests.test_staging.PrivilegePreflightTest -v` (real superuser DSN, available this session) | 5/5 `ok` | ✓ PASS |
+| Load + no-public-leak (DB-03) | `python -m unittest tests.test_staging.LoadIntegrationTest -v` (real DSN) | 1/1 `ok` | ✓ PASS |
+| Blocking validation (DB-04) | `python -m unittest tests.test_staging.ValidationTest -v` (real DSN) | 10/10 `ok` | ✓ PASS |
+| Independent ogrinfo oracle (DB-04) | `python -m unittest tests.test_staging.ValidationOgrinfoOracleTest -v` (real DSN) | 1/1 `ok` | ✓ PASS |
+| Post-validation DDL (DB-04) | `python -m unittest tests.test_staging.PostValidationDdlTest -v` (real DSN) | 10/10 `ok` | ✓ PASS |
+| Production isolation on induced failure (DB-05) | `python -m unittest tests.test_staging.ProductionIsolationTest -v` (real DSN) | 2/2 `ok` | ✓ PASS |
+| PROHIB-08 mechanism (not_applicable ValueError guard) | `python -m unittest tests.test_evidence -v` | 83/83 `ok` | ✓ PASS |
+| Full test suite, both live DSNs set | `python -m unittest discover -s tests` | 704 tests, OK, 0 skipped | ✓ PASS |
+| Live catalogue check: `public` unchanged | `psql \dt public.*` / `\dv public.*` against the real server | Exactly `spatial_ref_sys` (table) + `geography_columns`/`geometry_columns` (views) -- PostGIS's own objects, nothing else | ✓ PASS |
+| Live catalogue check: `vicmap` holds only legitimately promoted tables | `psql \dt vicmap.*` | 1 table (`vmadd_address`), a Phase-4 promotion, not a Phase-3 leak | ✓ PASS |
+| Live catalogue check: `vicmap_audit` holds only Phase-4/05.1 audit tables | `psql \dt vicmap_audit.*` | `publication`, `staging_validation` -- both additive, neither touches `public` | ✓ PASS |
+| Destructive-SQL grep: `staging.py`/`stage_order.py` | `grep -inE "\bDROP\b\|\bTRUNCATE\b\|\bRENAME\b\|\bCASCADE\b"` | 1 hit, English prose "connection drop" in a docstring -- zero executable SQL | ✓ PASS |
+| Diff check: shared-file changes since prior digest are additive only | `git diff 86ab35b..HEAD -- vicmap_acquire/staging.py vicmap_acquire/evidence.py stage_order.py read_mailbox.py vicmap.toml flake.nix db/provision_vicmap_loader.sql` | No hunk modifies a Phase-3-owned function's existing body; `stage_order.py`'s one new call to `record_validation` runs strictly after `run_staging` succeeds | ✓ PASS |
 
 ### Anti-Patterns Found
 
-`grep -n -E "TBD|FIXME|XXX|TODO|HACK|PLACEHOLDER" ` across all files this phase modified (`vicmap_acquire/staging.py`, `vicmap_acquire/evidence.py`, `vicmap_acquire/manifest.py`, `stage_order.py`, `read_mailbox.py`, `db/provision_vicmap_loader.sql`, `vicmap.toml`, `flake.nix`) returns one hit, a docstring's literal wording ("ASCII-escaped `\\uXXXX`" in `manifest.py`, referring to JSON escape syntax, not a debt marker) — not a debt marker, no referenced follow-up needed.
+`grep -n -E "TBD|FIXME|XXX|TODO|HACK|PLACEHOLDER"` across every file this phase's `covered_files` list marks as an impl file (`vicmap_acquire/staging.py`, `vicmap_acquire/evidence.py`, `vicmap_acquire/manifest.py`, `stage_order.py`, `read_mailbox.py`, `db/provision_vicmap_loader.sql`, `vicmap.toml`, `flake.nix`) returns one hit: a docstring's literal wording ("ASCII-escaped `\uXXXX`" in `manifest.py`, JSON escape syntax, not a debt marker) -- unchanged since the prior round, no referenced follow-up needed.
 
-`grep -inE "\bDROP\b|\bTRUNCATE\b|\bRENAME\b|\bCASCADE\b"` across `vicmap_acquire/staging.py` and `stage_order.py` returns zero matches.
+`grep -inE "\bDROP\b|\bTRUNCATE\b|\bRENAME\b|\bCASCADE\b"` across `vicmap_acquire/staging.py` and `stage_order.py` returns one hit, the English word "drop" inside a Phase-4 docstring ("connection drop mid-insert") -- not executable SQL.
 
-Code review (`03-REVIEW.md`): 0 critical, 6 warning (WR-01..WR-06, all fixed per `03-REVIEW-FIX.md` and independently re-confirmed live this session), 2 info (IN-01/IN-02, explicitly out of scope, non-blocking). No new anti-patterns found in this round's re-read of the current tree.
+Code review (`03-REVIEW.md`/`03-REVIEW-FIX.md`): 0 critical, 6 warning (WR-01..WR-06, all fixed, re-confirmed live this session), 2 info (IN-01/IN-02, explicitly out of scope). No new anti-patterns found in this round's re-read.
+
+**Info -- open backlog ledger items (out of scope for Phase 3, not blockers):**
+
+| Ledger ID | Backlog | Description |
+|-----------|---------|--------------|
+| WINDOWS.md #2 + #7 | Phase 999.1 | GDA94<->GDA2020 Vicgrid transform selects the grid-free Helmert operation, not the vendored ICSM grid, because PROJ's own accuracy metadata ranks Helmert higher (~2 mm difference on a real ADDRESS point). Explicitly assessed as an architectural decision in 03-06-SUMMARY.md, not a code defect; see PROHIB-09 override below. |
+
+**Warning -- open backlog ledger item (out of scope for Phase 3, not a blocker):**
+
+| Ledger ID | Backlog | Description |
+|-----------|---------|--------------|
+| WINDOWS.md #4 | Phase 999.2 | `db/provision_vicmap_loader.sql` assumes the target database already exists; a fresh server needs a manual `CREATE DATABASE` first. Documented deviation, tracked for a future plan, not a Phase 3 must-have. |
 
 ### Requirements Coverage
 
@@ -155,32 +164,34 @@ Code review (`03-REVIEW.md`): 0 critical, 6 warning (WR-01..WR-06, all fixed per
 | DB-04 | ✓ SATISFIED | Truth 4 |
 | DB-05 | ✓ SATISFIED | Truth 5 |
 
-REQUIREMENTS.md marks all five `[x]` complete, status "Complete" in its traceability table (lines 96-100). No orphaned requirements: REQUIREMENTS.md maps exactly DB-01..DB-05 to Phase 3 (line 84-100), and all five appear across the six plans' `requirements` frontmatter fields (03-01: DB-01/03/04; 03-02: DB-01/02/05; 03-03: DB-01/02/03/04; 03-04: DB-01/02/03; 03-05: DB-04; 03-06: DB-03/05) — every requirement ID is claimed by at least one plan, and DB-01..DB-05 are each claimed by at least two.
+REQUIREMENTS.md marks all five `[x]` complete, status "Complete" in its traceability table. No orphaned requirements: REQUIREMENTS.md maps exactly DB-01..DB-05 to Phase 3, and all five appear across the six plans' `requirements` frontmatter fields (03-01: DB-01/03/04; 03-02: DB-01/02/05; 03-03: DB-01/02/03; 03-04: DB-01/02/03; 03-05: DB-04; 03-06: DB-03/05) -- every requirement ID is claimed by at least one plan, and each of DB-01..DB-05 is claimed by at least two.
 
 ### Prohibitions (must_haves.prohibitions)
 
-Two judgment-tier prohibitions, both self-flagged `status: "unresolved"`, `verification: null` in their owning plan's frontmatter ("Flagged-unverified by the spec-less prohibition probe; no wired-check descriptor is available"). Per ADR-550's mode-dependent soft gate, this autonomous verification records a non-authoritative LLM-judge verdict for each and routes both to human sign-off rather than silently folding them into a passed verdict — see `human_verification` below for the full evidence trail.
+Three judgment-tier prohibitions across the six plans, all self-flagged `status: "unresolved"`, `verification: null` ("Flagged-unverified by the spec-less prohibition probe; no wired-check descriptor is available"). Per ADR-550's mode-dependent soft gate, an LLM-judge verdict is non-authoritative for each; PROHIB-08 and PROHIB-10 already carry a human sign-off from the prior verification round (preserved below, and re-confirmed by fresh live evidence this session). PROHIB-09 is resolved this round via a formal override referencing the pre-existing 2026-09-21 architectural decision (see `overrides` in frontmatter) -- it does not require a fresh human sign-off because the underlying deviation was already decided by a human and is tracked as a non-blocking backlog item, per this round's explicit scope instruction.
 
-| ID | Requirement | Statement | LLM-judge verdict | Confidence |
-|----|-------------|-----------|--------------------|------------|
-| PROHIB-08 | DB-04 | MUST NOT present a validation result as complete when a check was skipped or a geometry was repaired | **HELD** | High — enforced structurally by `ValueError` in `SuccessEvent.staging_layer_validated`, live-reconfirmed this session |
-| PROHIB-10 | DB-05 | MUST NOT drop, truncate, rename, or otherwise destroy any existing table, index, or schema | **HELD** | High — zero DROP/TRUNCATE/RENAME/CASCADE in the codebase; live catalogue independently checked clean this session |
+| ID | Requirement | Statement | Verdict | Basis |
+|----|-------------|-----------|---------|-------|
+| PROHIB-08 | DB-04 | MUST NOT present a validation result as complete when a check was skipped or a geometry was repaired | **HELD** -- human sign-off (2026-09-23), reconfirmed live this session | `SuccessEvent.staging_layer_validated`'s `ValueError` guard; `tests/test_evidence.py` 83/83 `ok` this session |
+| PROHIB-09 | DB-03 | MUST NOT report a layer as successfully staged when coordinates were produced by a grid-free, Helmert, or ballpark fallback operation | **PASSED (override)** -- ballpark fallback IS blocked (fixed 03-04); Helmert-vs-grid selection is an accepted architectural deviation, backlog 999.1 | 03-06-SUMMARY.md "Grid Question -- Settled, Not Left Open" (`human_judgment: true`, 2026-09-21); WINDOWS.md #2/#7 |
+| PROHIB-10 | DB-05 | MUST NOT drop, truncate, rename, or otherwise destroy any existing table, index, or schema | **HELD** -- human sign-off (2026-09-23), reconfirmed live this session | Zero destructive-SQL keywords in code; live catalogue independently checked clean this session; `ProductionIsolationTest` 2/2 `ok` |
 
 ### Gaps Summary
 
-No functional gaps. All 5 roadmap success criteria and every plan-level must-have across all six plans were independently re-verified against the current tree, with live evidence gathered fresh this session (not merely carried forward) for everything except `preflight_staging_privileges`'s fail-closed branches — for which no code changed since the prior round's orchestrator-verified live run, confirmed by `git diff`. The WR-01..WR-06 code-review fixes that made the prior verification stale were checked line-by-line against the current source and, where the fixed code path is reachable without superuser privilege, directly re-exercised live against a real PostGIS server this session — all passed.
+No functional gaps. All 5 roadmap success criteria and every plan-level must-have across all six plans were re-verified against the current tree, with fresh live evidence gathered this session for every Phase-3-owned function -- including, for the first time in this phase's verification history, `PrivilegePreflightTest`'s fail-closed branches run live in the same session as everything else (both DSNs were available). Every change to a shared file since the prior digest (Phase 4 and 05.1 work) was diffed line-by-line and confirmed additive, touching no Phase-3-owned function body.
 
-The only reason this round routes to `human_needed` rather than `passed` is procedural, not functional: two prohibitions in the PLAN frontmatter (PROHIB-08, PROHIB-10) are self-flagged as judgment-tier and unresolved by their owning plans, and per this workflow's ADR-550 rule a judgment-tier prohibition must always surface for human sign-off rather than being silently absorbed into a passed verdict — regardless of how strong the supporting evidence is. Both are assessed HELD with high confidence above; a human just needs to confirm and close them (e.g. via `gsd-tools windows` or by editing the owning PLAN's prohibition `status` field), after which a re-run of this verifier should score `passed`.
+Two documentation gaps in the prior round are corrected here: (1) the prior report's body said "Status: human_needed" while its own frontmatter and Human Sign-Off section said passed -- this round's body is consistent with its frontmatter; (2) the prior report's Prohibitions/human_verification sections omitted PROHIB-09 entirely -- this round adds it and resolves it via an override that references the pre-existing, dated architectural decision, so it does not reopen human sign-off. Both are recorded under `re_verification.gaps_closed` above.
 
 ---
 
-## Human Sign-Off (ADR-550 judgment-tier gate)
+## Human Sign-Off (ADR-550 judgment-tier gate) -- carried forward verbatim
 
 - **Signed off:** 2026-09-23 by operator (bhillermann@vegetationlink.com.au), during autonomous re-verification.
-- **Items:** PROHIB-08 (DB-04) and PROHIB-10 (DB-05) — both accepted as HELD.
-- **Basis:** LLM-judge verdict HELD/high-confidence plus the live evidence recorded above (real PostGIS run, 507 tests, zero destructive-SQL keywords, clean live catalogue). This is a human sign-off on a judgment-tier soft gate, **not** a wired machine check — no automated descriptor exists for these two prohibitions. Status advanced to `passed` on the strength of that sign-off.
+- **Items:** PROHIB-08 (DB-04) and PROHIB-10 (DB-05) -- both accepted as HELD.
+- **Basis:** LLM-judge verdict HELD/high-confidence plus the live evidence recorded above (real PostGIS run, 507 tests at the time, zero destructive-SQL keywords, clean live catalogue). This is a human sign-off on a judgment-tier soft gate, **not** a wired machine check -- no automated descriptor exists for these two prohibitions. Status advanced to `passed` on the strength of that sign-off.
+- **This round:** both prohibitions independently reconfirmed HELD against a larger live test surface (704 tests, both DSNs, `PrivilegePreflightTest` included) and a freshly re-checked live catalogue. No regression found. Sign-off is not downgraded.
 
 ---
 
-_Verified: 2026-09-23_
+_Verified: 2026-09-30_
 _Verifier: Claude (gsd-verifier)_

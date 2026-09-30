@@ -4,6 +4,10 @@ phase: 03-validated-postgis-staging
 source: [03-VERIFICATION.md]
 started: 2026-09-21T09:40:00Z
 updated: 2026-09-22T00:00:00Z
+audit_acknowledged:
+  milestone: v0.1
+  at: 2026-09-29
+  gap_snapshot: "passed::scenarios=0"
 ---
 
 ## Current Test
@@ -21,6 +25,7 @@ expected: |
     - a role holding CREATE on `public`
     - a superuser role
     - an SRID not registered in `spatial_ref_sys`
+
 result: passed 2026-09-22
 
 ## Tests
